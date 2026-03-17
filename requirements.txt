@@ -1,30 +1,30 @@
 # FastAPI & Server
-fastapi==0.104.1
-uvicorn[standard]==0.24.0
-pydantic==2.5.0
-pydantic-settings==2.1.0
-python-multipart==0.0.6
+fastapi>=0.115.0,<1.0.0
+uvicorn[standard]>=0.24.0
+pydantic>=2.5.0
+pydantic-settings>=2.1.0
+python-multipart>=0.0.6
 
 # CORS & HTTP
-httpx==0.25.2
-aiofiles==23.2.1
+httpx>=0.25.2
+aiofiles>=23.2.1
 
 # AI Services - Text
-anthropic==0.7.7          # Claude AI
-openai>=2.0.0             # ChatGPT, DALL-E, TTS (2.x required for httpx 0.28+ compatibility)
+anthropic>=0.7.7          # Claude AI
+openai>=2.0.0             # ChatGPT, DALL-E, TTS
 google-genai>=1.51.0      # Google GenAI SDK for image generation (Nano Banana 2)
 google-generativeai>=0.8.0  # Google Gemini API for audio transcription
 
 # AI Services - Image
-replicate==0.22.0         # Image models (Flux, etc.)
-Pillow==10.1.0            # Image processing
+replicate>=0.22.0         # Image models (Flux, etc.)
+Pillow>=10.1.0            # Image processing
 
 # AI Services - Audio
-elevenlabs==0.2.26        # TTS & Music generation
-pydub==0.25.1             # Audio processing and manipulation
+elevenlabs==0.2.26        # TTS & Music generation (pinned - breaking changes in newer versions)
+pydub>=0.25.1             # Audio processing and manipulation
 
 # Utilities
-python-dotenv==1.0.0
-requests==2.31.0
-PyPDF2==3.0.1             # PDF processing for document analysis
+python-dotenv>=1.0.0
+requests>=2.31.0
+PyPDF2>=3.0.1             # PDF processing for document analysis
 
