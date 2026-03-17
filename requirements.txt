@@ -28,4 +28,3 @@ python-dotenv>=1.0.0
 requests>=2.31.0
 PyPDF2>=3.0.1             # PDF processing for document analysis
 certifi                   # TLS CA certificates
-
