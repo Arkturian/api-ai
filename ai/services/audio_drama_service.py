@@ -732,11 +732,46 @@ class AudioDramaGenerator(SpeechGenerator):
         # Use provider from request config
         provider = self.request.config.provider
         if provider == "elevenlabs":
+            from ai.services.narration_service import NarrationService, NarrationRequest, NarrationCharacter, NarrationContext, NarrationConfig
             from ai.services.tts_models import ElevenLabsTTSConfig
+
             el_config = self.request.config.elevenlabs or ElevenLabsTTSConfig()
-            # Use voice_id from original request, not from Gemini voice mapping
-            el_config.voice_id = self.request.content.voice
-            audio_bytes = await tts_service.generate_elevenlabs_tts(text, el_config)
+            # Resolve voice_id: per-speaker mapping or fallback to request default
+            voice_id = self.request.content.voice
+            speaker_voices = (self.request.config.voice_mapping or {}).get(speaker)
+            if isinstance(speaker_voices, dict) and 'voice_id' in speaker_voices:
+                voice_id = speaker_voices['voice_id']
+            elif isinstance(speaker_voices, str) and len(speaker_voices) > 15:
+                # Looks like an ElevenLabs voice_id (not an OpenAI voice name)
+                voice_id = speaker_voices
+
+            # Use NarrationService for dramatic preprocessing + ElevenLabs TTS
+            narration = NarrationService()
+            narr_req = NarrationRequest(
+                text=text,
+                character=NarrationCharacter(
+                    name=speaker,
+                    voice_id=voice_id,
+                    personality=voice_style or None,
+                    speaking_style=None,
+                ),
+                context=NarrationContext(
+                    type="dialog_chunk",
+                    mood=segment.get("voice_style") or "neutral",
+                    language=getattr(self.request.content, 'language', 'de'),
+                ),
+                config=NarrationConfig(
+                    stability=el_config.stability,
+                    clarity=el_config.clarity,
+                    model_id=el_config.model_id,
+                    preprocessing=True,
+                ),
+            )
+            # Step 1: Dramatic preprocessing
+            dramatic_text = await narration._preprocess_text(narr_req)
+            segment['dramatic_script'] = dramatic_text
+            # Step 2: TTS with enriched text (no save — AudioDrama handles that)
+            audio_bytes = await narration._generate_tts(dramatic_text, narr_req)
         else:
             config = OpenAITTSConfig(voice=voice, speed=self.request.content.speed, output_format=self.request.config.output_format)
             audio_bytes = await tts_service.generate_openai_tts(text, config)
@@ -744,7 +779,7 @@ class AudioDramaGenerator(SpeechGenerator):
         chunk_path = self.temp_dir / f"dialog_{uuid.uuid4()}.{self.request.config.output_format}"
         chunk_path.write_bytes(audio_bytes)
         # annotate selected voice for UI purposes
-        segment['chosen_voice'] = self.request.content.voice if provider == "elevenlabs" else voice
+        segment['chosen_voice'] = voice_id if provider == "elevenlabs" else voice
         return chunk_path
 
     async def _source_single_sfx(self, cue):
