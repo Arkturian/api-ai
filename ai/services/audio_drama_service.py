@@ -136,7 +136,7 @@ class AudioDramaGenerator(SpeechGenerator):
             "3. Determine the likely gender or type for each speaker (male, female, ai, narrator). "
             "4. For each line of dialog, determine if a specific `voice_style` (e.g., 'whispering', 'shouting') is implied by the context. "
             f"5. Background music requested: {music_requested}. If and only if true, generate a detailed English music prompt suitable for a ~30s background track (genre, mood, tempo/BPM, instrumentation, energy, vocals=none). "
-            "6. Add timing guidance for production: include optional 'pause_before_ms' and 'pause_after_ms' for dialog cues (integers, milliseconds). For any music cue provide 'length_ms' and 'start_offset_ms' (milliseconds from start before music begins), and optionally 'intro_pause_ms' (milliseconds pause before first dialog). "
+            "6. Add timing guidance for production: include optional 'pause_before_ms' and 'pause_after_ms' for dialog cues (integers, milliseconds). Keep pauses short and natural: typical pause_before_ms 0-300ms, typical pause_after_ms 100-400ms. Only use longer pauses (up to 800ms) for dramatic scene breaks or significant mood shifts. Default to 0 if no pause is needed. For any music cue provide 'length_ms' and 'start_offset_ms' (milliseconds from start before music begins), and optionally 'intro_pause_ms' (milliseconds pause before first dialog). "
             "7. Structure the output as a single JSON object with two keys: 'production_cues' and 'music'. "
             "- 'production_cues': A single list containing all dialog and sfx cues in the correct order they appear in the script. "
             "  - Dialog cues should be objects with 'type': 'dialog', 'speaker', 'gender', 'voice_style' (optional), 'text', and optional 'pause_before_ms'/'pause_after_ms'. The 'text' MUST be in the same language as the input. "
@@ -682,104 +682,123 @@ class AudioDramaGenerator(SpeechGenerator):
             pass
         return mixed_bytes
 
+    def _resolve_voice_profile(self, speaker: str, gender: str):
+        """Resolve voice configuration for a speaker from voice_mapping.
+
+        Returns (provider, config_dict) where config_dict has all TTS parameters.
+        Supports three voice_mapping formats:
+          - str: OpenAI voice name (backward compat)
+          - dict with voice_id: ElevenLabs voice profile
+          - dict with default/secondary: legacy OpenAI mapping
+        """
+        from ai.services.tts_models import VoiceProfile
+        voice_mapping = self.request.config.voice_mapping or {}
+        entry = voice_mapping.get(speaker)
+
+        # Case 1: VoiceProfile-style dict with voice_id (new multi-voice format)
+        if isinstance(entry, dict) and 'voice_id' in entry:
+            return entry.get('provider', 'elevenlabs'), entry
+
+        # Case 2: Legacy dict with default/secondary OpenAI voices
+        if isinstance(entry, dict) and 'default' in entry:
+            voice_name = entry.get('default', 'nova')
+            return 'openai', {'voice': voice_name}
+
+        # Case 3: Simple string = OpenAI voice name
+        if isinstance(entry, str):
+            return 'openai', {'voice': entry}
+
+        # Case 4: No mapping — auto-assign
+        default_voices = {
+            "male": "onyx", "female": "nova",
+            "ai": "onyx" if self.request.config.ai_gender == 'male' else "nova",
+            "narrator": "shimmer"
+        }
+        if speaker in self._speaker_assigned_voice:
+            voice = self._speaker_assigned_voice[speaker]
+        elif speaker.lower() == 'narrator':
+            desired = getattr(self.request.config, 'narrator_gender', None)
+            if desired in ('male', 'female'):
+                voice = default_voices.get(desired, 'shimmer')
+            else:
+                normalized = self._normalize_gender_label(gender)
+                voice = default_voices.get(normalized, 'shimmer')
+            self._speaker_assigned_voice[speaker] = voice
+        else:
+            voice = self._pick_distinct_voice(gender)
+            self._speaker_assigned_voice[speaker] = voice
+
+        # If global provider is elevenlabs, use the global voice_id as fallback
+        if self.request.config.provider == "elevenlabs":
+            return 'elevenlabs', {'voice_id': self.request.content.voice}
+
+        return 'openai', {'voice': voice}
+
     async def _generate_single_dialog_chunk(self, segment):
-        from ai.services.tts_models import OpenAITTSConfig
-        
+        from ai.services.tts_models import OpenAITTSConfig, ElevenLabsTTSConfig
+
         speaker = segment.get("speaker", "Unknown")
         text = segment.get("text", "")
         gender = self._normalize_gender_label(segment.get("gender", ""))
         voice_style = segment.get("voice_style")
 
-        voice_mapping = self.request.config.voice_mapping or {}
-        default_voices = {
-            "male": "onyx", "female": "nova", "ai": "onyx" if self.request.config.ai_gender == 'male' else "nova", "narrator": "shimmer"
-        }
+        # Resolve per-speaker voice profile
+        provider, voice_config = self._resolve_voice_profile(speaker, gender)
 
-        speaker_voices = voice_mapping.get(speaker, {})
-        
-        if voice_style and isinstance(speaker_voices, dict) and 'secondary' in speaker_voices:
-            voice = speaker_voices['secondary']
-        elif isinstance(speaker_voices, dict) and 'default' in speaker_voices:
-            voice = speaker_voices['default']
-        elif isinstance(speaker_voices, str):
-            voice = speaker_voices
-        else:
-            # No explicit mapping: ensure distinct voice per speaker across the dialog
-            if speaker in self._speaker_assigned_voice:
-                voice = self._speaker_assigned_voice[speaker]
-            else:
-                # narrator gets narrator default explicitly
-                if speaker.lower() == 'narrator':
-                    # 1) If caller explicitly set narrator_gender, honor it
-                    try:
-                        desired = getattr(self.request.config, 'narrator_gender', None)
-                    except Exception:
-                        desired = None
-                    if desired in ('male','female'):
-                        voice = default_voices.get(desired, default_voices.get('narrator','shimmer'))
-                    else:
-                        # 2) Otherwise use the ANALYSIS gender for narrator if present
-                        normalized_gender = self._normalize_gender_label(gender)
-                        if normalized_gender in ('male','female'):
-                            voice = default_voices.get(normalized_gender, default_voices.get('narrator','shimmer'))
-                        else:
-                            # 3) Fallback narrator default
-                            voice = default_voices.get('narrator', 'shimmer')
-                else:
-                    voice = self._pick_distinct_voice(gender)
-                self._speaker_assigned_voice[speaker] = voice
-        
-        # Use provider from request config
-        provider = self.request.config.provider
+        # Apply per-line overrides from Gemini analysis (voice_style hints)
+        overrides = segment.get("overrides") or {}
+
         if provider == "elevenlabs":
-            from ai.services.narration_service import NarrationService, NarrationRequest, NarrationCharacter, NarrationContext, NarrationConfig
-            from ai.services.tts_models import ElevenLabsTTSConfig
+            voice_id = voice_config.get('voice_id', self.request.content.voice)
+            stability = overrides.get('stability', voice_config.get('stability', 0.5))
+            clarity = overrides.get('clarity', voice_config.get('clarity', 0.75))
+            model_id = voice_config.get('model_id', 'eleven_multilingual_v2')
 
-            el_config = self.request.config.elevenlabs or ElevenLabsTTSConfig()
-            # Resolve voice_id: per-speaker mapping or fallback to request default
-            voice_id = self.request.content.voice
-            speaker_voices = (self.request.config.voice_mapping or {}).get(speaker)
-            if isinstance(speaker_voices, dict) and 'voice_id' in speaker_voices:
-                voice_id = speaker_voices['voice_id']
-            elif isinstance(speaker_voices, str) and len(speaker_voices) > 15:
-                # Looks like an ElevenLabs voice_id (not an OpenAI voice name)
-                voice_id = speaker_voices
-
-            # Use NarrationService for dramatic preprocessing + ElevenLabs TTS
-            narration = NarrationService()
-            narr_req = NarrationRequest(
-                text=text,
-                character=NarrationCharacter(
-                    name=speaker,
-                    voice_id=voice_id,
-                    personality=voice_style or None,
-                    speaking_style=None,
-                ),
-                context=NarrationContext(
-                    type="dialog_chunk",
-                    mood=segment.get("voice_style") or "neutral",
-                    language=getattr(self.request.content, 'language', 'de'),
-                ),
-                config=NarrationConfig(
-                    stability=el_config.stability,
-                    clarity=el_config.clarity,
-                    model_id=el_config.model_id,
-                    preprocessing=True,
-                ),
-            )
-            # Step 1: Dramatic preprocessing
-            dramatic_text = await narration._preprocess_text(narr_req)
-            segment['dramatic_script'] = dramatic_text
-            # Step 2: TTS with enriched text (no save — AudioDrama handles that)
-            audio_bytes = await narration._generate_tts(dramatic_text, narr_req)
+            # Use NarrationService for dramatic preprocessing if available
+            try:
+                from ai.services.narration_service import NarrationService, NarrationRequest, NarrationCharacter, NarrationContext, NarrationConfig
+                narration = NarrationService()
+                narr_req = NarrationRequest(
+                    text=text,
+                    character=NarrationCharacter(
+                        name=speaker,
+                        voice_id=voice_id,
+                        personality=voice_style or None,
+                        speaking_style=None,
+                    ),
+                    context=NarrationContext(
+                        type="dialog_chunk",
+                        mood=segment.get("voice_style") or "neutral",
+                        language=getattr(self.request.content, 'language', 'de'),
+                    ),
+                    config=NarrationConfig(
+                        stability=stability,
+                        clarity=clarity,
+                        model_id=model_id,
+                        preprocessing=True,
+                    ),
+                )
+                dramatic_text = await narration._preprocess_text(narr_req)
+                segment['dramatic_script'] = dramatic_text
+                audio_bytes = await narration._generate_tts(dramatic_text, narr_req)
+            except ImportError:
+                # Fallback: direct ElevenLabs TTS without dramatic preprocessing
+                el_config = ElevenLabsTTSConfig(
+                    voice_id=voice_id, model_id=model_id,
+                    stability=stability, clarity=clarity,
+                )
+                audio_bytes = await tts_service.generate_elevenlabs_tts(text, el_config)
+            chosen_voice = voice_id
         else:
-            config = OpenAITTSConfig(voice=voice, speed=self.request.content.speed, output_format=self.request.config.output_format)
+            voice_name = voice_config.get('voice', 'nova')
+            speed = overrides.get('speed', voice_config.get('speed', self.request.content.speed))
+            config = OpenAITTSConfig(voice=voice_name, speed=speed, output_format=self.request.config.output_format)
             audio_bytes = await tts_service.generate_openai_tts(text, config)
+            chosen_voice = voice_name
 
         chunk_path = self.temp_dir / f"dialog_{uuid.uuid4()}.{self.request.config.output_format}"
         chunk_path.write_bytes(audio_bytes)
-        # annotate selected voice for UI purposes
-        segment['chosen_voice'] = voice_id if provider == "elevenlabs" else voice
+        segment['chosen_voice'] = chosen_voice
         return chunk_path
 
     async def _source_single_sfx(self, cue):
