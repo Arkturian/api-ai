@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field
-from typing import Literal, Optional, Dict
+from typing import Literal, Optional, Dict, Any, Union
 
 # --- Pydantic Models for TTS Configuration ---
 # Moved here to prevent circular imports
@@ -16,6 +16,19 @@ class ElevenLabsTTSConfig(BaseModel):
     stability: float = Field(0.5, ge=0.0, le=1.0, description="Voice stability, from 0.0 to 1.0")
     clarity: float = Field(0.75, ge=0.0, le=1.0, description="Voice clarity/similarity, from 0.0 to 1.0")
 
+class VoiceProfile(BaseModel):
+    """Per-character voice definition for multi-voice audiobook production."""
+    provider: str = Field("elevenlabs", description="TTS provider: 'elevenlabs' or 'openai'")
+    # ElevenLabs settings
+    voice_id: Optional[str] = Field(None, description="ElevenLabs voice ID")
+    stability: float = Field(0.5, ge=0.0, le=1.0)
+    clarity: float = Field(0.75, ge=0.0, le=1.0)
+    model_id: str = Field("eleven_multilingual_v2")
+    # OpenAI settings
+    voice: Optional[str] = Field(None, description="OpenAI voice name")
+    # Shared
+    speed: float = Field(1.0, ge=0.25, le=4.0)
+
 class TTSContent(BaseModel):
     text: str
     language: str = "de-DE"
@@ -31,8 +44,8 @@ class TTSConfig(BaseModel):
     output_format: str = "mp3"
     openai: Optional[OpenAITTSConfig] = None
     elevenlabs: Optional[ElevenLabsTTSConfig] = None
-    # For dialog generation
-    voice_mapping: Optional[Dict[str, str]] = None
+    # For dialog generation — accepts str (OpenAI voice name), dict, or VoiceProfile per speaker
+    voice_mapping: Optional[Dict[str, Any]] = None
     dialog_mode: bool = False
     ai_gender: Literal['male', 'female'] = 'female'
     narrator_gender: Optional[Literal['male', 'female']] = None

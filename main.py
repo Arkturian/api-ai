@@ -23,7 +23,7 @@ from fastapi.responses import JSONResponse
 import logging
 
 # Import routes
-from ai.routes import text_ai_routes, image_ai_routes, audio_ai_routes, dialog_routes, video_ai_routes
+from ai.routes import text_ai_routes, image_ai_routes, audio_ai_routes, dialog_routes, video_ai_routes, narration_routes
 
 # Setup logging
 logging.basicConfig(
@@ -56,6 +56,7 @@ app.include_router(image_ai_routes.router, prefix="/ai", tags=["Image AI"])
 app.include_router(video_ai_routes.router, prefix="/ai", tags=["Video AI"])
 app.include_router(audio_ai_routes.router, prefix="/ai", tags=["Audio AI"])
 app.include_router(dialog_routes.router, prefix="/ai/dialog", tags=["Dialog System"])
+app.include_router(narration_routes.router, prefix="/ai", tags=["Narration TTS"])
 
 # Health check
 @app.get("/health")
