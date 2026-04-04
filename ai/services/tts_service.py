@@ -515,60 +515,125 @@ async def generate_openai_tts(text: str, config: OpenAITTSConfig) -> bytes:
         raise e
 
 
-async def generate_elevenlabs_tts(text: str, config: ElevenLabsTTSConfig) -> bytes:
+async def generate_elevenlabs_tts(text: str, config: ElevenLabsTTSConfig, with_timestamps: bool = False):
     """
     Generates audio from text using ElevenLabs Text-to-Speech API.
     Handles long texts by chunking and concatenating the audio.
+
+    If with_timestamps=True, returns (audio_bytes, word_timestamps) where
+    word_timestamps is a list of {"word": str, "start": float, "end": float}.
+    Otherwise returns just audio_bytes (backward compatible).
     """
     try:
-        # Lazy import avoids ModuleNotFoundError during app startup/OpenAPI export
-        try:
-            from elevenlabs.client import AsyncElevenLabs
-        except ModuleNotFoundError as e:
-            raise RuntimeError("ElevenLabs support requires the 'elevenlabs' package. Install it with 'pip install elevenlabs'.") from e
-        client = AsyncElevenLabs(api_key=os.getenv("ELEVENLABS_API_KEY"))
-        
-        # ElevenLabs limit is around 5000 characters for their API
+        import httpx
+        import base64
+
+        api_key = os.getenv("ELEVENLABS_API_KEY")
+        if not api_key:
+            raise RuntimeError("ELEVENLABS_API_KEY not configured")
+
         text_chunks = chunk_text(text, 4500)
+        all_audio = b""
+        all_words = []
+        time_offset = 0.0
 
-        if len(text_chunks) == 1:
-            audio_stream = client.text_to_speech.convert(
-                text=text_chunks[0],
-                voice_id=config.voice_id,
-                model_id=config.model_id,
-                voice_settings={"stability": config.stability, "similarity_boost": config.clarity}
-            )
-            audio_bytes = b""
-            async for chunk in audio_stream:
-                audio_bytes += chunk
-            return audio_bytes
+        for i, chunk_text_str in enumerate(text_chunks):
+            if with_timestamps:
+                # Use REST API with-timestamps endpoint directly
+                async with httpx.AsyncClient(timeout=60) as http:
+                    resp = await http.post(
+                        f"https://api.elevenlabs.io/v1/text-to-speech/{config.voice_id}/with-timestamps",
+                        headers={"xi-api-key": api_key, "Content-Type": "application/json"},
+                        json={
+                            "text": chunk_text_str,
+                            "model_id": config.model_id,
+                            "voice_settings": {"stability": config.stability, "similarity_boost": config.clarity}
+                        }
+                    )
+                    resp.raise_for_status()
+                    data = resp.json()
 
-        # --- Handle multiple chunks ---
-        print(f"--- ElevenLabs TTS: Text too long, processing in {len(text_chunks)} chunks.")
-        temp_dir = Path(f"/tmp/tts_chunks_{uuid.uuid4()}")
-        temp_dir.mkdir()
-        audio_chunk_paths = []
+                audio_b64 = data.get("audio_base64", "")
+                chunk_audio = base64.b64decode(audio_b64)
+                all_audio += chunk_audio
 
-        for i, chunk in enumerate(text_chunks):
-            audio_stream = client.text_to_speech.convert(
-                text=chunk,
-                voice_id=config.voice_id,
-                model_id=config.model_id,
-                voice_settings={"stability": config.stability, "similarity_boost": config.clarity}
-            )
-            chunk_path = temp_dir / f"chunk_{i}.mp3"
-            with open(chunk_path, "wb") as f:
+                # Parse character-level alignment into word-level timestamps
+                alignment = data.get("alignment") or {}
+                chars = alignment.get("characters", [])
+                starts = alignment.get("character_start_times_seconds", [])
+                ends = alignment.get("character_end_times_seconds", [])
+
+                word = ""
+                word_start = 0.0
+                for ci, c in enumerate(chars):
+                    if c == " " or ci == len(chars) - 1:
+                        if ci == len(chars) - 1 and c != " ":
+                            word += c
+                        if word:
+                            word_end = ends[ci - 1] if c == " " else ends[ci]
+                            all_words.append({
+                                "word": word,
+                                "start": round(time_offset + word_start, 3),
+                                "end": round(time_offset + word_end, 3)
+                            })
+                        word = ""
+                        if ci + 1 < len(starts):
+                            word_start = starts[ci + 1]
+                    else:
+                        if not word:
+                            word_start = starts[ci]
+                        word += c
+
+                # Calculate chunk duration for offset of next chunk
+                if chunk_audio:
+                    chunk_dur = probe_audio_duration(chunk_audio)
+                    time_offset += chunk_dur
+
+                print(f"--- ElevenLabs TTS: Chunk {i+1}/{len(text_chunks)} with timestamps ({len(all_words)} words)")
+            else:
+                # Legacy path: streaming without timestamps
+                try:
+                    from elevenlabs.client import AsyncElevenLabs
+                except ModuleNotFoundError as e:
+                    raise RuntimeError("ElevenLabs support requires the 'elevenlabs' package.") from e
+                client = AsyncElevenLabs(api_key=api_key)
+                audio_stream = client.text_to_speech.convert(
+                    text=chunk_text_str,
+                    voice_id=config.voice_id,
+                    model_id=config.model_id,
+                    voice_settings={"stability": config.stability, "similarity_boost": config.clarity}
+                )
+                chunk_audio = b""
                 async for audio_chunk in audio_stream:
-                    f.write(audio_chunk)
-            audio_chunk_paths.append(chunk_path)
-            print(f"--- ElevenLabs TTS: Generated chunk {i+1}/{len(text_chunks)}")
+                    chunk_audio += audio_chunk
+                all_audio += chunk_audio
+                print(f"--- ElevenLabs TTS: Chunk {i+1}/{len(text_chunks)}")
 
-        return concatenate_audio_chunks(audio_chunk_paths, "mp3")
+        if with_timestamps:
+            return all_audio, all_words
+        return all_audio
 
     except Exception as e:
         print(f"--- ERROR [ElevenLabs TTS]: Failed to generate audio. Full traceback:")
         traceback.print_exc()
         raise e
+
+
+def probe_audio_duration(audio_bytes: bytes) -> float:
+    """Get duration of audio bytes using ffprobe."""
+    try:
+        import subprocess, tempfile, json as _json
+        with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as f:
+            f.write(audio_bytes)
+            tmp = f.name
+        result = subprocess.run(
+            ["ffprobe", "-v", "quiet", "-print_format", "json", "-show_format", tmp],
+            capture_output=True, text=True
+        )
+        os.unlink(tmp)
+        return float(_json.loads(result.stdout).get("format", {}).get("duration", 0.0))
+    except Exception:
+        return 0.0
 
 
 async def generate_gemini_tts(text: str, language: str, voice: str, speed: float) -> bytes:

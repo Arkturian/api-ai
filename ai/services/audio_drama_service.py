@@ -294,13 +294,16 @@ class AudioDramaGenerator(SpeechGenerator):
                 chunk_path = await self._generate_single_dialog_chunk(cue)
                 final_sequence_paths.append(chunk_path)
                 final_sequence_kinds.append('dialog')
-                sequence_meta.append({
+                meta_entry = {
                     "type":"dialog",
                     "speaker": cue.get("speaker"),
                     "voice_style": cue.get("voice_style"),
                     "text": cue.get("text"),
                     "chosen_voice": cue.get("chosen_voice")
-                })
+                }
+                if cue.get("word_timestamps"):
+                    meta_entry["word_timestamps"] = cue["word_timestamps"]
+                sequence_meta.append(meta_entry)
                 # Insert trailing pause if requested
                 if after_ms > 0:
                     silence = await asyncio.to_thread(tts_service.create_silence_chunk, after_ms, self.request.config.output_format, self.temp_dir)
@@ -782,12 +785,17 @@ class AudioDramaGenerator(SpeechGenerator):
                 segment['dramatic_script'] = dramatic_text
                 audio_bytes = await narration._generate_tts(dramatic_text, narr_req)
             except ImportError:
-                # Fallback: direct ElevenLabs TTS without dramatic preprocessing
+                # Fallback: direct ElevenLabs TTS with word-level timestamps
                 el_config = ElevenLabsTTSConfig(
                     voice_id=voice_id, model_id=model_id,
                     stability=stability, clarity=clarity,
                 )
-                audio_bytes = await tts_service.generate_elevenlabs_tts(text, el_config)
+                result = await tts_service.generate_elevenlabs_tts(text, el_config, with_timestamps=True)
+                if isinstance(result, tuple):
+                    audio_bytes, word_timestamps = result
+                    segment['word_timestamps'] = word_timestamps
+                else:
+                    audio_bytes = result
             chosen_voice = voice_id
         else:
             voice_name = voice_config.get('voice', 'nova')
