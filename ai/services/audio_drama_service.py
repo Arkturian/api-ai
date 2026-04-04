@@ -757,7 +757,8 @@ class AudioDramaGenerator(SpeechGenerator):
             clarity = overrides.get('clarity', voice_config.get('clarity', 0.75))
             model_id = voice_config.get('model_id', 'eleven_multilingual_v2')
 
-            # Use NarrationService for dramatic preprocessing if available
+            # Optional: dramatic preprocessing via NarrationService
+            tts_text = text
             try:
                 from ai.services.narration_service import NarrationService, NarrationRequest, NarrationCharacter, NarrationContext, NarrationConfig
                 narration = NarrationService()
@@ -783,19 +784,21 @@ class AudioDramaGenerator(SpeechGenerator):
                 )
                 dramatic_text = await narration._preprocess_text(narr_req)
                 segment['dramatic_script'] = dramatic_text
-                audio_bytes = await narration._generate_tts(dramatic_text, narr_req)
-            except ImportError:
-                # Fallback: direct ElevenLabs TTS with word-level timestamps
-                el_config = ElevenLabsTTSConfig(
-                    voice_id=voice_id, model_id=model_id,
-                    stability=stability, clarity=clarity,
-                )
-                result = await tts_service.generate_elevenlabs_tts(text, el_config, with_timestamps=True)
-                if isinstance(result, tuple):
-                    audio_bytes, word_timestamps = result
-                    segment['word_timestamps'] = word_timestamps
-                else:
-                    audio_bytes = result
+                tts_text = dramatic_text
+            except (ImportError, Exception) as e:
+                print(f"--- Audio Drama: NarrationService preprocessing skipped: {e}")
+
+            # ElevenLabs TTS with word-level timestamps
+            el_config = ElevenLabsTTSConfig(
+                voice_id=voice_id, model_id=model_id,
+                stability=stability, clarity=clarity,
+            )
+            result = await tts_service.generate_elevenlabs_tts(tts_text, el_config, with_timestamps=True)
+            if isinstance(result, tuple):
+                audio_bytes, word_timestamps = result
+                segment['word_timestamps'] = word_timestamps
+            else:
+                audio_bytes = result
             chosen_voice = voice_id
         else:
             voice_name = voice_config.get('voice', 'nova')
