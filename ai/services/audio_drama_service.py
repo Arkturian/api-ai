@@ -4,8 +4,6 @@ from pathlib import Path
 import uuid
 import httpx
 from fastapi import HTTPException
-import google.generativeai as genai
-
 from ai.services.speech_service import SpeechGenerator
 import time
 from ai.services import tts_service
@@ -104,77 +102,82 @@ class AudioDramaGenerator(SpeechGenerator):
             except Exception:
                 pass
             return override
-        print(f"DIALOG[{self.request.id}]: Analyzing script with Gemini…")
+        print(f"DIALOG[{self.request.id}]: Analyzing script with Claude Opus…")
         try:
             from ai.routes.dialog_routes import set_dialog_status
             set_dialog_status(self.request.id, phase="analyze", subphase="start")
         except Exception:
             pass
         t_start = time.time()
-        
-        # Load the example structure from the new file
-        try:
-            with open("prompt_example.json", "r") as f:
-                example_json = json.load(f)
-            example_str = json.dumps(example_json, indent=2)
-        except (FileNotFoundError, json.JSONDecodeError):
-            example_str = "{...}" # Fallback
 
         # Define the base prompt directly in the code
         lang = getattr(self.request.content, 'language', None) or 'original language of the input'
-        # Only request a generated music prompt if add_music is true AND no manual storage id is provided
         music_requested = bool(getattr(self.request.config, 'add_music', False)) and not bool(getattr(self.request.config, 'manual_music_storage_id', None))
-
         sfx_requested = bool(getattr(self.request.config, 'add_sfx', False))
         user_hint = getattr(self.request.config, 'analysis_user_hint', None)
         user_hint_text = f"\nUSER_HINT (optional, do not change schema; consider only as guidance):\n{user_hint}\n" if user_hint else "\n"
-        base_prompt = (
-            "You are a creative audio drama director. Your task is to analyze the following script and prepare it for production. "
-            "1. Correct the text for spelling, grammar, and natural expression, keeping it in the original language. "
-            f"Ensure the output remains strictly in the original language of the input (language: {lang}). Do NOT translate any content. Return dialog text exactly in that language. "
-            "2. Identify all speakers and background elements described in square brackets (e.g., [Sound of wind]). "
-            "3. Determine the likely gender or type for each speaker (male, female, ai, narrator). "
-            "4. For each line of dialog, determine if a specific `voice_style` (e.g., 'whispering', 'shouting') is implied by the context. "
-            f"5. Background music requested: {music_requested}. If and only if true, generate a detailed English music prompt suitable for a ~30s background track (genre, mood, tempo/BPM, instrumentation, energy, vocals=none). "
-            "6. Add timing guidance for production: include optional 'pause_before_ms' and 'pause_after_ms' for dialog cues (integers, milliseconds). Keep pauses short and natural: typical pause_before_ms 0-300ms, typical pause_after_ms 100-400ms. Only use longer pauses (up to 800ms) for dramatic scene breaks or significant mood shifts. Default to 0 if no pause is needed. For any music cue provide 'length_ms' and 'start_offset_ms' (milliseconds from start before music begins), and optionally 'intro_pause_ms' (milliseconds pause before first dialog). "
-            "7. Structure the output as a single JSON object with two keys: 'production_cues' and 'music'. "
-            "- 'production_cues': A single list containing all dialog and sfx cues in the correct order they appear in the script. "
-            "  - Dialog cues should be objects with 'type': 'dialog', 'speaker', 'gender', 'voice_style' (optional), 'text', and optional 'pause_before_ms'/'pause_after_ms'. The 'text' MUST be in the same language as the input. "
-            f"  - SFX cues should be objects with 'type': 'sfx' and a short 'description' in English. Only include SFX cues if requested: {sfx_requested}. If false, include none. If true, infer 1-6 SFX cues even if not explicitly bracketed whenever they enhance immersion (e.g., door knock, phone ring, footsteps, ambient wind). Do NOT return zero SFX when requested; include at least one relevant SFX. Keep descriptions concise and production-ready. "
-            "- 'music': A list that may be empty or contain one object with keys: 'description' (music prompt in English), 'length_ms' (e.g., 30000), 'start_offset_ms' (e.g., 0), and 'intro_pause_ms' (e.g., 1000)."
-            + user_hint_text +
-            "IMPORTANT: The JSON schema is FIXED. Only return the specified keys. Do not add extraneous commentary."
+
+        system_prompt = (
+            "You are a creative audio drama director. Analyze the script and prepare it for production. "
+            "Return ONLY a valid JSON object with two keys: 'production_cues' and 'music'. No commentary, no markdown."
         )
 
-        analysis_prompt = f"{base_prompt}\n\n{example_str}\n\nTEXT TO ANALYZE:\n{self.request.content.text}"
+        analysis_prompt = (
+            f"Analyze this script for audio production:\n"
+            f"1. Correct text for spelling and natural expression. Keep the original language ({lang}). Do NOT translate.\n"
+            f"2. Identify all speakers and background elements in square brackets.\n"
+            f"3. Determine gender/type for each speaker (male, female, ai, narrator).\n"
+            f"4. Determine voice_style per line (e.g., 'whispering', 'shouting') from context.\n"
+            f"5. Background music: {music_requested}. If true, generate a detailed English music prompt (~30s track, genre, mood, tempo/BPM, instrumentation, no vocals).\n"
+            f"6. Timing: pause_before_ms (0-300ms typical), pause_after_ms (100-400ms typical). Max 800ms for scene breaks. Default 0.\n"
+            f"7. Output JSON with:\n"
+            f"   - 'production_cues': list of dialog cues (type, speaker, gender, voice_style, text, pause_before_ms, pause_after_ms)"
+            f" and SFX cues (type: 'sfx', description in English). SFX requested: {sfx_requested}.\n"
+            f"   - 'music': empty list or one object with description, length_ms, start_offset_ms, intro_pause_ms.\n"
+            + user_hint_text +
+            f"\nTEXT TO ANALYZE:\n{self.request.content.text}"
+        )
+
         try:
             prompt_size = len(analysis_prompt.encode('utf-8'))
         except Exception:
             prompt_size = len(analysis_prompt)
-        print(f"DIALOG[{self.request.id}]: Gemini prompt bytes={prompt_size}")
-        
-        model = genai.GenerativeModel('gemini-2.5-flash')
-        print(f"DIALOG[{self.request.id}]: Calling gemini.generate_content (thread)…")
+        print(f"DIALOG[{self.request.id}]: Claude prompt bytes={prompt_size}")
+
+        # Call Claude Opus via internal API endpoint
         try:
-            # Use blocking generate_content off the event loop to avoid SDK async incompatibilities
-            response = await asyncio.to_thread(model.generate_content, analysis_prompt)
-            print(f"DIALOG[{self.request.id}]: Gemini responded in {int((time.time()-t_start)*1000)}ms")
+            async with httpx.AsyncClient(timeout=120) as client:
+                resp = await client.post(
+                    "http://localhost:8000/ai/claude",
+                    json={
+                        "prompt": analysis_prompt,
+                        "system": system_prompt,
+                        "max_tokens": 8000,
+                        "model": "opus"
+                    },
+                    params={"api_key": "Inetpass1"}
+                )
+                resp.raise_for_status()
+                data = resp.json()
+                response_text = data.get("response") or data.get("message") or ""
+
+            print(f"DIALOG[{self.request.id}]: Claude Opus responded in {int((time.time()-t_start)*1000)}ms")
             try:
                 from ai.routes.dialog_routes import set_dialog_status
-                set_dialog_status(self.request.id, phase="analyze", subphase="gemini_done", duration_ms=int((time.time()-t_start)*1000))
+                set_dialog_status(self.request.id, phase="analyze", subphase="claude_done", duration_ms=int((time.time()-t_start)*1000))
             except Exception:
                 pass
         except Exception as e:
-            print(f"DIALOG[{self.request.id}][ERROR]: Gemini call failed after {int((time.time()-t_start)*1000)}ms -> {e}")
+            print(f"DIALOG[{self.request.id}][ERROR]: Claude call failed after {int((time.time()-t_start)*1000)}ms -> {e}")
             try:
                 from ai.routes.dialog_routes import set_dialog_status
-                set_dialog_status(self.request.id, phase="analyze", subphase="gemini_error", error=str(e))
+                set_dialog_status(self.request.id, phase="analyze", subphase="claude_error", error=str(e))
             except Exception:
                 pass
             raise
         
         try:
-            cleaned_text = response.text.strip().replace("```json", "").replace("```", "").strip()
+            cleaned_text = response_text.strip().replace("```json", "").replace("```", "").strip()
             result = json.loads(cleaned_text)
             # Enforce SFX off if not requested
             if not sfx_requested:
@@ -294,13 +297,16 @@ class AudioDramaGenerator(SpeechGenerator):
                 chunk_path = await self._generate_single_dialog_chunk(cue)
                 final_sequence_paths.append(chunk_path)
                 final_sequence_kinds.append('dialog')
-                sequence_meta.append({
+                meta_entry = {
                     "type":"dialog",
                     "speaker": cue.get("speaker"),
                     "voice_style": cue.get("voice_style"),
                     "text": cue.get("text"),
                     "chosen_voice": cue.get("chosen_voice")
-                })
+                }
+                if cue.get("word_timestamps"):
+                    meta_entry["word_timestamps"] = cue["word_timestamps"]
+                sequence_meta.append(meta_entry)
                 # Insert trailing pause if requested
                 if after_ms > 0:
                     silence = await asyncio.to_thread(tts_service.create_silence_chunk, after_ms, self.request.config.output_format, self.temp_dir)
@@ -754,7 +760,8 @@ class AudioDramaGenerator(SpeechGenerator):
             clarity = overrides.get('clarity', voice_config.get('clarity', 0.75))
             model_id = voice_config.get('model_id', 'eleven_multilingual_v2')
 
-            # Use NarrationService for dramatic preprocessing if available
+            # Optional: dramatic preprocessing via NarrationService
+            tts_text = text
             try:
                 from ai.services.narration_service import NarrationService, NarrationRequest, NarrationCharacter, NarrationContext, NarrationConfig
                 narration = NarrationService()
@@ -780,14 +787,21 @@ class AudioDramaGenerator(SpeechGenerator):
                 )
                 dramatic_text = await narration._preprocess_text(narr_req)
                 segment['dramatic_script'] = dramatic_text
-                audio_bytes = await narration._generate_tts(dramatic_text, narr_req)
-            except ImportError:
-                # Fallback: direct ElevenLabs TTS without dramatic preprocessing
-                el_config = ElevenLabsTTSConfig(
-                    voice_id=voice_id, model_id=model_id,
-                    stability=stability, clarity=clarity,
-                )
-                audio_bytes = await tts_service.generate_elevenlabs_tts(text, el_config)
+                tts_text = dramatic_text
+            except (ImportError, Exception) as e:
+                print(f"--- Audio Drama: NarrationService preprocessing skipped: {e}")
+
+            # ElevenLabs TTS with word-level timestamps
+            el_config = ElevenLabsTTSConfig(
+                voice_id=voice_id, model_id=model_id,
+                stability=stability, clarity=clarity,
+            )
+            result = await tts_service.generate_elevenlabs_tts(tts_text, el_config, with_timestamps=True)
+            if isinstance(result, tuple):
+                audio_bytes, word_timestamps = result
+                segment['word_timestamps'] = word_timestamps
+            else:
+                audio_bytes = result
             chosen_voice = voice_id
         else:
             voice_name = voice_config.get('voice', 'nova')
