@@ -135,6 +135,166 @@ jobs:
             echo "✅ Deployment completed successfully!"
 
   # ============================================================================
+  # PDREI: pdrei.arkturian.com (jascha) — own instance
+  # ============================================================================
+  deploy-pdrei:
+    name: Deploy to pdrei.arkturian.com
+    needs: build-archive
+    if: |
+      github.ref == 'refs/heads/main' &&
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    environment:
+      name: pdrei
+      url: https://api-ai.pdrei.arkturian.com
+
+    steps:
+      - name: Download artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.build-archive.outputs.artifact-name }}
+
+      - name: Upload archive to pdrei
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.PDREI_DEPLOY_HOST }}
+          username: ${{ secrets.PDREI_DEPLOY_USER }}
+          key: ${{ secrets.PDREI_DEPLOY_SSH_KEY }}
+          port: 22
+          source: "deploy.tar.gz"
+          target: "/tmp/"
+
+      - name: Deploy to pdrei
+        uses: appleboy/ssh-action@v1.0.3
+        env:
+          API_AI_ENV_CONTENT: ${{ secrets.PDREI_API_AI_ENV }}
+        with:
+          host: ${{ secrets.PDREI_DEPLOY_HOST }}
+          username: ${{ secrets.PDREI_DEPLOY_USER }}
+          key: ${{ secrets.PDREI_DEPLOY_SSH_KEY }}
+          port: 22
+          envs: API_AI_ENV_CONTENT
+          command_timeout: 15m
+          script: |
+            set -e
+
+            DEPLOY_PATH="/var/www/api-ai"
+            DATA_DIR="/var/lib/api-ai"
+            SERVICE_NAME="api-ai"
+            DOMAIN="api-ai.pdrei.arkturian.com"
+            UPSTREAM_PORT=8025
+
+            sudo mkdir -p "$DATA_DIR"
+            sudo chown -R jascha:jascha "$DATA_DIR" "$DEPLOY_PATH"
+
+            echo "🚀 Extracting archive..."
+            cd "$DEPLOY_PATH"
+            tar -xzf /tmp/deploy.tar.gz -C "$DEPLOY_PATH"
+            rm -f /tmp/deploy.tar.gz
+
+            # Write .env from secret (overrides prod values for pdrei)
+            echo "📝 Writing .env (with pdrei overrides)..."
+            cat > "$DEPLOY_PATH/.env" <<ENVEOF
+            $API_AI_ENV_CONTENT
+            ENVEOF
+            # Override storage URL + port for pdrei
+            sed -i 's|^STORAGE_API_URL=.*|STORAGE_API_URL=https://storage-api.pdrei.arkturian.com|' "$DEPLOY_PATH/.env"
+            sed -i 's|^PORT=.*|PORT=8025|' "$DEPLOY_PATH/.env"
+            sed -i 's|^COST_TRACKER_DATA_DIR=.*|COST_TRACKER_DATA_DIR=/var/lib/api-ai|' "$DEPLOY_PATH/.env"
+            chmod 600 "$DEPLOY_PATH/.env"
+
+            # Setup venv
+            if [ ! -d "venv" ]; then
+              python3 -m venv venv
+            fi
+            source venv/bin/activate
+            pip install --upgrade pip --quiet
+            pip install --no-cache-dir -r requirements.txt 2>&1 | tail -3
+
+            # Always (re)write systemd unit
+            echo "Writing systemd unit..."
+            sudo tee /etc/systemd/system/${SERVICE_NAME}.service > /dev/null <<UNIT
+            [Unit]
+            Description=AI API (pdrei instance)
+            After=network.target
+
+            [Service]
+            Type=simple
+            User=jascha
+            WorkingDirectory=${DEPLOY_PATH}
+            EnvironmentFile=${DEPLOY_PATH}/.env
+            ExecStart=${DEPLOY_PATH}/venv/bin/uvicorn main:app --host 127.0.0.1 --port ${UPSTREAM_PORT}
+            Restart=on-failure
+            RestartSec=5
+
+            [Install]
+            WantedBy=multi-user.target
+            UNIT
+            sudo systemctl daemon-reload
+            sudo systemctl enable ${SERVICE_NAME}
+
+            # Always (re)write nginx vhost with SSL
+            echo "Writing nginx vhost..."
+            CERT_PATH="/etc/letsencrypt/live/mcp.pdrei.arkturian.com"
+            if ! sudo test -d "$CERT_PATH"; then
+              echo "ERROR: SSL cert not found at $CERT_PATH"
+              exit 1
+            fi
+
+            sudo tee /etc/nginx/sites-available/${DOMAIN} > /dev/null <<NGINX
+            server {
+                listen 80;
+                server_name ${DOMAIN};
+                return 301 https://\$host\$request_uri;
+            }
+
+            server {
+                listen 443 ssl http2;
+                server_name ${DOMAIN};
+
+                ssl_certificate ${CERT_PATH}/fullchain.pem;
+                ssl_certificate_key ${CERT_PATH}/privkey.pem;
+                include /etc/letsencrypt/options-ssl-nginx.conf;
+                ssl_dhparam /etc/letsencrypt/ssl-dhparams.pem;
+
+                client_max_body_size 100M;
+                proxy_request_buffering off;
+
+                location / {
+                    proxy_pass http://127.0.0.1:${UPSTREAM_PORT};
+                    proxy_http_version 1.1;
+                    proxy_set_header Host \$host;
+                    proxy_set_header X-Real-IP \$remote_addr;
+                    proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+                    proxy_set_header X-Forwarded-Proto \$scheme;
+                    proxy_read_timeout 600s;
+                    proxy_buffering off;
+                }
+            }
+            NGINX
+            sudo ln -sf /etc/nginx/sites-available/${DOMAIN} /etc/nginx/sites-enabled/${DOMAIN}
+            sudo nginx -t && sudo systemctl reload nginx
+
+            # Restart and verify
+            sudo systemctl restart ${SERVICE_NAME}
+            sleep 5
+
+            if curl -sf http://localhost:${UPSTREAM_PORT}/health > /dev/null; then
+              echo "✅ AI API healthy on pdrei (local)"
+              curl -s http://localhost:${UPSTREAM_PORT}/health
+              echo
+            else
+              echo "⚠️ Local health check failed"
+              sudo systemctl status ${SERVICE_NAME} --no-pager
+              sudo journalctl -u ${SERVICE_NAME} -n 50 --no-pager
+              exit 1
+            fi
+
+            if curl -sf https://${DOMAIN}/health > /dev/null; then
+              echo "✅ HTTPS endpoint reachable"
+            fi
+
+  # ============================================================================
   # O'NEAL: aiserver.oneal.eu (via arkturian.com jump host)
   # ============================================================================
   deploy-aiserver:
