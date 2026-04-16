@@ -8,7 +8,7 @@ Endpoints for audio generation:
 - Music Generation
 """
 
-from fastapi import APIRouter, Depends, HTTPException, File, UploadFile
+from fastapi import APIRouter, Depends, HTTPException, File, Form, UploadFile
 from fastapi.responses import JSONResponse
 from fastapi.encoders import jsonable_encoder
 from pydantic import BaseModel
@@ -259,10 +259,10 @@ async def generate_sfx_endpoint(
 @router.post("/transcribe")
 async def transcribe_audio(
     file: UploadFile = File(...),
-    model: str = "whisper-1",
-    prompt: Optional[str] = None,
-    language: Optional[str] = None,
-    response_format: Optional[str] = None,
+    model: str = Form("whisper-1"),
+    prompt: Optional[str] = Form(None),
+    language: Optional[str] = Form(None),
+    response_format: Optional[str] = Form(None),
     api_key: str = Depends(get_api_key)
 ):
     """
