@@ -261,25 +261,39 @@ async def transcribe_audio(
     file: UploadFile = File(...),
     model: str = "whisper-1",
     prompt: Optional[str] = None,
+    language: Optional[str] = None,
+    response_format: Optional[str] = None,
     api_key: str = Depends(get_api_key)
 ):
     """
-    Transcribe an uploaded audio file using OpenAI Whisper or Google Gemini.
+    Transcribe an uploaded audio file using OpenAI Whisper / GPT-4o / Gemini.
 
-    Models:
-    - whisper-1: OpenAI Whisper (default)
-    - gemini-1.5-flash: Google Gemini 1.5 Flash (fast, cost-effective)
-    - gemini-1.5-pro: Google Gemini 1.5 Pro (higher quality)
-    - gemini-2.0-flash-exp: Google Gemini 2.0 Flash (experimental, latest)
+    Models (OpenAI):
+    - whisper-1: OpenAI Whisper (default, classic)
+    - gpt-4o-transcribe / gpt-4o-mini-transcribe: newer gpt-4o transcription
+    - gpt-4o-transcribe-diarize: transcription WITH speaker separation —
+      use with response_format="diarized_json" to get speaker-labeled segments
+
+    Models (Google):
+    - gemini-1.5-flash / gemini-1.5-pro / gemini-2.0-flash-exp
+
+    Parameters:
+    - language (optional): ISO code like "de", "en" — improves accuracy
+    - response_format (optional): text | json | diarized_json.
+      For speaker separation set model=gpt-4o-transcribe-diarize +
+      response_format=diarized_json.
 
     Supports typical audio MIME types (mp3, m4a, wav, webm, etc.).
     """
     try:
-        # Route to appropriate service based on model
         if model.startswith("gemini"):
             return await _transcribe_with_gemini(file, model, prompt)
         else:
-            return await _transcribe_with_whisper(file, model, prompt)
+            return await _transcribe_with_whisper(
+                file, model, prompt,
+                language=language,
+                response_format=response_format,
+            )
 
     except HTTPException:
         raise
@@ -293,9 +307,11 @@ async def transcribe_audio(
 async def _transcribe_with_whisper(
     file: UploadFile,
     model: str,
-    prompt: Optional[str] = None
+    prompt: Optional[str] = None,
+    language: Optional[str] = None,
+    response_format: Optional[str] = None,
 ):
-    """Transcribe audio using OpenAI Whisper"""
+    """Transcribe audio using OpenAI Whisper / GPT-4o transcribe family."""
     if not os.getenv("OPENAI_API_KEY"):
         raise HTTPException(status_code=500, detail="OpenAI API key not configured.")
 
@@ -303,23 +319,49 @@ async def _transcribe_with_whisper(
     if not data:
         raise HTTPException(status_code=400, detail="Uploaded audio file is empty.")
 
-    # OpenAI SDK expects a file-like object with a name attribute
     audio_buffer = io.BytesIO(data)
     audio_buffer.name = file.filename or "audio.webm"
 
     client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-    result = await client.audio.transcriptions.create(
-        model=model,
-        file=audio_buffer,
-        prompt=prompt
-    )
+
+    # Build kwargs conditionally — the OpenAI SDK is strict about unexpected params
+    kwargs = {"model": model, "file": audio_buffer}
+    if prompt:
+        kwargs["prompt"] = prompt
+    if language:
+        kwargs["language"] = language
+    if response_format:
+        kwargs["response_format"] = response_format
+
+    result = await client.audio.transcriptions.create(**kwargs)
+
+    # diarized_json → return raw payload (segments[] with speaker labels)
+    if response_format == "diarized_json":
+        raw = jsonable_encoder(result)
+        return {
+            "model": model,
+            "prompt": prompt,
+            "language": language,
+            "filename": file.filename,
+            "response_format": "diarized_json",
+            "diarized": raw,
+        }
 
     text = getattr(result, "text", None)
-    if not text:
-        # Fallback to serializing the full response
-        return jsonable_encoder(result)
+    if text is None:
+        return {
+            "model": model,
+            "filename": file.filename,
+            "raw": jsonable_encoder(result),
+        }
 
-    return {"text": text, "model": model, "prompt": prompt, "filename": file.filename}
+    return {
+        "text": text,
+        "model": model,
+        "prompt": prompt,
+        "language": language,
+        "filename": file.filename,
+    }
 
 
 async def _transcribe_with_gemini(
