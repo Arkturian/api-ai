@@ -23,6 +23,9 @@ Pillow>=10.1.0            # Image processing
 elevenlabs>=0.2.26        # TTS & Music generation
 pydub>=0.25.1             # Audio processing and manipulation
 
+# Translation
+deep-translator>=1.11.4    # Google Translate (free, no API key)
+
 # Utilities
 python-dotenv>=1.0.0
 requests>=2.31.0

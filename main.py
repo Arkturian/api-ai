@@ -23,7 +23,7 @@ from fastapi.responses import JSONResponse
 import logging
 
 # Import routes
-from ai.routes import text_ai_routes, image_ai_routes, audio_ai_routes, dialog_routes, video_ai_routes, narration_routes, image_generation_routes
+from ai.routes import text_ai_routes, image_ai_routes, audio_ai_routes, dialog_routes, video_ai_routes, narration_routes, image_generation_routes, translate_routes
 
 # Setup logging
 logging.basicConfig(
@@ -58,6 +58,7 @@ app.include_router(audio_ai_routes.router, prefix="/ai", tags=["Audio AI"])
 app.include_router(dialog_routes.router, prefix="/ai/dialog", tags=["Dialog System"])
 app.include_router(image_generation_routes.router, prefix="/ai/scene", tags=["Scene Images"])
 app.include_router(narration_routes.router, prefix="/ai", tags=["Narration TTS"])
+app.include_router(translate_routes.router, prefix="/ai", tags=["Translation"])
 
 # Health check
 @app.get("/health")
@@ -95,6 +96,11 @@ def root():
                 "GET /ai/genvideo/status/{request_id}",
                 "POST /ai/genvideo/cancel/{request_id}",
                 "GET /ai/genvideo/models"
+            ],
+            "translation": [
+                "POST /ai/translate",
+                "POST /ai/translate/batch",
+                "GET /ai/translate/languages"
             ],
             "audio_ai": [
                 "POST /ai/generate_speech",
