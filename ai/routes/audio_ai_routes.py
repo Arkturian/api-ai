@@ -333,6 +333,14 @@ async def _transcribe_with_whisper(
     if response_format:
         kwargs["response_format"] = response_format
 
+    # Diarization models REQUIRE chunking_strategy. Without it OpenAI returns
+    # 400: 'chunking_strategy is required for diarization models'. Default to
+    # "auto" (server-side chunking) which is correct for arbitrary-length
+    # meeting recordings; callers can override via the Form field if they
+    # need a different strategy.
+    if "diarize" in model:
+        kwargs.setdefault("chunking_strategy", "auto")
+
     result = await client.audio.transcriptions.create(**kwargs)
 
     # diarized_json → return raw payload (segments[] with speaker labels)
