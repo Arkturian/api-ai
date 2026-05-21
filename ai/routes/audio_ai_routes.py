@@ -298,6 +298,37 @@ async def transcribe_audio(
     except HTTPException:
         raise
     except Exception as e:
+        # Map OpenAI/upstream errors to actionable HTTP status codes so the
+        # frontend can branch on the real cause instead of opaque 500.
+        try:
+            from openai import RateLimitError, BadRequestError, APIStatusError
+        except Exception:
+            RateLimitError = BadRequestError = APIStatusError = ()
+
+        msg = str(e)
+        if isinstance(e, RateLimitError) or "insufficient_quota" in msg or "exceeded your current quota" in msg:
+            logger.error(f"Transcription quota/rate-limit: {e}")
+            raise HTTPException(
+                status_code=429,
+                detail={
+                    "error": "OpenAI quota exhausted or rate-limited. "
+                             "Top up the OPENAI billing balance or switch model to "
+                             "'gemini-2.0-flash-exp' (no API cost on free tier).",
+                    "code": "openai_quota_exhausted",
+                    "upstream": msg[:500],
+                },
+            )
+        if isinstance(e, BadRequestError) or "audio duration" in msg or "is longer than 1400 seconds" in msg:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": "Audio rejected by OpenAI (likely duration limit "
+                             "for diarization models = 23min). Split the audio "
+                             "or use non-diarize model.",
+                    "code": "audio_invalid_for_model",
+                    "upstream": msg[:500],
+                },
+            )
         logger.error(f"Transcription error: {e}")
         import traceback
         traceback.print_exc()
