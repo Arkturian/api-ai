@@ -362,6 +362,108 @@ async def transcribe_audio(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# Codec → safe extension mapping for OpenAI's whitelist
+# (flac, m4a, mp3, mp4, mpeg, mpga, oga, ogg, wav, webm)
+_CODEC_TO_EXT = {
+    "mp3": ".mp3",
+    "aac": ".m4a",        # AAC raw or in M4A container
+    "alac": ".m4a",       # Apple Lossless lives in M4A
+    "opus": ".ogg",
+    "vorbis": ".ogg",
+    "flac": ".flac",
+    "pcm_s16le": ".wav", "pcm_s24le": ".wav", "pcm_s32le": ".wav",
+    "pcm_f32le": ".wav", "pcm_u8":    ".wav",
+    "wmav2": None,        # WMA → transcode
+    "amr_nb": None, "amr_wb": None,
+}
+
+
+def _normalize_audio_for_openai(data: bytes, basename: str = "audio") -> tuple[bytes, str]:
+    """Ensure ``data`` is in a format OpenAI's audio.transcriptions accepts.
+
+    Returns ``(bytes, ext)`` where ``ext`` is a leading-dot extension. Strategy:
+
+    1. ffprobe the buffer to read the real codec (ignores filename lies).
+    2. Codec in :data:`_CODEC_TO_EXT` and not ``None`` → keep bytes as-is,
+       attach the matching extension.
+    3. Otherwise → ffmpeg-transcode to MP3 (libmp3lame, VBR q4 → ~128 kbps).
+
+    Falls back to returning ``(data, ".mp3")`` (last-resort guess) if both
+    ffprobe and ffmpeg fail. The transcribe endpoint then surfaces the real
+    OpenAI error to the caller.
+    """
+    import subprocess
+    import tempfile
+
+    with tempfile.NamedTemporaryFile(suffix=".bin", delete=False) as src:
+        src.write(data)
+        src_path = src.name
+
+    try:
+        # 1) Probe codec
+        codec = None
+        try:
+            probe = subprocess.run(
+                [
+                    "ffprobe", "-v", "error",
+                    "-select_streams", "a:0",
+                    "-show_entries", "stream=codec_name",
+                    "-of", "default=nokey=1:noprint_wrappers=1",
+                    src_path,
+                ],
+                capture_output=True, text=True, timeout=15,
+            )
+            if probe.returncode == 0:
+                codec = (probe.stdout or "").strip().splitlines()[0:1]
+                codec = codec[0] if codec else None
+        except Exception as e:
+            logger.warning(f"ffprobe failed: {e}")
+
+        logger.info(f"Audio codec detected: {codec!r}")
+
+        # 2) Mapped codec we can use as-is
+        if codec and _CODEC_TO_EXT.get(codec):
+            return data, _CODEC_TO_EXT[codec]
+
+        # 3) Unknown / unmapped / needs-transcode → MP3
+        dst_path = src_path + ".mp3"
+        try:
+            r = subprocess.run(
+                ["ffmpeg", "-y", "-loglevel", "error",
+                 "-i", src_path,
+                 "-vn",                  # drop any video stream
+                 "-ac", "1",             # mono is plenty for speech
+                 "-ar", "16000",         # 16 kHz, standard ASR rate
+                 "-c:a", "libmp3lame",
+                 "-q:a", "4",
+                 dst_path],
+                capture_output=True, timeout=180,
+            )
+            if r.returncode == 0 and os.path.exists(dst_path):
+                with open(dst_path, "rb") as f:
+                    new_data = f.read()
+                logger.info(
+                    f"Transcoded {len(data)} bytes ({codec or 'unknown'}) "
+                    f"→ {len(new_data)} bytes mp3"
+                )
+                return new_data, ".mp3"
+            logger.warning(
+                f"ffmpeg transcode failed rc={r.returncode}: {r.stderr[:300]!r}"
+            )
+        except Exception as e:
+            logger.warning(f"ffmpeg transcode raised: {e}")
+        finally:
+            if os.path.exists(dst_path):
+                try: os.unlink(dst_path)
+                except Exception: pass
+
+        # Last-resort: pretend it's mp3 and let OpenAI's error be authoritative
+        return data, ".mp3"
+    finally:
+        try: os.unlink(src_path)
+        except Exception: pass
+
+
 async def _transcribe_with_whisper(
     file: UploadFile,
     model: str,
@@ -377,53 +479,16 @@ async def _transcribe_with_whisper(
     if not data:
         raise HTTPException(status_code=400, detail="Uploaded audio file is empty.")
 
+    # Normalize the audio for OpenAI:
+    #   1) Probe the actual codec via ffprobe (ignores filename + MIME lies).
+    #   2) If codec is in OpenAI's whitelist → keep bytes, just rename the
+    #      buffer to the matching extension.
+    #   3) If codec is anything else → transcode to MP3 via ffmpeg.
+    # This robustly handles: misnamed extensions, raw AAC, weird containers,
+    # Voice-Memos .m4a-with-quirks, browser-uploaded blobs etc.
+    base, _ = os.path.splitext(file.filename or "audio")
+    data, ext = _normalize_audio_for_openai(data, base)
     audio_buffer = io.BytesIO(data)
-    # OpenAI sniffs the audio format from the *filename extension* of the
-    # uploaded buffer, not from MIME or content. If the original filename has
-    # no extension, or an extension not in OpenAI's whitelist (flac, m4a, mp3,
-    # mp4, mpeg, mpga, oga, ogg, wav, webm), OpenAI rejects with a confusing
-    # 400 "Invalid file format" and zero-duration usage. Pick a sensible
-    # extension based on the browser-reported MIME-type when needed.
-    SUPPORTED_EXTS = {".flac", ".m4a", ".mp3", ".mp4", ".mpeg",
-                      ".mpga", ".oga", ".ogg", ".wav", ".webm"}
-    MIME_TO_EXT = {
-        "audio/aac": ".m4a", "audio/x-aac": ".m4a",
-        "audio/mp4": ".m4a", "audio/x-m4a": ".m4a",
-        "audio/mpeg": ".mp3", "audio/mp3": ".mp3",
-        "audio/wav": ".wav", "audio/x-wav": ".wav", "audio/wave": ".wav",
-        "audio/webm": ".webm",
-        "audio/ogg": ".ogg", "audio/x-ogg": ".ogg", "audio/vorbis": ".ogg",
-        "audio/flac": ".flac", "audio/x-flac": ".flac",
-        "video/mp4": ".mp4", "video/webm": ".webm",
-    }
-    base, ext = os.path.splitext(file.filename or "audio")
-    if ext.lower() not in SUPPORTED_EXTS:
-        mime = (file.content_type or "").split(";")[0].strip().lower()
-        guessed = MIME_TO_EXT.get(mime)
-        if not guessed:
-            # Last-resort guess: anything starting with audio/ → m4a.
-            # Whisper accepts m4a wrappers around most AAC content.
-            guessed = ".m4a" if mime.startswith("audio/") else ""
-        if guessed:
-            logger.info(
-                f"Rewriting audio filename for OpenAI: "
-                f"orig={file.filename!r} mime={mime!r} → {base}{guessed}"
-            )
-            ext = guessed
-        else:
-            raise HTTPException(
-                status_code=400,
-                detail={
-                    "error": (
-                        "Audio file has no recognizable extension and the "
-                        "browser-reported MIME-type could not be mapped. "
-                        "Rename the file to .mp3/.m4a/.wav/.webm/.flac/.ogg and retry."
-                    ),
-                    "code": "audio_unsupported_format",
-                    "filename": file.filename,
-                    "mime": mime,
-                },
-            )
     audio_buffer.name = (base or "audio") + ext
 
     client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
