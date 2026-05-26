@@ -425,68 +425,81 @@ async def _transcribe_with_gemini(
         )
 
     try:
-        import google.generativeai as genai
+        # NOTE: switched from the deprecated `google-generativeai` SDK to the
+        # new `google-genai` SDK. The old package is EOL'd by Google and its
+        # `upload_file` attribute has been stripped in recent installs (we hit
+        # AttributeError at runtime even though dir() listed it). The new SDK
+        # uses Client().files.upload + client.models.generate_content.
+        from google import genai as genai_new
 
-        # Configure Gemini
-        genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
+        client = genai_new.Client(api_key=os.getenv("GOOGLE_API_KEY"))
 
         # Read audio data
         data = await file.read()
         if not data:
             raise HTTPException(status_code=400, detail="Uploaded audio file is empty.")
 
-        # Save to temporary file (Gemini needs a file path)
+        # Save to temporary file (Gemini's file-upload API expects a path)
         suffix = Path(file.filename).suffix if file.filename else ".mp3"
         with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as temp_file:
             temp_file.write(data)
             temp_path = Path(temp_file.name)
 
         try:
-            # Upload file to Gemini
+            # Upload to Gemini File API
             logger.info(f"Uploading audio file to Gemini: {temp_path}")
-            audio_file = genai.upload_file(path=str(temp_path))
+            uploaded = client.files.upload(file=str(temp_path))
 
-            # Create model
-            gemini_model = genai.GenerativeModel(model)
-
-            # Create transcription prompt
-            transcription_prompt = "Transcribe this audio file accurately. Provide only the transcription text."
+            # Build the prompt
+            transcription_prompt = (
+                "Transcribe this audio file accurately. "
+                "Provide only the transcription text."
+            )
             if prompt:
                 transcription_prompt = f"{prompt}\n\nTranscribe this audio file accurately."
 
-            # Generate transcription
             logger.info(f"Starting Gemini transcription with model: {model}")
-            response = gemini_model.generate_content([
-                transcription_prompt,
-                audio_file
-            ])
+            response = client.models.generate_content(
+                model=model,
+                contents=[transcription_prompt, uploaded],
+            )
 
-            # Extract text
-            if not response or not response.text:
+            # Extract text. The new SDK exposes `.text` the same way; if not
+            # present we fall back to the first candidate part.
+            transcription_text = getattr(response, "text", None) or ""
+            if not transcription_text and getattr(response, "candidates", None):
+                try:
+                    parts = response.candidates[0].content.parts
+                    transcription_text = "".join(
+                        getattr(p, "text", "") or "" for p in parts
+                    )
+                except Exception:
+                    transcription_text = ""
+            transcription_text = (transcription_text or "").strip()
+
+            if not transcription_text:
                 raise HTTPException(status_code=500, detail="Gemini returned empty response.")
-
-            transcription_text = response.text.strip()
 
             # Track usage - extract token counts if available
             input_tokens = 0
             output_tokens = 0
-            if hasattr(response, 'usage_metadata') and response.usage_metadata:
-                input_tokens = getattr(response.usage_metadata, 'prompt_token_count', 0) or 0
-                output_tokens = getattr(response.usage_metadata, 'candidates_token_count', 0) or 0
+            usage = getattr(response, "usage_metadata", None)
+            if usage:
+                input_tokens = getattr(usage, "prompt_token_count", 0) or 0
+                output_tokens = getattr(usage, "candidates_token_count", 0) or 0
                 logger.info(f"Gemini STT tokens: {input_tokens}in/{output_tokens}out")
 
-            # Track with audio suffix for clarity
             model_key = f"{model}-audio" if not model.endswith("-audio") else model
             if input_tokens > 0 or output_tokens > 0:
                 cost_tracker.track_usage(model_key, input_tokens, output_tokens)
             else:
-                # Estimate based on audio duration (~25 tokens/sec) + output
-                # Rough estimate: 1 minute audio ≈ 1500 tokens
                 audio_size_mb = len(data) / (1024 * 1024)
                 estimated_input = int(audio_size_mb * 5000)  # ~5000 tokens per MB
                 estimated_output = len(transcription_text) // 4  # ~4 chars per token
                 cost_tracker.track_usage(model_key, estimated_input, estimated_output)
-                logger.info(f"Gemini STT estimated tokens: {estimated_input}in/{estimated_output}out")
+                logger.info(
+                    f"Gemini STT estimated tokens: {estimated_input}in/{estimated_output}out"
+                )
 
             logger.info(f"Gemini transcription completed: {len(transcription_text)} characters")
 
@@ -495,17 +508,21 @@ async def _transcribe_with_gemini(
                 "model": model,
                 "prompt": prompt,
                 "filename": file.filename,
-                "provider": "gemini"
+                "provider": "gemini",
             }
 
         finally:
-            # Clean up temporary file
+            # Best-effort cleanup of the uploaded file on Gemini-side + local
+            try:
+                client.files.delete(name=uploaded.name)
+            except Exception:
+                pass
             temp_path.unlink(missing_ok=True)
 
     except ImportError:
         raise HTTPException(
             status_code=500,
-            detail="google-generativeai package not installed. Run: pip install google-generativeai"
+            detail="google-genai package not installed. Run: pip install google-genai",
         )
     except Exception as e:
         logger.error(f"Gemini transcription error: {e}")
