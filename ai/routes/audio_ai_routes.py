@@ -318,13 +318,40 @@ async def transcribe_audio(
                     "upstream": msg[:500],
                 },
             )
-        if isinstance(e, BadRequestError) or "audio duration" in msg or "is longer than 1400 seconds" in msg:
+        # More specific BadRequest classification: differentiate between
+        # duration overflow, unsupported format, and other "audio not OK".
+        if "Invalid file format" in msg or "Supported formats" in msg:
             raise HTTPException(
                 status_code=400,
                 detail={
-                    "error": "Audio rejected by OpenAI (likely duration limit "
-                             "for diarization models = 23min). Split the audio "
-                             "or use non-diarize model.",
+                    "error": (
+                        "OpenAI rejected the audio format. Allowed: flac, m4a, "
+                        "mp3, mp4, mpeg, mpga, oga, ogg, wav, webm. Rename the "
+                        "file with a proper extension or transcode it first."
+                    ),
+                    "code": "audio_unsupported_format",
+                    "upstream": msg[:500],
+                },
+            )
+        if "audio duration" in msg or "is longer than 1400 seconds" in msg:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": (
+                        "Audio too long for the chosen model. Diarization "
+                        "models have a hard cap of 23 min (1400 s) per request. "
+                        "Split the audio into shorter chunks or use a non-"
+                        "diarize model (e.g. whisper-1 handles longer files)."
+                    ),
+                    "code": "audio_duration_too_long",
+                    "upstream": msg[:500],
+                },
+            )
+        if isinstance(e, BadRequestError):
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": "OpenAI rejected the request — see upstream for details.",
                     "code": "audio_invalid_for_model",
                     "upstream": msg[:500],
                 },
@@ -351,7 +378,53 @@ async def _transcribe_with_whisper(
         raise HTTPException(status_code=400, detail="Uploaded audio file is empty.")
 
     audio_buffer = io.BytesIO(data)
-    audio_buffer.name = file.filename or "audio.webm"
+    # OpenAI sniffs the audio format from the *filename extension* of the
+    # uploaded buffer, not from MIME or content. If the original filename has
+    # no extension, or an extension not in OpenAI's whitelist (flac, m4a, mp3,
+    # mp4, mpeg, mpga, oga, ogg, wav, webm), OpenAI rejects with a confusing
+    # 400 "Invalid file format" and zero-duration usage. Pick a sensible
+    # extension based on the browser-reported MIME-type when needed.
+    SUPPORTED_EXTS = {".flac", ".m4a", ".mp3", ".mp4", ".mpeg",
+                      ".mpga", ".oga", ".ogg", ".wav", ".webm"}
+    MIME_TO_EXT = {
+        "audio/aac": ".m4a", "audio/x-aac": ".m4a",
+        "audio/mp4": ".m4a", "audio/x-m4a": ".m4a",
+        "audio/mpeg": ".mp3", "audio/mp3": ".mp3",
+        "audio/wav": ".wav", "audio/x-wav": ".wav", "audio/wave": ".wav",
+        "audio/webm": ".webm",
+        "audio/ogg": ".ogg", "audio/x-ogg": ".ogg", "audio/vorbis": ".ogg",
+        "audio/flac": ".flac", "audio/x-flac": ".flac",
+        "video/mp4": ".mp4", "video/webm": ".webm",
+    }
+    base, ext = os.path.splitext(file.filename or "audio")
+    if ext.lower() not in SUPPORTED_EXTS:
+        mime = (file.content_type or "").split(";")[0].strip().lower()
+        guessed = MIME_TO_EXT.get(mime)
+        if not guessed:
+            # Last-resort guess: anything starting with audio/ → m4a.
+            # Whisper accepts m4a wrappers around most AAC content.
+            guessed = ".m4a" if mime.startswith("audio/") else ""
+        if guessed:
+            logger.info(
+                f"Rewriting audio filename for OpenAI: "
+                f"orig={file.filename!r} mime={mime!r} → {base}{guessed}"
+            )
+            ext = guessed
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": (
+                        "Audio file has no recognizable extension and the "
+                        "browser-reported MIME-type could not be mapped. "
+                        "Rename the file to .mp3/.m4a/.wav/.webm/.flac/.ogg and retry."
+                    ),
+                    "code": "audio_unsupported_format",
+                    "filename": file.filename,
+                    "mime": mime,
+                },
+            )
+    audio_buffer.name = (base or "audio") + ext
 
     client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
