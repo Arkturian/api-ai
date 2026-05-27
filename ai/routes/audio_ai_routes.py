@@ -363,18 +363,24 @@ async def transcribe_audio(
 
 
 # Codec → safe extension mapping for OpenAI's whitelist
-# (flac, m4a, mp3, mp4, mpeg, mpga, oga, ogg, wav, webm)
+# (flac, m4a, mp3, mp4, mpeg, mpga, oga, ogg, wav, webm).
+#
+# IMPORTANT: only list codecs that ride in containers OpenAI parses
+# cleanly *without* re-muxing. Anything not listed here (or mapped to
+# ``None``) gets force-transcoded to MP3. AAC for example *can* live in
+# an M4A container but a lot of in-the-wild AAC files are raw ADTS or
+# have broken MOOV atoms — renaming the extension is not enough and
+# OpenAI returns "Invalid file format" + zero-duration. Same story for
+# Opus/Vorbis/ALAC: better to spend the 1-2s on ffmpeg than gamble.
 _CODEC_TO_EXT = {
     "mp3": ".mp3",
-    "aac": ".m4a",        # AAC raw or in M4A container
-    "alac": ".m4a",       # Apple Lossless lives in M4A
-    "opus": ".ogg",
-    "vorbis": ".ogg",
     "flac": ".flac",
     "pcm_s16le": ".wav", "pcm_s24le": ".wav", "pcm_s32le": ".wav",
     "pcm_f32le": ".wav", "pcm_u8":    ".wav",
-    "wmav2": None,        # WMA → transcode
-    "amr_nb": None, "amr_wb": None,
+    # Force-transcode list (kept here for documentation/intent clarity)
+    "aac":    None, "alac":   None,
+    "opus":   None, "vorbis": None,
+    "wmav2":  None, "amr_nb": None, "amr_wb": None,
 }
 
 
