@@ -38,6 +38,17 @@ from datetime import datetime, timezone
 from pathlib import Path
 from socket import gethostname
 
+
+def short_host() -> str:
+    """Return the short federation host-key (e.g. ``arkserver`` instead of
+    ``arkserver.arkturian.com``). Keeps our models.json `host` field aligned
+    with Automation's orchestrator POST body, which uses the short form."""
+    h = gethostname().lower().split(".")[0]
+    # Future-proofing: if someone runs this on a host whose hostname doesn't
+    # match the federation key (e.g. `aiserver.oneal.eu` → key=oneal),
+    # allow an explicit override via env.
+    return os.environ.get("API_AI_HOST_KEY") or h
+
 OUT_DIR = Path(os.environ.get("API_AI_STATE_DIR", "/var/lib/api-ai"))
 OUT_FILE = OUT_DIR / "models.json"
 PREV_FILE = OUT_DIR / "models.prev.json"
@@ -251,7 +262,7 @@ def main() -> int:
 
     result = {
         "updated_at": ts(),
-        "host": gethostname(),
+        "host": short_host(),
         "providers": {
             "claude": discover_claude(),
             "gemini": discover_gemini(),
