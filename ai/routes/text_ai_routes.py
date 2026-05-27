@@ -31,6 +31,11 @@ class Prompt(BaseModel):
     temperature: Optional[float] = 0.7
     conversation_history: Optional[List[Dict[str, str]]] = None
     image_paths: Optional[List[str]] = None  # Top-level image paths for convenience
+    # Reasoning depth knob. Maps to claude `--effort`, codex
+    # `-c model_reasoning_effort=`, gemini = currently not supported by
+    # CLI (logged + ignored). Frontend should source the allowed values
+    # from /ai/models providers_meta.<provider>.efforts.available.
+    effort: Optional[str] = None
 
 
 class AIResponse(BaseModel):
@@ -122,6 +127,10 @@ async def claude_endpoint(
         # Add system prompt if provided
         if prompt.system:
             cmd.extend(["--system-prompt", prompt.system])
+
+        # Reasoning depth — claude CLI accepts: low, medium, high, xhigh, max
+        if prompt.effort:
+            cmd.extend(["--effort", prompt.effort])
 
         # Call claude -p in subprocess
         def run_claude_cli():
@@ -349,6 +358,15 @@ async def chatgpt_endpoint(
         selected_model = model  # None if not specified
         if selected_model:
             cmd.extend(["--model", selected_model])
+
+        # Reasoning depth via Codex config-override. Key confirmed by
+        # Automation against OpenAI docs (May 2026). Supported levels for
+        # GPT-5 family (our defaults gpt-5.5/5.4/5.3-codex): minimal, low,
+        # medium, high, xhigh. `minimal` is GPT-5-only — older models will
+        # reject and the upstream error surfaces verbatim via our 400/502
+        # mapping.
+        if prompt.effort:
+            cmd.extend(["-c", f"model_reasoning_effort={prompt.effort}"])
 
         # Add image paths via -i flag (Codex supports multiple -i flags)
         if image_paths:
@@ -673,6 +691,18 @@ async def gemini_endpoint(
                "--no-sandbox", "--yolo", "--skip-trust"]
         if model:
             cmd.extend(["--model", model])
+        # Gemini CLI does not expose `thinking_budget` (verified May 2026 —
+        # only --model/--raw-output/--no-sandbox/--yolo/--skip-trust). The
+        # API knob exists but only via direct SDK call. We log + ignore so
+        # callers using a generic /ai/<provider>?effort= contract don't
+        # break — the frontend should ground-truth supported_via=='none'
+        # from /ai/models providers_meta.gemini.efforts and disable the
+        # dropdown there.
+        if prompt.effort:
+            logger.info(
+                f"effort={prompt.effort!r} requested but Gemini CLI does "
+                f"not support thinking_budget; ignoring."
+            )
         cmd.append(prompt_text)
 
         # Call gemini in subprocess
