@@ -1,0 +1,15 @@
+[Unit]
+Description=api-ai daily alert trigger (10:00 local)
+Documentation=https://github.com/apopovic77/api-ai
+
+[Timer]
+# 10:00 — during the day so Telegram alerts arrive when Alex can
+# actually look at them. Compares today's 03:00 snapshot against
+# yesterday's 03:00 snapshot.
+OnCalendar=*-*-* 10:00:00
+Persistent=true
+RandomizedDelaySec=15min
+Unit=api-ai-maintenance-alert.service
+
+[Install]
+WantedBy=timers.target

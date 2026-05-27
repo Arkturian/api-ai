@@ -19,6 +19,13 @@ Environment=API_AI_STATE_DIR=/var/lib/api-ai
 Environment=API_AI_LOG=/var/log/api-ai-maintenance.log
 Environment=API_AI_VENV=/var/www/api-ai.arkturian.com/venv
 
+# CLIs (claude/codex/gemini) sometimes live in user-local npm-global
+# install paths that aren't in systemd's default PATH. Cover the common
+# locations so `<cli> --version` works regardless of how root installed
+# them. Without this the discovery records cli_version='?' which
+# triggers a spurious diff-alert every run.
+Environment=PATH=/root/.local/bin:/home/alex/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
 # 1) refresh Python SDKs in the api-ai venv (silent no-op on hosts
 #    without a venv at that path)
 ExecStart=/usr/local/bin/api-ai-venv-update.sh

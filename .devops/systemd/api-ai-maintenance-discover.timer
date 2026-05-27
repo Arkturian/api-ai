@@ -1,0 +1,15 @@
+[Unit]
+Description=api-ai daily discovery trigger (03:00 local)
+Documentation=https://github.com/apopovic77/api-ai
+
+[Timer]
+# 03:00 = silent CLI/SDK refresh + snapshot. Runs 30 min after
+# Automation's CLI updater at 02:30 (or earlier — they're idempotent).
+# No Telegram noise at this hour.
+OnCalendar=*-*-* 03:00:00
+Persistent=true
+RandomizedDelaySec=15min
+Unit=api-ai-maintenance-discover.service
+
+[Install]
+WantedBy=timers.target

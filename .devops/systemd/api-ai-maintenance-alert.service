@@ -1,0 +1,24 @@
+[Unit]
+Description=api-ai alert step — compare snapshots + Telegram diff push
+Documentation=https://github.com/apopovic77/api-ai
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/
+
+EnvironmentFile=-/var/www/api-ai.arkturian.com/.env
+Environment=API_AI_STATE_DIR=/var/lib/api-ai
+Environment=API_AI_LOG=/var/log/api-ai-maintenance.log
+
+# Compares /var/lib/api-ai/models.json (today's 03:00 snapshot) against
+# /var/lib/api-ai/models.prev.json (yesterday's 03:00 snapshot). Sends a
+# single HTML Telegram message if anything meaningful drifted overnight.
+ExecStart=/var/www/api-ai.arkturian.com/venv/bin/python /usr/local/bin/api-ai-models-diff-alert.py
+
+TimeoutSec=120
+
+[Install]
+WantedBy=multi-user.target

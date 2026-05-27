@@ -1100,7 +1100,12 @@ async def list_text_models():
                             "cli_version": prov_info.get("cli_version"),
                         })
                 return {
-                    "source": "discovery",
+                    # _source is "automation-curated" when Automation's
+                    # orchestrator pushed via POST /internal/notify-cli-update
+                    # with a `models` payload (KI-validated). Otherwise
+                    # "discovery" (local script). Surface that distinction
+                    # so callers can tell which side wrote the data.
+                    "source": data.get("_source", "discovery"),
                     "updated_at": data.get("updated_at"),
                     "host": data.get("host"),
                     "stale_age_seconds": int(age),

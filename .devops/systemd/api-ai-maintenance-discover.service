@@ -1,0 +1,32 @@
+[Unit]
+Description=api-ai discovery step — venv update + models snapshot (silent)
+Documentation=https://github.com/apopovic77/api-ai
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/
+
+EnvironmentFile=-/var/www/api-ai.arkturian.com/.env
+Environment=API_AI_STATE_DIR=/var/lib/api-ai
+Environment=API_AI_LOG=/var/log/api-ai-maintenance.log
+Environment=API_AI_VENV=/var/www/api-ai.arkturian.com/venv
+Environment=PATH=/root/.local/bin:/home/alex/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+# 1) refresh Python SDKs
+ExecStart=/usr/local/bin/api-ai-venv-update.sh
+
+# 2) snapshot current models (rotates models.json → models.prev.json,
+#    writes fresh models.json). NO diff-alert here — that fires later
+#    at the 10:00 alert timer so Telegram messages arrive during the
+#    day, not at 03:00.
+ExecStart=/var/www/api-ai.arkturian.com/venv/bin/python /usr/local/bin/api-ai-models-discovery.py
+
+ExecStartPost=/bin/bash -c 'date -u +%%Y-%%m-%%dT%%H:%%M:%%SZ > /var/lib/api-ai/last_discovery'
+
+TimeoutSec=900
+
+[Install]
+WantedBy=multi-user.target

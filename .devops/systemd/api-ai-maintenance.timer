@@ -1,11 +1,13 @@
 [Unit]
-Description=Daily api-ai maintenance trigger (05:00 local)
+Description=Daily api-ai maintenance trigger (10:00 local)
 Documentation=https://github.com/apopovic77/api-ai
 
 [Timer]
-# Daily at 05:00 — 30 min after Automation's CLI update at 04:30 so we
-# smoke-test against fresh binaries.
-OnCalendar=*-*-* 05:00:00
+# Daily at 10:00 local — during the day so any Telegram alerts arrive
+# when Alex can actually look at them, not at 5 AM. Automation's CLI
+# update cron runs earlier (around 04:30) so by 10:00 the binaries
+# are guaranteed fresh from that cycle.
+OnCalendar=*-*-* 10:00:00
 # Run on next boot if a previous trigger was missed (laptop closed, etc.)
 Persistent=true
 # Stagger across federation nodes so we don't all hit the same upstream
