@@ -1065,13 +1065,24 @@ async def reset_notification_cooldown(notification_type: str):
 
 
 @router.get("/models")
-async def list_text_models():
+async def list_text_models(
+    provider: Optional[str] = None,
+    group_by: Optional[str] = None,
+):
     """List available text AI models.
 
     Live source: ``/var/lib/api-ai/models.json`` produced by the daily
     ``api-ai-maintenance.timer`` (CLI version + smoke-test driven). When
     that file is missing or stale we return a conservative hardcoded
     fallback so existing clients don't break.
+
+    Query params:
+        provider: filter results to a single provider (claude/codex/gemini).
+            Case-insensitive. Models from other providers are dropped.
+        group_by: when set to ``provider``, the response gains an extra
+            ``by_provider`` field with the shape ``{provider: [model_ids]}``
+            for clients that want grouped dropdowns without re-pivoting
+            the flat ``models`` array.
     """
     import json as _json
     import time
@@ -1099,7 +1110,13 @@ async def list_text_models():
                             "is_default": (m == prov_info.get("default")),
                             "cli_version": prov_info.get("cli_version"),
                         })
-                return {
+                # Apply ?provider= filter (case-insensitive)
+                if provider:
+                    p = provider.lower().strip()
+                    models = [m for m in models if m["provider"] == p]
+                    providers = {k: v for k, v in providers.items() if k == p}
+
+                response = {
                     # _source is "automation-curated" when Automation's
                     # orchestrator pushed via POST /internal/notify-cli-update
                     # with a `models` payload (KI-validated). Otherwise
@@ -1120,21 +1137,36 @@ async def list_text_models():
                         for name, info in providers.items()
                     },
                 }
+                # Optional grouped view: {provider: [ids]} for clients that
+                # want pre-pivoted dropdowns
+                if group_by == "provider":
+                    grouped: dict[str, list[str]] = {}
+                    for m in models:
+                        grouped.setdefault(m["provider"], []).append(m["id"])
+                    response["by_provider"] = grouped
+                return response
             logger.warning(f"models.json is {age/3600:.1f}h old (>25h), using fallback")
         except Exception as e:
             logger.warning(f"Failed to read models.json: {e} — using fallback")
 
     # Fallback: minimal hardcoded list that's known to work today
-    return {
-        "source": "fallback",
-        "models": [
-            {"id": "sonnet", "provider": "claude", "endpoint": "/ai/claude", "is_default": True},
-            {"id": "opus",   "provider": "claude", "endpoint": "/ai/claude"},
-            {"id": "haiku",  "provider": "claude", "endpoint": "/ai/claude"},
-            {"id": "codex-default", "provider": "codex",  "endpoint": "/ai/chatgpt", "is_default": True},
-            {"id": "gemini-2.5-flash",      "provider": "gemini", "endpoint": "/ai/gemini", "is_default": True},
-            {"id": "gemini-2.5-flash-lite", "provider": "gemini", "endpoint": "/ai/gemini"},
-            {"id": "gemini-2.5-pro",        "provider": "gemini", "endpoint": "/ai/gemini"},
-        ],
-    }
+    fallback_models = [
+        {"id": "sonnet", "provider": "claude", "endpoint": "/ai/claude", "is_default": True},
+        {"id": "opus",   "provider": "claude", "endpoint": "/ai/claude"},
+        {"id": "haiku",  "provider": "claude", "endpoint": "/ai/claude"},
+        {"id": "codex-default", "provider": "codex",  "endpoint": "/ai/chatgpt", "is_default": True},
+        {"id": "gemini-2.5-flash",      "provider": "gemini", "endpoint": "/ai/gemini", "is_default": True},
+        {"id": "gemini-2.5-flash-lite", "provider": "gemini", "endpoint": "/ai/gemini"},
+        {"id": "gemini-2.5-pro",        "provider": "gemini", "endpoint": "/ai/gemini"},
+    ]
+    if provider:
+        p = provider.lower().strip()
+        fallback_models = [m for m in fallback_models if m["provider"] == p]
+    response = {"source": "fallback", "models": fallback_models}
+    if group_by == "provider":
+        grouped: dict[str, list[str]] = {}
+        for m in fallback_models:
+            grouped.setdefault(m["provider"], []).append(m["id"])
+        response["by_provider"] = grouped
+    return response
 
