@@ -1163,6 +1163,12 @@ async def list_text_models(
                             "subscription_locked": info.get("subscription_locked", False),
                             "cli_version": info.get("cli_version"),
                             "discovery_method": info.get("discovery_method"),
+                            # Reasoning-depth spec — Automation's curated
+                            # block, see /internal/notify-cli-update payload
+                            # schema. Shape: {param_name, available[],
+                            # default, supported_via, note?}. None when the
+                            # current payload doesn't include it.
+                            "efforts": info.get("efforts"),
                         }
                         for name, info in providers.items()
                     },
