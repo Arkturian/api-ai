@@ -336,28 +336,44 @@ jobs:
 
       - name: Deploy via arkturian.com jump host
         uses: appleboy/ssh-action@v1.0.3
+        env:
+          TARGET_SHA: ${{ github.sha }}
         with:
           host: ${{ secrets.DEPLOY_HOST }}
           port: ${{ secrets.DEPLOY_PORT }}
           username: ${{ secrets.DEPLOY_USER }}
           key: ${{ secrets.DEPLOY_SSH_KEY }}
           command_timeout: 10m
+          envs: TARGET_SHA
           script: |
             set -euo pipefail
             echo "=== Deploying api-ai to aiserver.oneal.eu via jump host ==="
+            echo "🎯 Target SHA: $TARGET_SHA"
 
-            # SSH to aiserver and deploy via git
-            ssh -o StrictHostKeyChecking=no -i ~/.ssh/oneal_aiserver gsgbot@aiserver.oneal.eu << 'DEPLOY_SCRIPT'
+            # SSH to aiserver and deploy via git. TARGET_SHA is forwarded
+            # explicitly because the inner heredoc is single-quoted.
+            ssh -o StrictHostKeyChecking=no -i ~/.ssh/oneal_aiserver gsgbot@aiserver.oneal.eu "TARGET_SHA='$TARGET_SHA' bash -s" << 'DEPLOY_SCRIPT'
             set -euo pipefail
 
             DEPLOY_PATH="/var/code/api-ai"
 
-            echo "=== Updating repository ==="
+            echo "=== Updating repository (waiting for $TARGET_SHA) ==="
             cd "$DEPLOY_PATH"
-            git fetch origin
             git clean -fd --exclude=venv --exclude=.env
-            git checkout -f main
-            git reset --hard origin/main
+            for i in $(seq 1 15); do
+              git fetch origin --prune --quiet || true
+              if git cat-file -e "${TARGET_SHA}^{commit}" 2>/dev/null; then
+                echo "✓ Commit $TARGET_SHA visible after $i fetch attempt(s)"
+                git checkout -f main 2>/dev/null || true
+                git reset --hard "$TARGET_SHA"
+                break
+              fi
+              if [ "$i" -eq 15 ]; then
+                echo "❌ Commit $TARGET_SHA never appeared after 15 attempts (~45s)"
+                exit 1
+              fi
+              sleep 3
+            done
 
             echo "=== Installing dependencies ==="
             source venv/bin/activate
