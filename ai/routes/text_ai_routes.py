@@ -1066,27 +1066,70 @@ async def reset_notification_cooldown(notification_type: str):
 
 @router.get("/models")
 async def list_text_models():
-    """List available text AI models"""
+    """List available text AI models.
+
+    Live source: ``/var/lib/api-ai/models.json`` produced by the daily
+    ``api-ai-maintenance.timer`` (CLI version + smoke-test driven). When
+    that file is missing or stale we return a conservative hardcoded
+    fallback so existing clients don't break.
+    """
+    import json as _json
+    import time
+    from pathlib import Path as _Path
+
+    state_path = _Path("/var/lib/api-ai/models.json")
+    if state_path.exists():
+        try:
+            age = time.time() - state_path.stat().st_mtime
+            if age <= 25 * 3600:  # accept up to 25h (timer is daily + jitter)
+                data = _json.loads(state_path.read_text())
+                providers = data.get("providers", {})
+                models = []
+                for prov_name, prov_info in providers.items():
+                    endpoint = {
+                        "claude": "/ai/claude",
+                        "codex":  "/ai/chatgpt",
+                        "gemini": "/ai/gemini",
+                    }.get(prov_name, f"/ai/{prov_name}")
+                    for m in (prov_info.get("available") or []):
+                        models.append({
+                            "id": m,
+                            "provider": prov_name,
+                            "endpoint": endpoint,
+                            "is_default": (m == prov_info.get("default")),
+                            "cli_version": prov_info.get("cli_version"),
+                        })
+                return {
+                    "source": "discovery",
+                    "updated_at": data.get("updated_at"),
+                    "host": data.get("host"),
+                    "stale_age_seconds": int(age),
+                    "models": models,
+                    "providers_meta": {
+                        name: {
+                            "default": info.get("default"),
+                            "subscription_locked": info.get("subscription_locked", False),
+                            "cli_version": info.get("cli_version"),
+                            "discovery_method": info.get("discovery_method"),
+                        }
+                        for name, info in providers.items()
+                    },
+                }
+            logger.warning(f"models.json is {age/3600:.1f}h old (>25h), using fallback")
+        except Exception as e:
+            logger.warning(f"Failed to read models.json: {e} — using fallback")
+
+    # Fallback: minimal hardcoded list that's known to work today
     return {
+        "source": "fallback",
         "models": [
-            {
-                "id": "claude-3-opus",
-                "provider": "anthropic",
-                "context_window": 200000,
-                "endpoint": "/ai/claude"
-            },
-            {
-                "id": "gpt-4-turbo",
-                "provider": "openai",
-                "context_window": 128000,
-                "endpoint": "/ai/chatgpt"
-            },
-            {
-                "id": "gemini-pro",
-                "provider": "google",
-                "context_window": 32000,
-                "endpoint": "/ai/gemini"
-            }
-        ]
+            {"id": "sonnet", "provider": "claude", "endpoint": "/ai/claude", "is_default": True},
+            {"id": "opus",   "provider": "claude", "endpoint": "/ai/claude"},
+            {"id": "haiku",  "provider": "claude", "endpoint": "/ai/claude"},
+            {"id": "codex-default", "provider": "codex",  "endpoint": "/ai/chatgpt", "is_default": True},
+            {"id": "gemini-2.5-flash",      "provider": "gemini", "endpoint": "/ai/gemini", "is_default": True},
+            {"id": "gemini-2.5-flash-lite", "provider": "gemini", "endpoint": "/ai/gemini"},
+            {"id": "gemini-2.5-pro",        "provider": "gemini", "endpoint": "/ai/gemini"},
+        ],
     }
 

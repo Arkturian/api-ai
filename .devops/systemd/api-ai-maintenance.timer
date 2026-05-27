@@ -1,0 +1,17 @@
+[Unit]
+Description=Daily api-ai maintenance trigger (05:00 local)
+Documentation=https://github.com/apopovic77/api-ai
+
+[Timer]
+# Daily at 05:00 — 30 min after Automation's CLI update at 04:30 so we
+# smoke-test against fresh binaries.
+OnCalendar=*-*-* 05:00:00
+# Run on next boot if a previous trigger was missed (laptop closed, etc.)
+Persistent=true
+# Stagger across federation nodes so we don't all hit the same upstream
+# rate-limit window
+RandomizedDelaySec=15min
+Unit=api-ai-maintenance.service
+
+[Install]
+WantedBy=timers.target

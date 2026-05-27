@@ -1,0 +1,41 @@
+[Unit]
+Description=api-ai daily maintenance — venv update + models discovery + alert
+Documentation=https://github.com/apopovic77/api-ai
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/
+
+# Load the api-ai env for GOOGLE_API_KEY / OPENAI_API_KEY / ANTHROPIC_API_KEY
+# / TELEGRAM_BOT_TOKEN / TELEGRAM_ADMIN_CHAT_ID. Same .env the running
+# service uses, single source of truth.
+EnvironmentFile=-/var/www/api-ai.arkturian.com/.env
+
+# Optional override: where to write state + log
+Environment=API_AI_STATE_DIR=/var/lib/api-ai
+Environment=API_AI_LOG=/var/log/api-ai-maintenance.log
+Environment=API_AI_VENV=/var/www/api-ai.arkturian.com/venv
+
+# 1) refresh Python SDKs in the api-ai venv (silent no-op on hosts
+#    without a venv at that path)
+ExecStart=/usr/local/bin/api-ai-venv-update.sh
+
+# 2) discover currently-available models per provider + smoke-test
+ExecStart=/var/www/api-ai.arkturian.com/venv/bin/python /usr/local/bin/api-ai-models-discovery.py
+
+# 3) compare against previous snapshot and Telegram-alert on diff
+ExecStart=/var/www/api-ai.arkturian.com/venv/bin/python /usr/local/bin/api-ai-models-diff-alert.py
+
+# A timer step that exits non-zero would mark the whole unit failed, so
+# ExecStartPost handles the post-discovery housekeeping (touching a
+# 'last_run' marker for the api-ai endpoint to read).
+ExecStartPost=/bin/bash -c 'date -u +%%Y-%%m-%%dT%%H:%%M:%%SZ > /var/lib/api-ai/last_run'
+
+# Don't restart on failure — daily timer will pick it up next cycle
+TimeoutSec=900
+
+[Install]
+WantedBy=multi-user.target
