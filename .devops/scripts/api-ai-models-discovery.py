@@ -253,6 +253,28 @@ def main() -> int:
 
     log("discovery start")
 
+    # ── Concurrency guard ─────────────────────────────────────────────
+    # Multiple concurrent discoveries (e.g. notify-cli-update legacy-path
+    # spawning N times in parallel from Automation's orchestrator burst,
+    # or a manual curl while cron is mid-run) can race on the rotate →
+    # write sequence and leave models.json briefly missing or garbled.
+    # Each individual write is already atomic via tmp+rename, but the
+    # *rotation* (OUT_FILE.replace(PREV_FILE)) followed by the new write
+    # is not. Take an exclusive lock for the whole sequence; non-blocking
+    # so excess concurrent runs exit cleanly instead of queuing.
+    lock_fh = None
+    if not args.dry_run:
+        import fcntl as _fcntl
+        lock_path = OUT_DIR / ".discovery.lock"
+        OUT_DIR.mkdir(parents=True, exist_ok=True)
+        lock_fh = open(lock_path, "w")
+        try:
+            _fcntl.flock(lock_fh.fileno(), _fcntl.LOCK_EX | _fcntl.LOCK_NB)
+        except BlockingIOError:
+            log("another discovery is already running; exiting cleanly")
+            lock_fh.close()
+            return 0
+
     # Move existing models.json → models.prev.json for diff alerting later
     if OUT_FILE.exists() and not args.dry_run:
         try:
@@ -286,6 +308,9 @@ def main() -> int:
     log(f"wrote {OUT_FILE} (codex={len(result['providers']['codex'].get('available', []))} "
         f"claude={len(result['providers']['claude'].get('available', []))} "
         f"gemini={len(result['providers']['gemini'].get('available', []))})")
+    # Lock auto-releases on process exit, but be explicit for clarity
+    if lock_fh is not None:
+        lock_fh.close()
     return 0
 
 
