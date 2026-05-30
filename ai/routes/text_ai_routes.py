@@ -11,10 +11,76 @@ Endpoints for text-based AI models:
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 from typing import Optional, List, Dict, Any, Union
+import asyncio
 import logging
+import os
+import time
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Concurrency caps — keep the host from melting.
+#
+# Each CLI subprocess is a fresh node process at ~350 MB resident; on a
+# 3.8 GB host shared with 30 other services we cannot let an unbounded
+# fan-out of /ai/<provider> requests spin up unlimited subprocesses in
+# parallel. Without these caps, 5 concurrent calls swap-thrash and
+# load-avg climbs to >30 (verified incident 2026-05-30).
+#
+# Per-provider semaphores. Defaults tuned for a small box; override via
+# env if running on something beefier. Worst-case parallel CLIs:
+#   gemini 2 + claude 1 + codex 1 = 4 × ~350MB ≈ 1.4 GB resident
+# Leaves ~2.4 GB for uvicorn workers + the rest of the box.
+#
+# When the semaphore is saturated, requests wait up to ACQUIRE_TIMEOUT
+# seconds for a slot and then return 503 with a Retry-After so callers
+# back off instead of piling up more pending requests.
+_CLI_MAX = {
+    "gemini": int(os.getenv("API_AI_CLI_MAX_GEMINI", "2")),
+    "claude": int(os.getenv("API_AI_CLI_MAX_CLAUDE", "1")),
+    "codex":  int(os.getenv("API_AI_CLI_MAX_CODEX",  "1")),
+}
+_CLI_SEM: dict[str, asyncio.Semaphore] = {}
+_ACQUIRE_TIMEOUT = float(os.getenv("API_AI_CLI_ACQUIRE_TIMEOUT", "60"))
+
+
+def _get_cli_semaphore(provider: str) -> asyncio.Semaphore:
+    """Lazy-create per-provider semaphore (must be inside an event loop)."""
+    sem = _CLI_SEM.get(provider)
+    if sem is None:
+        sem = asyncio.Semaphore(_CLI_MAX.get(provider, 1))
+        _CLI_SEM[provider] = sem
+    return sem
+
+
+async def _acquire_cli_slot(provider: str):
+    """Wait up to ACQUIRE_TIMEOUT for a CLI slot; raise 503 on overflow."""
+    sem = _get_cli_semaphore(provider)
+    started = time.monotonic()
+    try:
+        await asyncio.wait_for(sem.acquire(), timeout=_ACQUIRE_TIMEOUT)
+    except asyncio.TimeoutError:
+        logger.warning(
+            f"{provider} CLI semaphore saturated for {_ACQUIRE_TIMEOUT}s "
+            f"(max={_CLI_MAX.get(provider)}); rejecting with 503"
+        )
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "error": (
+                    f"{provider} CLI is saturated. Server is protecting the "
+                    "host from swap-thrash. Retry with backoff."
+                ),
+                "code": "cli_capacity",
+                "max_concurrent": _CLI_MAX.get(provider),
+                "queued_wait_seconds": round(time.monotonic() - started, 1),
+                "retry_after": 5,
+            },
+            headers={"Retry-After": "5"},
+        )
+    return sem
 
 
 # Request/Response Models
@@ -176,7 +242,13 @@ async def claude_endpoint(
             )
             return result
 
-        result = await asyncio.to_thread(run_claude_cli)
+        # Concurrency cap: bound the number of in-flight claude CLI
+        # subprocesses so we don't swap-thrash the host (see module top).
+        sem = await _acquire_cli_slot("claude")
+        try:
+            result = await asyncio.to_thread(run_claude_cli)
+        finally:
+            sem.release()
 
         # Log the result for debugging
         logger.info(f"Claude CLI returncode: {result.returncode}")
@@ -402,7 +474,11 @@ async def chatgpt_endpoint(
             )
             return result
 
-        result = await asyncio.to_thread(run_codex_cli)
+        sem = await _acquire_cli_slot("codex")
+        try:
+            result = await asyncio.to_thread(run_codex_cli)
+        finally:
+            sem.release()
 
         # Log the result for debugging
         logger.info(f"Codex CLI returncode: {result.returncode}")
@@ -728,7 +804,11 @@ async def gemini_endpoint(
             )
             return result
 
-        result = await asyncio.to_thread(run_gemini_cli)
+        sem = await _acquire_cli_slot("gemini")
+        try:
+            result = await asyncio.to_thread(run_gemini_cli)
+        finally:
+            sem.release()
 
         # Log the result for debugging
         logger.info(f"Gemini CLI returncode: {result.returncode}")

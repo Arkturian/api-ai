@@ -140,3 +140,28 @@ async def notify_cli_update(payload: CliUpdateNotification):
         "triggered": ["discovery", "diff-alert"],
         "note": "out-of-band; check /var/log/api-ai-maintenance.log and /ai/models after ~30s",
     }
+
+
+@router.get("/cli-pressure")
+async def cli_pressure():
+    """Live snapshot of per-provider CLI semaphore saturation.
+
+    Returns counters of how many slots are in use vs configured cap, so
+    monitoring or status dashboards can spot when /ai/<p> traffic is
+    queueing on the host-protection caps. Cheap, side-effect-free.
+    """
+    # Lazy import to avoid touching the loop-local sems at module load
+    from ai.routes.text_ai_routes import _CLI_SEM, _CLI_MAX
+    out = {}
+    for provider, cap in _CLI_MAX.items():
+        sem = _CLI_SEM.get(provider)
+        # ._value counts AVAILABLE slots; in-flight = cap - available
+        available = sem._value if sem is not None else cap
+        in_flight = max(0, cap - available)
+        out[provider] = {
+            "max_concurrent": cap,
+            "in_flight": in_flight,
+            "available": available,
+            "saturated": in_flight >= cap,
+        }
+    return out
