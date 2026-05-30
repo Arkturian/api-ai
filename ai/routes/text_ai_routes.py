@@ -55,6 +55,61 @@ def _get_cli_semaphore(provider: str) -> asyncio.Semaphore:
     return sem
 
 
+def _run_cli_with_pgid(cmd, env, timeout=300, cwd="/"):
+    """Run a CLI subprocess as its own process-group leader.
+
+    Two reasons we don't just use ``subprocess.run`` here:
+
+    1. ``start_new_session=True`` makes the child its own pgid leader, so
+       a timeout kill can take out the whole group via ``os.killpg`` —
+       gemini-cli spawns helper procs (model-router, telemetry) that
+       would otherwise survive a plain ``proc.kill()``.
+
+    2. On TimeoutExpired we ``killpg(SIGKILL)`` the whole group, then
+       reap, so orphan node procs cannot accumulate.
+
+    KillMode=control-group on the systemd unit (default for Type=simple)
+    handles the SERVICE-level restart cleanup separately; this helper
+    covers WORKER-level deaths (uvicorn child crash, multiprocessing
+    fork weirdness) where systemd doesn't notice.
+
+    Returns a CompletedProcess with the same shape ``subprocess.run``
+    would have. Raises ``subprocess.TimeoutExpired`` on timeout after
+    cleanup, same as ``subprocess.run``.
+    """
+    import signal as _signal
+    import subprocess
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=env,
+        cwd=cwd,
+        text=True,
+        start_new_session=True,  # own pgid for clean group-kill
+    )
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        # Take out the whole process group, not just the direct child
+        try:
+            os.killpg(os.getpgid(proc.pid), _signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+        # Reap so we don't leak zombies
+        try:
+            stdout, stderr = proc.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            stdout, stderr = "", ""
+        raise
+    return subprocess.CompletedProcess(
+        args=cmd,
+        returncode=proc.returncode,
+        stdout=stdout,
+        stderr=stderr,
+    )
+
+
 async def _acquire_cli_slot(provider: str):
     """Wait up to ACQUIRE_TIMEOUT for a CLI slot; raise 503 on overflow."""
     sem = _get_cli_semaphore(provider)
@@ -230,16 +285,10 @@ async def claude_endpoint(
             # IMPORTANT: Remove ANTHROPIC_API_KEY so Claude CLI uses OAuth credentials
             env.pop("ANTHROPIC_API_KEY", None)
 
-            # Run claude directly - root has access to all files, no permission bypass needed
-            # The key is setting HOME to a non-root user's home so Claude credentials work
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=300,
-                env=env,
-                cwd="/"
-            )
+            # Run claude in its own process-group so timeout cleanup
+            # can take out helper procs alongside the main CLI. See
+            # _run_cli_with_pgid for the orphan-defense rationale.
+            result = _run_cli_with_pgid(cmd, env=env, timeout=300, cwd="/")
             return result
 
         # Concurrency cap: bound the number of in-flight claude CLI
@@ -465,13 +514,8 @@ async def chatgpt_endpoint(
             # Remove OPENAI_API_KEY so Codex CLI uses OAuth credentials
             env.pop("OPENAI_API_KEY", None)
 
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=300,  # 5 minute timeout
-                env=env
-            )
+            # Own-pgid + killpg-on-timeout — see _run_cli_with_pgid docstring
+            result = _run_cli_with_pgid(cmd, env=env, timeout=300)
             return result
 
         sem = await _acquire_cli_slot("codex")
@@ -795,13 +839,10 @@ async def gemini_endpoint(
             if google_key:
                 env["GEMINI_API_KEY"] = google_key
 
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=300,  # 5 minute timeout
-                env=env
-            )
+            # Own-pgid + killpg-on-timeout — critical for gemini-cli
+            # specifically because it forks helper procs (model router,
+            # telemetry) that won't die with a plain proc.kill()
+            result = _run_cli_with_pgid(cmd, env=env, timeout=300)
             return result
 
         sem = await _acquire_cli_slot("gemini")
