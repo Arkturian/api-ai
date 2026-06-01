@@ -110,6 +110,55 @@ def _run_cli_with_pgid(cmd, env, timeout=300, cwd="/"):
     )
 
 
+def _check_api_billing_gate(confirmed: Optional[bool], endpoint: str) -> None:
+    """Reject the request unless:
+      1. caller explicitly opted in to GCP-billed Gemini API via
+         ``confirm_api_billing: true`` in the request body, AND
+      2. the monthly cap has not been reached.
+
+    Cap mechanics: see ``ai.services.cost_tracker``. Per-host budget is
+    half of Alex' total monthly cap (15 EUR), since we run on two hosts
+    and don't (yet) have a federation-coherent shared counter — the
+    approximation reaches at-most 15 EUR total in the worst case where
+    one host alone hits its cap.
+
+    Raises:
+      HTTPException(403) when the body flag is missing — protects against
+        accidental API spending from a misconfigured caller.
+      HTTPException(429) when the monthly cap is reached — hard cutoff for
+        all callers including those who sent confirm_api_billing=true.
+        See the cost-incident postmortem (Mai 2026, 209 EUR) for context.
+    """
+    from ..services.cost_tracker import cost_tracker
+
+    if not confirmed:
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "error": "api_billing_confirmation_required",
+                "endpoint": endpoint,
+                "hint": ("This path hits the Gemini API (GCP-billed, not "
+                         "subscription). Send `confirm_api_billing: true` in "
+                         "the request body to acknowledge billing exposure."),
+            },
+        )
+
+    if cost_tracker.should_block_request():
+        status = cost_tracker.get_status()
+        raise HTTPException(
+            status_code=429,
+            detail={
+                "error": "monthly_api_cap_reached",
+                "endpoint": endpoint,
+                "spent_eur": round(status.get("total_cost_eur", 0.0), 2),
+                "budget_eur": status.get("monthly_budget_eur"),
+                "hint": ("Per-host monthly cap reached. Cap resets at the "
+                         "start of the next calendar month. Subscription "
+                         "endpoints (/ai/claude, /ai/chatgpt) are unaffected."),
+            },
+        )
+
+
 async def _acquire_cli_slot(provider: str):
     """Wait up to ACQUIRE_TIMEOUT for a CLI slot; raise 503 on overflow."""
     sem = _get_cli_semaphore(provider)
@@ -157,6 +206,13 @@ class Prompt(BaseModel):
     # CLI (logged + ignored). Frontend should source the allowed values
     # from /ai/models providers_meta.<provider>.efforts.available.
     effort: Optional[str] = None
+    # GCP-cost-incident hardening (2026-05-30): explicit opt-in flag required
+    # for any path that hits the Gemini *API* (vision/transcribe SDK calls).
+    # The /ai/gemini text path is hard-503'd until OAuth subscription is set
+    # up — for that path this flag has no effect. For vision + transcribe-gemini
+    # the call is rejected with 403 unless `true`, and 429'd if the monthly
+    # cap is exceeded regardless of confirmation.
+    confirm_api_billing: Optional[bool] = False
 
 
 class AIResponse(BaseModel):
@@ -752,18 +808,21 @@ async def _gemini_vision_with_paths(
 async def gemini_endpoint(
     prompt: Prompt,
     model: Optional[str] = None,
-    api_key: str = Depends(get_api_key)
+    api_key: str = Depends(get_api_key),
 ):
     """
-    Gemini endpoint - auto-routes to CLI or Vision API
+    Gemini endpoint — currently DISABLED at the handler entry.
 
-    Features:
-    - Text-only: Uses Gemini CLI (free tier, no API costs)
-    - With images: Uses Google Generative AI API for vision analysis
-    - Supports image_paths for local file analysis
-    - Usage tracking at /ai/gemini/cost-status
+    Background (2026-05-30 cost incident, 209.56 EUR / Mai):
+    The gemini-CLI was running in API-billing mode because GOOGLE_API_KEY
+    was loaded via dotenv and forwarded to the subprocess as GEMINI_API_KEY.
+    The "subscription" claim never held — no OAuth flow was ever set up for
+    Alex' Google account on these hosts.
 
-    Note: CLI uses free tier. Vision API uses GOOGLE_API_KEY.
+    Until a proper `gemini /authorize` flow is run per host (Login broker
+    follow-up), the text path is intentionally 503. Image-bearing requests
+    are routed to `_gemini_vision_with_paths`, which is API-billed and gated
+    behind the `confirm_api_billing` body-flag + monthly cap.
     """
     import subprocess
     import asyncio
@@ -782,14 +841,31 @@ async def gemini_endpoint(
         prompt_text = prompt.prompt.text
         image_paths = prompt.prompt.image_paths or prompt.image_paths or []
 
-    # If we have image paths, use Google Vision API instead of CLI
+    # If we have image paths, use Google Vision API (API-billed, gated).
     if image_paths:
         valid_paths = [p for p in image_paths if os.path.exists(p)]
         if valid_paths:
+            _check_api_billing_gate(prompt.confirm_api_billing, endpoint="gemini-vision")
             logger.info(f"Routing to Gemini Vision API for {len(valid_paths)} images")
             return await _gemini_vision_with_paths(prompt_text, valid_paths, model, prompt.system)
         else:
             logger.warning(f"None of {len(image_paths)} image paths exist - falling back to CLI")
+
+    # Text-only path: subscription OAuth never set up → hard 503 here so we never
+    # spawn the CLI with broken auth (which would have looked like a free tier
+    # call but billed against the API key when the key was still in dotenv).
+    raise HTTPException(
+        status_code=503,
+        detail={
+            "error": "gemini_text_disabled",
+            "reason": "OAuth subscription not configured for `gemini` CLI on this host. "
+                      "Use /ai/claude or /ai/chatgpt for text. Re-enabled once Login broker "
+                      "exposes a per-host /authorize flow for Alex' Google account.",
+            "tracking": "Login broker follow-up, sibling of Anthropic family-cascade fix",
+        },
+    )
+
+    # --- dead code below (kept for the OAuth re-enable path) -------------------
 
     try:
         # Gemini CLI has no --system-prompt, so prepend system prompt to user prompt
@@ -834,10 +910,13 @@ async def gemini_endpoint(
             cli_home = os.getenv("CLI_HOME") or pwd.getpwuid(os.getuid()).pw_dir
             env["HOME"] = cli_home
 
-            # Gemini CLI expects GEMINI_API_KEY, but we use GOOGLE_API_KEY
-            google_key = os.getenv("GOOGLE_API_KEY", "")
-            if google_key:
-                env["GEMINI_API_KEY"] = google_key
+            # Hardening 2026-05-30 (GCP cost incident, 209.56 EUR Mai):
+            # The previous conditional `if google_key: env["GEMINI_API_KEY"] = google_key`
+            # caused the CLI to fall back to Gemini-API-billing-mode instead of
+            # OAuth subscription whenever GOOGLE_API_KEY was loaded via dotenv.
+            # Removed entirely — gemini-CLI must authenticate via OAuth subscription
+            # only. Until a proper /authorize flow is set up per host (Login broker
+            # follow-up), the /ai/gemini endpoint returns 503 at the handler entry.
 
             # Own-pgid + killpg-on-timeout — critical for gemini-cli
             # specifically because it forks helper procs (model router,

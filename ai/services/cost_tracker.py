@@ -84,15 +84,29 @@ class CostTracker:
 
         self._initialized = True
 
-        # Configuration from environment
-        self.monthly_budget_eur = float(os.getenv("GEMINI_MONTHLY_BUDGET_EUR", "30.0"))
+        # Configuration from environment.
+        #
+        # Per-host monthly cap default lowered 2026-05-30 from 30 → 7.5 EUR
+        # following the Mai 2026 cost incident (209.56 EUR for /ai/gemini API
+        # calls). Alex' direct ask: 15 EUR/month TOTAL across both hosts.
+        # Since we don't (yet) have a federation-coherent shared counter,
+        # we approximate by setting each host to half the total — worst case
+        # both hosts independently reach their cap = 15 EUR overall, matching
+        # the requested ceiling. Override via GEMINI_MONTHLY_BUDGET_EUR env.
+        self.monthly_budget_eur = float(os.getenv("GEMINI_MONTHLY_BUDGET_EUR", "7.5"))
         self.data_dir = Path(os.getenv("COST_TRACKER_DATA_DIR", "/var/lib/api-ai"))
         self.telegram_bot_token = os.getenv("TELEGRAM_BOT_TOKEN", "")
         self.telegram_chat_id = os.getenv("TELEGRAM_ADMIN_CHAT_ID", "")
+        # Hard-block changed from optional → on-by-default. Disabling it
+        # requires explicit BLOCK_ON_BUDGET_EXCEEDED=false, not the previous
+        # silent-default fallback. The cost incident was partly enabled by a
+        # cap that existed but didn't fire.
         self.block_on_budget_exceeded = os.getenv("BLOCK_ON_BUDGET_EXCEEDED", "true").lower() == "true"
 
-        # Alert thresholds (percentage of budget)
-        self.alert_thresholds = [50, 80, 95, 100]
+        # Alert thresholds (percentage of budget). 50% removed (noise at low
+        # caps), 80/95/100 kept — single Telegram per threshold per month
+        # via _alerts_sent dedup below.
+        self.alert_thresholds = [80, 95, 100]
 
         # In-memory state
         self._usage_data: dict = {}
