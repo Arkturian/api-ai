@@ -32,7 +32,7 @@ import subprocess
 from pathlib import Path as _Path
 from typing import Any, Optional
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)
@@ -140,6 +140,79 @@ async def notify_cli_update(payload: CliUpdateNotification):
         "triggered": ["discovery", "diff-alert"],
         "note": "out-of-band; check /var/log/api-ai-maintenance.log and /ai/models after ~30s",
     }
+
+
+def _verify_shared_counter_auth(provided: Optional[str]) -> None:
+    """Compare provided header against ``COST_TRACKER_SHARED_SECRET`` env."""
+    expected = os.environ.get("COST_TRACKER_SHARED_SECRET", "")
+    if not expected:
+        # Master mode is opt-in. If the secret isn't configured, decline
+        # cleanly instead of letting unauthenticated callers through.
+        raise HTTPException(
+            status_code=503,
+            detail="shared-counter master is not configured on this host",
+        )
+    if not provided or provided != expected:
+        raise HTTPException(status_code=401, detail="invalid shared counter auth")
+
+
+class _SharedTrackPayload(BaseModel):
+    """Payload posted by a sibling host to log a Gemini API call into the
+    shared monthly counter. Field names align with the existing local
+    ``cost_tracker._usage_data`` shape so the master can just delegate."""
+
+    input_tokens: int = 0
+    output_tokens: int = 0
+    model: str = "default"
+    # Caller's identification — purely informational, ends up in
+    # by_host breakdown for postmortem-debug. NOT used for auth.
+    source_host: Optional[str] = None
+
+
+@router.get("/cost-shared-state")
+async def cost_shared_state_get(
+    x_internal_auth: Optional[str] = Header(default=None, alias="X-Internal-Auth"),
+):
+    """Master-side state read. Federation-internal: sibling api-ai hosts
+    query this before serving an API-billed Gemini call so the cap is
+    enforced against a single shared counter.
+
+    Auth: caller must send the configured shared secret in
+    ``X-Internal-Auth`` header. See cost_tracker.CostTracker for client side.
+    """
+    _verify_shared_counter_auth(x_internal_auth)
+    from ..services.cost_tracker import cost_tracker
+    status = cost_tracker.get_status()
+    # Reuse the existing block-decision so the client doesn't reimplement it.
+    status["would_block"] = cost_tracker.should_block_request()
+    return status
+
+
+@router.post("/cost-shared-state")
+async def cost_shared_state_track(
+    payload: _SharedTrackPayload,
+    x_internal_auth: Optional[str] = Header(default=None, alias="X-Internal-Auth"),
+):
+    """Master-side increment. Sibling host calls this *before* serving an
+    API-billed Gemini call so the cap is enforced against a single counter.
+
+    We log into the same ``cost_tracker`` the master itself uses, so
+    arkserver's own calls and arkturian's reported calls accumulate
+    together into ``gemini_usage_<YYYY-MM>.json``.
+    """
+    _verify_shared_counter_auth(x_internal_auth)
+    from ..services.cost_tracker import cost_tracker
+    # Force local-mode write on the master: even if this process has
+    # COST_TRACKER_MASTER_URL set (shouldn't, but defensive), the master
+    # IS the source of truth and must not recurse to itself.
+    cost_tracker._track_usage_local(
+        model=payload.model,
+        input_tokens=payload.input_tokens,
+        output_tokens=payload.output_tokens,
+    )
+    status = cost_tracker.get_status()
+    status["would_block"] = cost_tracker.should_block_request()
+    return status
 
 
 @router.get("/cli-pressure")
