@@ -1229,6 +1229,21 @@ async def gcp_budget_webhook(request: Request):
 
             logger.info(f"GCP Budget webhook received: {threshold:.0f}% threshold for {budget_name}")
 
+            # GCP-side hard-cap (cost-incident hardening 2026-05-30):
+            # When Google itself reports 100% threshold reached, persistently
+            # block all API-billed /ai/* calls regardless of the local
+            # counter view. The flag survives process restarts (lives in
+            # the monthly usage file) and is cleared only via the dedicated
+            # POST /ai/gemini/cost-status/reset-hard-cap endpoint (or by
+            # month rollover when a new usage file is rotated in).
+            if threshold >= 100:
+                cost_tracker.trip_gcp_hard_cap(
+                    reason=(
+                        f"GCP webhook reported {threshold:.0f}% of "
+                        f"{budget_name}: ${cost_amount:.2f} / ${budget_amount:.2f}"
+                    )
+                )
+
             # Check if we can send notification (cooldown: 24h)
             if not notification_manager.can_send("gcp_budget_alert"):
                 next_allowed = notification_manager.get_next_allowed("gcp_budget_alert")
@@ -1268,6 +1283,24 @@ async def gcp_budget_webhook(request: Request):
     except Exception as e:
         logger.error(f"GCP Budget webhook error: {e}")
         return {"status": "error", "message": str(e)}
+
+
+@router.post("/gemini/cost-status/reset-hard-cap")
+async def reset_gcp_hard_cap(api_key: str = Depends(get_api_key)):
+    """Manually clear the persistent GCP hard-cap flag.
+
+    Use only after confirming GCP-side budget has reset (month rollover)
+    or after intentional acknowledgement that further spending is OK.
+    The webhook will re-trip the flag automatically the next time GCP
+    reports 100% threshold reached, so this is safe to call without
+    risking silent re-opening.
+    """
+    from ..services.cost_tracker import cost_tracker
+    result = cost_tracker.clear_gcp_hard_cap()
+    logger.warning(
+        f"GCP hard-cap manually reset (was_active={result['was_active']})"
+    )
+    return result
 
 
 @router.get("/notifications/status")

@@ -397,12 +397,23 @@ class CostTracker:
     def should_block_request(self) -> bool:
         """Check if request should be blocked due to budget.
 
-        Client mode: query master, fall back to local view if master is
-        unreachable for >10s (short cache TTL means a real overage still
-        triggers within seconds of the master observing it).
+        Three independent block conditions, ANY of which trips the gate:
 
-        Master / standalone: use local state directly.
+        1. **GCP-side kill switch** (set by `/ai/gemini/gcp-budget-webhook`
+           when GCP reports 100% threshold reached). Survives process
+           restarts because it lands in the on-disk usage file. Cleared
+           only by ``clear_gcp_hard_cap()`` (manual or month rollover).
+           This is the real hard-cap regardless of local-tracker drift.
+
+        2. **Client mode**: query master, fall back to local view if master
+           is unreachable (logged loudly).
+
+        3. **Local view**: ``block_on_budget_exceeded`` + monthly cap.
         """
+        # (1) Persistent GCP-side kill switch
+        if self._usage_data.get("gcp_hard_cap_active"):
+            return True
+        # (2) Federation-shared master state
         if self.master_url and self.shared_secret:
             try:
                 status = self._fetch_master_status()
@@ -413,7 +424,41 @@ class CostTracker:
                     f"view for block-decision (may under-count cross-host)"
                 )
                 # Fall through to local view as graceful degradation
+        # (3) Local view
         return self.block_on_budget_exceeded and self.is_budget_exceeded()
+
+    def trip_gcp_hard_cap(self, reason: str = "") -> None:
+        """Persistently flag this counter as blocked. Called by the GCP
+        budget webhook when Google itself reports 100% threshold reached.
+
+        Survives process restart (written into the monthly usage file) so
+        a service restart doesn't accidentally re-open the gate before
+        the human resets it. Per-host: each host has its own flag, so
+        flipping on the master also flips for clients because they query
+        the master's ``would_block``.
+        """
+        with self._data_lock:
+            self._usage_data["gcp_hard_cap_active"] = True
+            self._usage_data["gcp_hard_cap_reason"] = reason
+            self._usage_data["gcp_hard_cap_tripped_at"] = datetime.now().isoformat()
+            self._save_data()
+        logger.warning(
+            f"cost_tracker: GCP hard-cap TRIPPED ({reason or 'no-reason-given'}) — "
+            f"all API-billed calls will return 429 until clear_gcp_hard_cap()"
+        )
+
+    def clear_gcp_hard_cap(self) -> dict:
+        """Manually clear the persistent GCP hard-cap flag. Use only after
+        confirming GCP-side budget has reset (month rollover) or after
+        intentional acknowledgement that further spending is OK.
+        """
+        with self._data_lock:
+            was_active = bool(self._usage_data.get("gcp_hard_cap_active"))
+            self._usage_data["gcp_hard_cap_active"] = False
+            self._usage_data["gcp_hard_cap_reason"] = ""
+            self._usage_data["gcp_hard_cap_cleared_at"] = datetime.now().isoformat()
+            self._save_data()
+        return {"was_active": was_active, "cleared": True}
 
     def _post_to_master(
         self, model: str, input_tokens: int, output_tokens: int
