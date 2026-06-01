@@ -263,6 +263,11 @@ async def transcribe_audio(
     prompt: Optional[str] = Form(None),
     language: Optional[str] = Form(None),
     response_format: Optional[str] = Form(None),
+    # GCP-cost-incident hardening (2026-05-30): when `model` starts with
+    # `gemini`, the request hits the Gemini API (GCP-billed) and must
+    # carry this opt-in form-field set to "true" / "1" / "yes". Whisper
+    # and gpt-4o models route to OpenAI and are unaffected by this flag.
+    confirm_api_billing: Optional[str] = Form(None),
     api_key: str = Depends(get_api_key)
 ):
     """
@@ -287,6 +292,10 @@ async def transcribe_audio(
     """
     try:
         if model.startswith("gemini"):
+            # GCP-cost-incident hardening: require explicit opt-in + cap check.
+            from .text_ai_routes import _check_api_billing_gate
+            confirmed_bool = str(confirm_api_billing).lower() in ("true", "1", "yes", "y")
+            _check_api_billing_gate(confirmed_bool, endpoint="transcribe-gemini")
             return await _transcribe_with_gemini(file, model, prompt)
         else:
             return await _transcribe_with_whisper(

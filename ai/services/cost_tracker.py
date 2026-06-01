@@ -84,15 +84,47 @@ class CostTracker:
 
         self._initialized = True
 
-        # Configuration from environment
-        self.monthly_budget_eur = float(os.getenv("GEMINI_MONTHLY_BUDGET_EUR", "30.0"))
+        # Configuration from environment.
+        #
+        # Default monthly cap lowered 2026-05-30 from 30 → 15 EUR following
+        # the Mai 2026 cost incident (209.56 EUR for /ai/gemini API calls).
+        # Alex' direct ask: 15 EUR/month TOTAL across both hosts, enforced
+        # as a *shared* counter via the master/client setup below.
+        #
+        # Per-host fallback: if COST_TRACKER_MASTER_URL is unset on a
+        # non-master host, that host falls back to its own local counter
+        # and the cap effectively becomes per-host (caller should still
+        # see correct gate behaviour, just without cross-host coherence).
+        # Set GEMINI_MONTHLY_BUDGET_EUR to override the 15 EUR default.
+        self.monthly_budget_eur = float(os.getenv("GEMINI_MONTHLY_BUDGET_EUR", "15.0"))
+
+        # Master/client mode — see _track_usage_local + the corresponding
+        # /internal/cost-shared-state endpoints in internal_routes.py.
+        # When COST_TRACKER_MASTER_URL is set, this instance becomes a
+        # CLIENT and forwards track/should_block calls to the master.
+        # When unset, this instance is either the master (canonical) or a
+        # standalone host in fallback mode.
+        self.master_url = os.getenv("COST_TRACKER_MASTER_URL", "").rstrip("/")
+        self.shared_secret = os.getenv("COST_TRACKER_SHARED_SECRET", "")
+        # Cache for the latest known master status — used as fallback if
+        # the master is briefly unreachable so a transient network hiccup
+        # doesn't fail-open all API-billed calls. TTL is short (10s) so
+        # the cap reacts quickly to real spending.
+        self._master_status_cache: Optional[dict] = None
+        self._master_status_cache_ts: float = 0.0
         self.data_dir = Path(os.getenv("COST_TRACKER_DATA_DIR", "/var/lib/api-ai"))
         self.telegram_bot_token = os.getenv("TELEGRAM_BOT_TOKEN", "")
         self.telegram_chat_id = os.getenv("TELEGRAM_ADMIN_CHAT_ID", "")
+        # Hard-block changed from optional → on-by-default. Disabling it
+        # requires explicit BLOCK_ON_BUDGET_EXCEEDED=false, not the previous
+        # silent-default fallback. The cost incident was partly enabled by a
+        # cap that existed but didn't fire.
         self.block_on_budget_exceeded = os.getenv("BLOCK_ON_BUDGET_EXCEEDED", "true").lower() == "true"
 
-        # Alert thresholds (percentage of budget)
-        self.alert_thresholds = [50, 80, 95, 100]
+        # Alert thresholds (percentage of budget). 50% removed (noise at low
+        # caps), 80/95/100 kept — single Telegram per threshold per month
+        # via _alerts_sent dedup below.
+        self.alert_thresholds = [80, 95, 100]
 
         # In-memory state
         self._usage_data: dict = {}
@@ -167,13 +199,36 @@ class CostTracker:
         return cost_usd, cost_eur
 
     def track_usage(self, model: str, input_tokens: int, output_tokens: int) -> None:
+        """Track token usage. Routes to the master if this host is a client,
+        otherwise tracks locally. See ``_track_usage_local`` for the
+        actual accounting logic.
         """
-        Track token usage for a request.
+        if input_tokens == 0 and output_tokens == 0:
+            return
 
-        Args:
-            model: Model name (e.g., "gemini-2.0-flash-exp")
-            input_tokens: Number of input tokens
-            output_tokens: Number of output tokens
+        if self.master_url and self.shared_secret:
+            try:
+                self._post_to_master(
+                    model=model,
+                    input_tokens=input_tokens,
+                    output_tokens=output_tokens,
+                )
+                return
+            except Exception as e:
+                # Don't fail the underlying request — but DO log loudly so
+                # we notice the master is unreachable and a cap drift can
+                # be reconciled. Local fallback also tracks, so the host
+                # at least has its own slice of state until master recovers.
+                logger.error(
+                    f"cost_tracker: master post failed ({e}); falling back "
+                    f"to local tracking — cap may temporarily lag"
+                )
+
+        self._track_usage_local(model, input_tokens, output_tokens)
+
+    def _track_usage_local(self, model: str, input_tokens: int, output_tokens: int) -> None:
+        """The legacy local-file tracking path. Master mode + client
+        fallback both end up here.
         """
         if input_tokens == 0 and output_tokens == 0:
             return
@@ -340,8 +395,120 @@ class CostTracker:
         return self._usage_data.get("total_cost_eur", 0) >= self.monthly_budget_eur
 
     def should_block_request(self) -> bool:
-        """Check if request should be blocked due to budget."""
+        """Check if request should be blocked due to budget.
+
+        Three independent block conditions, ANY of which trips the gate:
+
+        1. **GCP-side kill switch** (set by `/ai/gemini/gcp-budget-webhook`
+           when GCP reports 100% threshold reached). Survives process
+           restarts because it lands in the on-disk usage file. Cleared
+           only by ``clear_gcp_hard_cap()`` (manual or month rollover).
+           This is the real hard-cap regardless of local-tracker drift.
+
+        2. **Client mode**: query master, fall back to local view if master
+           is unreachable (logged loudly).
+
+        3. **Local view**: ``block_on_budget_exceeded`` + monthly cap.
+        """
+        # (1) Persistent GCP-side kill switch
+        if self._usage_data.get("gcp_hard_cap_active"):
+            return True
+        # (2) Federation-shared master state
+        if self.master_url and self.shared_secret:
+            try:
+                status = self._fetch_master_status()
+                return bool(status.get("would_block", False))
+            except Exception as e:
+                logger.warning(
+                    f"cost_tracker: master query failed ({e}); using local "
+                    f"view for block-decision (may under-count cross-host)"
+                )
+                # Fall through to local view as graceful degradation
+        # (3) Local view
         return self.block_on_budget_exceeded and self.is_budget_exceeded()
+
+    def trip_gcp_hard_cap(self, reason: str = "") -> None:
+        """Persistently flag this counter as blocked. Called by the GCP
+        budget webhook when Google itself reports 100% threshold reached.
+
+        Survives process restart (written into the monthly usage file) so
+        a service restart doesn't accidentally re-open the gate before
+        the human resets it. Per-host: each host has its own flag, so
+        flipping on the master also flips for clients because they query
+        the master's ``would_block``.
+        """
+        with self._data_lock:
+            self._usage_data["gcp_hard_cap_active"] = True
+            self._usage_data["gcp_hard_cap_reason"] = reason
+            self._usage_data["gcp_hard_cap_tripped_at"] = datetime.now().isoformat()
+            self._save_data()
+        logger.warning(
+            f"cost_tracker: GCP hard-cap TRIPPED ({reason or 'no-reason-given'}) — "
+            f"all API-billed calls will return 429 until clear_gcp_hard_cap()"
+        )
+
+    def clear_gcp_hard_cap(self) -> dict:
+        """Manually clear the persistent GCP hard-cap flag. Use only after
+        confirming GCP-side budget has reset (month rollover) or after
+        intentional acknowledgement that further spending is OK.
+        """
+        with self._data_lock:
+            was_active = bool(self._usage_data.get("gcp_hard_cap_active"))
+            self._usage_data["gcp_hard_cap_active"] = False
+            self._usage_data["gcp_hard_cap_reason"] = ""
+            self._usage_data["gcp_hard_cap_cleared_at"] = datetime.now().isoformat()
+            self._save_data()
+        return {"was_active": was_active, "cleared": True}
+
+    def _post_to_master(
+        self, model: str, input_tokens: int, output_tokens: int
+    ) -> None:
+        """Client → master: log a call. Raises on transport / auth errors so
+        the caller can fall back to local tracking.
+        """
+        url = f"{self.master_url}/internal/cost-shared-state"
+        with httpx.Client(timeout=5.0) as client:
+            r = client.post(
+                url,
+                json={
+                    "model": model,
+                    "input_tokens": input_tokens,
+                    "output_tokens": output_tokens,
+                    "source_host": os.environ.get("API_AI_HOST_KEY")
+                    or os.uname().nodename.split(".")[0],
+                },
+                headers={"X-Internal-Auth": self.shared_secret},
+            )
+            r.raise_for_status()
+            # Refresh status cache from the master's response so the next
+            # should_block_request() in this process sees the updated total
+            # immediately, not after the 10s cache TTL.
+            try:
+                self._master_status_cache = r.json()
+                import time as _t
+                self._master_status_cache_ts = _t.time()
+            except Exception:
+                pass
+
+    def _fetch_master_status(self) -> dict:
+        """Client → master: read shared counter. 10s in-process cache so
+        bursts of calls don't hammer the master.
+        """
+        import time as _t
+        now = _t.time()
+        if (
+            self._master_status_cache is not None
+            and now - self._master_status_cache_ts < 10.0
+        ):
+            return self._master_status_cache
+        url = f"{self.master_url}/internal/cost-shared-state"
+        with httpx.Client(timeout=5.0) as client:
+            r = client.get(url, headers={"X-Internal-Auth": self.shared_secret})
+            r.raise_for_status()
+            data = r.json()
+        self._master_status_cache = data
+        self._master_status_cache_ts = now
+        return data
 
     def get_status(self) -> dict:
         """Get current usage status."""
