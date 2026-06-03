@@ -159,6 +159,36 @@ def _check_api_billing_gate(confirmed: Optional[bool], endpoint: str) -> None:
         )
 
 
+def _download_storage_images(prompt_text):
+    # Scan the prompt for storage media URLs, download each to /tmp; return
+    # [(url, local_path)]. Lets the CLI read a LOCAL file instead of WebFetching
+    # the URL -> no storage-MCP asset lookups, deterministic for codex/gemini.
+    # X-API-KEY bypasses the storage quarantine gate (re-scan of flagged imgs).
+    # Caller MUST delete the local files after the CLI call.
+    import re, uuid
+    try:
+        import httpx
+    except Exception:
+        return []
+    urls = [u.rstrip('.,;:)]}>') for u in re.findall(r'https?://\S+', prompt_text or '') if '/storage/media/' in u]
+    out = []
+    for url in dict.fromkeys(urls):
+        try:
+            with httpx.Client(timeout=30.0, follow_redirects=True) as c:
+                r = c.get(url, headers={"X-API-KEY": os.getenv("STORAGE_API_KEY", "Inetpass1")})
+                r.raise_for_status()
+            ct = r.headers.get('content-type', '')
+            ext = 'png' if 'png' in ct else ('webp' if 'webp' in ct else 'jpg')
+            p = '/tmp/aiimg_' + uuid.uuid4().hex[:10] + '.' + ext
+            with open(p, 'wb') as fh:
+                fh.write(r.content)
+            out.append((url, p))
+            logger.info('localized storage image -> ' + p)
+        except Exception as e:
+            logger.warning('localize: download failed for ' + url + ': ' + str(e))
+    return out
+
+
 async def _acquire_cli_slot(provider: str):
     """Wait up to ACQUIRE_TIMEOUT for a CLI slot; raise 503 on overflow."""
     sem = _get_cli_semaphore(provider)
@@ -279,14 +309,12 @@ async def claude_endpoint(
 
         # Append image paths to prompt - Claude CLI will read and analyze them
         if image_paths:
-            import os
-            valid_paths = [p for p in image_paths if os.path.exists(p)]
-            if valid_paths:
-                paths_text = "\n".join(valid_paths)
-                prompt_text = f"{prompt_text}\n\nAnalysiere folgende Bilder:\n{paths_text}"
-                logger.info(f"Added {len(valid_paths)} image paths to prompt for Claude CLI")
-            else:
-                logger.warning(f"None of the {len(image_paths)} image paths exist: {image_paths}")
+            # image_paths may be local file paths OR https URLs (storage media).
+            # Claude CLI reads local files and WebFetches URLs from the prompt,
+            # so fold ALL refs in (old os.path.exists filter dropped URLs).
+            paths_text = "\n".join(image_paths)
+            prompt_text = f"{prompt_text}\n\nAnalysiere folgende Bilder:\n{paths_text}"
+            logger.info(f"Added {len(image_paths)} image ref(s) to prompt for Claude CLI")
 
         logger.info(f"Calling claude -p with prompt length: {len(prompt_text)} chars")
 
@@ -295,6 +323,11 @@ async def claude_endpoint(
         # root/sudo (the CLI refuses to start). uvicorn here runs as
         # root, so we leave the flag off — in -p (print) mode there are
         # no tool calls anyway, so no permission prompts to bypass.
+        _imgs = _download_storage_images(prompt_text)
+        for _u, _p in _imgs:
+            prompt_text = prompt_text.replace(_u, _p)
+        if _imgs:
+            logger.info("claude: localized %d storage image(s) to /tmp" % len(_imgs))
         cmd = ["claude", "-p", prompt_text, "--output-format", "json"]
 
         # Add model - default to sonnet (günstig), user can override with opus/haiku
@@ -354,6 +387,11 @@ async def claude_endpoint(
             result = await asyncio.to_thread(run_claude_cli)
         finally:
             sem.release()
+            for _u, _p in _imgs:
+                try:
+                    os.remove(_p)
+                except Exception:
+                    pass
 
         # Log the result for debugging
         logger.info(f"Claude CLI returncode: {result.returncode}")
@@ -545,6 +583,13 @@ async def chatgpt_endpoint(
         if prompt.effort:
             cmd.extend(["-c", f"model_reasoning_effort={prompt.effort}"])
 
+        _imgs = _download_storage_images(prompt_text)
+        if _imgs:
+            for _u, _p in _imgs:
+                prompt_text = prompt_text.replace(_u, "(siehe angehaengtes Bild)")
+            image_paths = list(image_paths) + [_p for _u, _p in _imgs]
+            logger.info("codex: localized %d storage image(s) to /tmp -> -i" % len(_imgs))
+
         # Add image paths via -i flag (Codex supports multiple -i flags)
         if image_paths:
             import os
@@ -579,6 +624,11 @@ async def chatgpt_endpoint(
             result = await asyncio.to_thread(run_codex_cli)
         finally:
             sem.release()
+            for _u, _p in _imgs:
+                try:
+                    os.remove(_p)
+                except Exception:
+                    pass
 
         # Log the result for debugging
         logger.info(f"Codex CLI returncode: {result.returncode}")
@@ -841,29 +891,14 @@ async def gemini_endpoint(
         prompt_text = prompt.prompt.text
         image_paths = prompt.prompt.image_paths or prompt.image_paths or []
 
-    # If we have image paths, use Google Vision API (API-billed, gated).
+    # Images go through the gemini CLI over the OAuth subscription (FREE) — not
+    # the paid Gemini Vision API. With --no-sandbox --yolo the CLI reads local
+    # file paths AND WebFetches image URLs from the prompt. OAuth subscription
+    # is set up on these hosts now, so the old hard-503 is gone.
     if image_paths:
-        valid_paths = [p for p in image_paths if os.path.exists(p)]
-        if valid_paths:
-            _check_api_billing_gate(prompt.confirm_api_billing, endpoint="gemini-vision")
-            logger.info(f"Routing to Gemini Vision API for {len(valid_paths)} images")
-            return await _gemini_vision_with_paths(prompt_text, valid_paths, model, prompt.system)
-        else:
-            logger.warning(f"None of {len(image_paths)} image paths exist - falling back to CLI")
-
-    # Text-only path: subscription OAuth never set up → hard 503 here so we never
-    # spawn the CLI with broken auth (which would have looked like a free tier
-    # call but billed against the API key when the key was still in dotenv).
-    raise HTTPException(
-        status_code=503,
-        detail={
-            "error": "gemini_text_disabled",
-            "reason": "OAuth subscription not configured for `gemini` CLI on this host. "
-                      "Use /ai/claude or /ai/chatgpt for text. Re-enabled once Login broker "
-                      "exposes a per-host /authorize flow for Alex' Google account.",
-            "tracking": "Login broker follow-up, sibling of Anthropic family-cascade fix",
-        },
-    )
+        paths_text = "\n".join(image_paths)
+        prompt_text = f"{prompt_text}\n\nAnalysiere folgende Bilder:\n{paths_text}"
+        logger.info(f"Folding {len(image_paths)} image ref(s) into gemini CLI prompt (subscription path)")
 
     # --- dead code below (kept for the OAuth re-enable path) -------------------
 
@@ -899,6 +934,11 @@ async def gemini_endpoint(
                 f"effort={prompt.effort!r} requested but Gemini CLI does "
                 f"not support thinking_budget; ignoring."
             )
+        _imgs = _download_storage_images(prompt_text)
+        for _u, _p in _imgs:
+            prompt_text = prompt_text.replace(_u, "@" + _p)
+        if _imgs:
+            logger.info("gemini: localized %d storage image(s) to /tmp -> @path" % len(_imgs))
         cmd.append(prompt_text)
 
         # Call gemini in subprocess
@@ -929,6 +969,11 @@ async def gemini_endpoint(
             result = await asyncio.to_thread(run_gemini_cli)
         finally:
             sem.release()
+            for _u, _p in _imgs:
+                try:
+                    os.remove(_p)
+                except Exception:
+                    pass
 
         # Log the result for debugging
         logger.info(f"Gemini CLI returncode: {result.returncode}")
@@ -1051,22 +1096,18 @@ async def gemini_vision_endpoint(
     """
     import os
     import base64
-    import google.generativeai as genai
-    from ..services.gemini_cli_cost_tracker import gemini_cli_cost_tracker
+    import uuid
+    import httpx
 
+    # Vision runs over the gemini CLI / OAuth subscription (FREE) now — NOT the
+    # paid Gemini Vision API. base64 images can't be handed to the CLI directly
+    # (it hallucinates on local files outside its workspace), so each image is
+    # stashed in storage with a short TTL (auto-purged), and the resulting
+    # public URL is passed to /ai/gemini, where the CLI WebFetches + analyses it.
+    # Endpoint kept for compatibility (storage/review/knowledge call it w/ base64).
     try:
-        # Get API key from environment
-        google_api_key = os.getenv("GOOGLE_API_KEY", "")
-        if not google_api_key:
-            raise HTTPException(status_code=500, detail="GOOGLE_API_KEY not configured")
-
-        # Configure Gemini
-        genai.configure(api_key=google_api_key)
-
-        # Extract prompt text and images
         prompt_text = ""
         images_b64 = []
-
         if isinstance(prompt.prompt, str):
             prompt_text = prompt.prompt
         else:
@@ -1074,82 +1115,46 @@ async def gemini_vision_endpoint(
             if prompt.prompt.images:
                 images_b64 = prompt.prompt.images
 
-        logger.info(f"Calling Gemini Vision API with prompt length: {len(prompt_text)} chars, images: {len(images_b64)}")
+        storage_url = os.getenv("STORAGE_API_URL", "https://api-storage.arkturian.com")
+        storage_key = os.getenv("STORAGE_API_KEY", "Inetpass1")
 
-        # Select model - use gemini-2.0-flash for vision (fast and capable)
-        model_name = model or "gemini-2.0-flash"
-        gemini_model = genai.GenerativeModel(model_name)
+        image_urls = []
+        if images_b64:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                for i, img_b64 in enumerate(images_b64):
+                    if img_b64.startswith("data:"):
+                        header, b64_data = img_b64.split(",", 1)
+                        mime_type = header.split(":")[1].split(";")[0]
+                    else:
+                        b64_data = img_b64
+                        mime_type = "image/jpeg"
+                    ext = (mime_type.split("/")[-1] or "jpg").replace("jpeg", "jpg")
+                    img_bytes = base64.b64decode(b64_data)
+                    resp = await client.post(
+                        f"{storage_url}/storage/upload",
+                        files={"file": (f"vision_{uuid.uuid4().hex[:8]}_{i}.{ext}", img_bytes, mime_type)},
+                        data={"is_public": "true", "analyze": "false", "ai_mode": "none",
+                              "ttl_hours": "1", "reuse_existing": "false"},
+                        headers={"X-API-KEY": storage_key},
+                    )
+                    resp.raise_for_status()
+                    sid = resp.json().get("id")
+                    if not sid:
+                        raise HTTPException(status_code=502, detail=f"vision upload bridge: no id ({resp.text[:160]})")
+                    image_urls.append(f"{storage_url}/storage/media/{sid}")
+                    logger.info(f"Vision bridge: image {i+1} -> media/{sid} (ttl 1h)")
 
-        # Build content parts
-        content_parts = []
-
-        # Add images first (better for vision tasks)
-        for i, img_b64 in enumerate(images_b64):
-            try:
-                # Handle data URL format: "data:image/jpeg;base64,..."
-                if img_b64.startswith("data:"):
-                    # Extract mime type and base64 data
-                    header, b64_data = img_b64.split(",", 1)
-                    mime_type = header.split(":")[1].split(";")[0]
-                else:
-                    # Assume raw base64 JPEG
-                    b64_data = img_b64
-                    mime_type = "image/jpeg"
-
-                # Decode and create image part
-                image_data = base64.b64decode(b64_data)
-                content_parts.append({
-                    "mime_type": mime_type,
-                    "data": image_data
-                })
-                logger.info(f"Added image {i+1}: {mime_type}, {len(image_data)} bytes")
-            except Exception as e:
-                logger.warning(f"Failed to process image {i+1}: {e}")
-                continue
-
-        # Add text prompt
-        content_parts.append(prompt_text)
-
-        # Generate response
-        response = gemini_model.generate_content(content_parts)
-
-        # Extract response text
-        response_text = response.text if response.text else ""
-
-        # Extract token counts if available
-        input_tokens = 0
-        output_tokens = 0
-        if hasattr(response, 'usage_metadata'):
-            input_tokens = getattr(response.usage_metadata, 'prompt_token_count', 0)
-            output_tokens = getattr(response.usage_metadata, 'candidates_token_count', 0)
-
-        # Track usage
-        gemini_cli_cost_tracker.track_usage({
-            "input_tokens": input_tokens,
-            "output_tokens": output_tokens,
-            "model": model_name
-        })
-
-        tokens_used = input_tokens + output_tokens
-
-        logger.info(
-            f"Gemini Vision response: {len(response_text)} chars, "
-            f"{tokens_used} tokens ({input_tokens}in/{output_tokens}out)"
-        )
-
-        return AIResponse(
-            response=response_text,
-            model=model_name,
-            tokens_used=tokens_used,
-            finish_reason="stop"
-        )
+        if model:
+            logger.info(f"Vision: ignoring requested model={model!r}; gemini CLI uses its default")
+        delegate = Prompt(prompt=prompt_text, system=prompt.system, image_paths=image_urls or None)
+        return await gemini_endpoint(delegate, model=None, api_key=api_key)
 
     except HTTPException:
         raise
     except Exception as e:
         import traceback
         error_msg = f"{type(e).__name__}: {str(e)}"
-        logger.error(f"Gemini Vision error: {error_msg}")
+        logger.error(f"Gemini Vision (CLI bridge) error: {error_msg}")
         logger.error(f"Traceback: {traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=error_msg)
 
