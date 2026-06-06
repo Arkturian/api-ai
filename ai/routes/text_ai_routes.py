@@ -15,6 +15,7 @@ import asyncio
 import logging
 import os
 import time
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -217,6 +218,78 @@ async def _acquire_cli_slot(provider: str):
     return sem
 
 
+# ──────────────────────────────────────────────────────────────────────
+# Federation persona injection
+#
+# Background: the /ai/<provider> endpoints shell a CLI subprocess. Those
+# CLIs authenticate via OAuth credentials resolved from the credentialed
+# bot-home that the systemd unit points at:
+#   claude  -> $CLAUDE_CONFIG_DIR/.credentials.json
+#   codex   -> $CODEX_HOME/auth.json
+#   gemini  -> $HOME/.gemini/oauth_creds.json
+# A refresh loop keeps those tokens fresh. We therefore must NOT repoint
+# CLAUDE_CONFIG_DIR/CODEX_HOME/HOME at a fresh per-endpoint persona dir —
+# that would strip the credentials and 401 every call (the cred-drift
+# landmine). Instead we fetch the *rendered persona string* from cloud-api
+# and inject it as a system prompt:
+#   claude -> --append-system-prompt <persona>   (alongside any caller system)
+#   codex  -> prepended to the prompt text        (no --system-prompt flag)
+#   gemini -> prepended to the prompt text         (no --system-prompt flag)
+# This is federation-fragment-aware (toggle per endpoint via the virtual
+# bot's disabled_fragments on cloud-api) yet credential-safe.
+CLOUD_API_URL = os.getenv("CLOUD_API_URL", "https://cloud-api.arkserver.arkturian.com")
+PERSONAS_DIR = Path(os.getenv("AI_API_PERSONAS_DIR", "/var/lib/api-ai/personas"))
+PERSONA_TTL_S = int(os.getenv("AI_API_PERSONA_TTL", "60"))
+# endpoint token -> instruction filename rendered by cloud-api per agent
+_PERSONA_INSTR = {"claude": "CLAUDE.md", "chatgpt": "AGENTS.md", "gemini": "GEMINI.md"}
+
+
+async def get_persona_prompt(endpoint: str, variant: Optional[str]) -> Optional[str]:
+    """Return the rendered persona prompt for ``api-ai-<endpoint>-<variant>``.
+
+    Fetches cloud-api's ``/api/sessions/<vbot>/effective-prompt`` and caches
+    the rendered markdown on disk (TTL ``PERSONA_TTL_S``). Disk cache is used
+    so it survives worker restarts and is shared across uvicorn workers.
+
+    Returns the markdown string to inject, or ``None`` when ``variant`` is
+    falsy or the persona could not be obtained (in which case the caller
+    proceeds with the bare prompt — persona injection is best-effort, never
+    a hard dependency that could take an endpoint down).
+    """
+    if not variant:
+        return None
+    import httpx
+    vbot = f"api-ai-{endpoint}-{variant}"
+    cache_dir = PERSONAS_DIR / vbot
+    target = cache_dir / _PERSONA_INSTR.get(endpoint, "CLAUDE.md")
+
+    # Serve from cache while fresh
+    try:
+        if target.exists() and (time.time() - target.stat().st_mtime) <= PERSONA_TTL_S:
+            return target.read_text(encoding="utf-8") or None
+    except OSError:
+        pass
+
+    # (Re)fetch from cloud-api
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            r = await client.get(f"{CLOUD_API_URL}/api/sessions/{vbot}/effective-prompt")
+            r.raise_for_status()
+            rendered = (r.json().get("rendered") or "").strip()
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        target.write_text(rendered, encoding="utf-8")
+        return rendered or None
+    except Exception as e:
+        logger.warning(f"persona fetch failed for {vbot}: {e}; falling back to stale/none")
+        # Best-effort: serve a stale cache rather than dropping the persona
+        try:
+            if target.exists():
+                return target.read_text(encoding="utf-8") or None
+        except OSError:
+            pass
+        return None
+
+
 # Request/Response Models
 class PromptText(BaseModel):
     """Nested text/images structure for legacy compatibility"""
@@ -243,6 +316,13 @@ class Prompt(BaseModel):
     # the call is rejected with 403 unless `true`, and 429'd if the monthly
     # cap is exceeded regardless of confirmation.
     confirm_api_billing: Optional[bool] = False
+    # Federation persona injection (opt-in). When set (e.g. "default" /
+    # "test"), the rendered persona of the virtual bot
+    # ``api-ai-<endpoint>-<variant>`` is fetched from cloud-api and injected
+    # as a system prompt (see ``get_persona_prompt``). None = no injection,
+    # i.e. the historical "bare CLI" behaviour — kept as the default so
+    # existing callers (storage/review/knowledge) are unaffected.
+    persona_variant: Optional[str] = None
 
 
 class AIResponse(BaseModel):
@@ -337,6 +417,14 @@ async def claude_endpoint(
         # Add system prompt if provided
         if prompt.system:
             cmd.extend(["--system-prompt", prompt.system])
+
+        # Federation persona (opt-in). Appended so it layers on top of the
+        # CLI default + any caller --system-prompt, and so we never touch
+        # CLAUDE_CONFIG_DIR (credentials). See get_persona_prompt.
+        persona = await get_persona_prompt("claude", prompt.persona_variant)
+        if persona:
+            cmd.extend(["--append-system-prompt", persona])
+            logger.info(f"Injected persona api-ai-claude-{prompt.persona_variant} ({len(persona)} chars)")
 
         # Reasoning depth — claude CLI accepts: low, medium, high, xhigh, max
         if prompt.effort:
@@ -556,6 +644,13 @@ async def chatgpt_endpoint(
         if prompt.system:
             prompt_text = f"{prompt.system}\n\n{prompt_text}"
             logger.info(f"Prepended system prompt ({len(prompt.system)} chars) to user prompt")
+
+        # Federation persona (opt-in). Codex has no system-prompt flag, so we
+        # prepend it ahead of any caller system prompt -> persona, system, user.
+        persona = await get_persona_prompt("chatgpt", prompt.persona_variant)
+        if persona:
+            prompt_text = f"{persona}\n\n{prompt_text}"
+            logger.info(f"Injected persona api-ai-chatgpt-{prompt.persona_variant} ({len(persona)} chars)")
 
         logger.info(f"Calling codex exec with prompt length: {len(prompt_text)} chars")
 
@@ -907,6 +1002,13 @@ async def gemini_endpoint(
         if prompt.system:
             prompt_text = f"{prompt.system}\n\n{prompt_text}"
             logger.info(f"Prepended system prompt ({len(prompt.system)} chars) to user prompt")
+
+        # Federation persona (opt-in). No system-prompt flag -> prepend ahead
+        # of any caller system prompt -> persona, system, user.
+        persona = await get_persona_prompt("gemini", prompt.persona_variant)
+        if persona:
+            prompt_text = f"{persona}\n\n{prompt_text}"
+            logger.info(f"Injected persona api-ai-gemini-{prompt.persona_variant} ({len(persona)} chars)")
 
         logger.info(f"Calling gemini CLI with prompt length: {len(prompt_text)} chars")
 
