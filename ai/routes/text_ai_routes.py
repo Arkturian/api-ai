@@ -414,17 +414,31 @@ async def claude_endpoint(
         selected_model = model or "sonnet"
         cmd.extend(["--model", selected_model])
 
-        # Add system prompt if provided
-        if prompt.system:
-            cmd.extend(["--system-prompt", prompt.system])
-
-        # Federation persona (opt-in). Appended so it layers on top of the
-        # CLI default + any caller --system-prompt, and so we never touch
-        # CLAUDE_CONFIG_DIR (credentials). See get_persona_prompt.
+        # System prompt + federation persona (opt-in).
+        #
+        # When a persona is active it becomes the AUTHORITATIVE base system
+        # prompt via --system-prompt, and we pass --setting-sources project to
+        # suppress loading the user-level CLAUDE.md from CLAUDE_CONFIG_DIR (the
+        # ~43KB bot-home federation identity) which would otherwise be loaded as
+        # memory and override the small persona — verified: with a plain
+        # --append-system-prompt the bot-home identity wins and the model still
+        # claims to be AiApi with IACP tools. Credentials live in
+        # .credentials.json and load regardless of --setting-sources, so OAuth
+        # is unaffected (verified is_error=false). A caller-supplied system
+        # prompt then layers ON TOP of the persona base via append.
         persona = await get_persona_prompt("claude", prompt.persona_variant)
         if persona:
-            cmd.extend(["--append-system-prompt", persona])
-            logger.info(f"Injected persona api-ai-claude-{prompt.persona_variant} ({len(persona)} chars)")
+            cmd.extend(["--system-prompt", persona, "--setting-sources", "project"])
+            if prompt.system:
+                cmd.extend(["--append-system-prompt", prompt.system])
+            logger.info(
+                f"Injected persona api-ai-claude-{prompt.persona_variant} "
+                f"({len(persona)} chars); user CLAUDE.md suppressed"
+            )
+        elif prompt.system:
+            # No persona: historical behaviour — caller system prompt, bot-home
+            # CLAUDE.md still loaded as memory as before.
+            cmd.extend(["--system-prompt", prompt.system])
 
         # Reasoning depth — claude CLI accepts: low, medium, high, xhigh, max
         if prompt.effort:
