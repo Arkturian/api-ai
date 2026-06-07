@@ -244,29 +244,46 @@ PERSONA_TTL_S = int(os.getenv("AI_API_PERSONA_TTL", "60"))
 _PERSONA_INSTR = {"claude": "CLAUDE.md", "chatgpt": "AGENTS.md", "gemini": "GEMINI.md"}
 
 
-async def get_persona_prompt(endpoint: str, variant: Optional[str]) -> Optional[str]:
-    """Return the rendered persona prompt for ``api-ai-<endpoint>-<variant>``.
+def persona_dir_for(endpoint: str, variant: str) -> Path:
+    return PERSONAS_DIR / f"api-ai-{endpoint}-{variant}"
 
-    Fetches cloud-api's ``/api/sessions/<vbot>/effective-prompt`` and caches
-    the rendered markdown on disk (TTL ``PERSONA_TTL_S``). Disk cache is used
-    so it survives worker restarts and is shared across uvicorn workers.
 
-    Returns the markdown string to inject, or ``None`` when ``variant`` is
-    falsy or the persona could not be obtained (in which case the caller
-    proceeds with the bare prompt — persona injection is best-effort, never
-    a hard dependency that could take an endpoint down).
+async def get_persona_bundle(endpoint: str, variant: Optional[str]) -> dict:
+    """Return ``{"rendered": str|None, "allowed_tools": list[str]}`` for
+    ``api-ai-<endpoint>-<variant>``.
+
+    Fetches cloud-api's ``/api/sessions/<vbot>/effective-prompt`` (which since
+    the MCP-toolset rollout also carries ``allowed_tools``) and caches the full
+    response JSON on disk (TTL ``PERSONA_TTL_S``). Disk cache survives worker
+    restarts and is shared across uvicorn workers. Best-effort: returns an empty
+    bundle when ``variant`` is falsy or the fetch fails, so the endpoint always
+    proceeds (bare) rather than erroring.
     """
+    import json as _json
+    empty = {"rendered": None, "allowed_tools": []}
     if not variant:
-        return None
+        return empty
     import httpx
     vbot = f"api-ai-{endpoint}-{variant}"
     cache_dir = PERSONAS_DIR / vbot
-    target = cache_dir / _PERSONA_INSTR.get(endpoint, "CLAUDE.md")
+    cache = cache_dir / "effective.json"
+
+    def _parse(path: Path):
+        try:
+            d = _json.loads(path.read_text(encoding="utf-8"))
+            return {
+                "rendered": ((d.get("rendered") or "").strip() or None),
+                "allowed_tools": d.get("allowed_tools") or [],
+            }
+        except Exception:
+            return None
 
     # Serve from cache while fresh
     try:
-        if target.exists() and (time.time() - target.stat().st_mtime) <= PERSONA_TTL_S:
-            return target.read_text(encoding="utf-8") or None
+        if cache.exists() and (time.time() - cache.stat().st_mtime) <= PERSONA_TTL_S:
+            cached = _parse(cache)
+            if cached is not None:
+                return cached
     except OSError:
         pass
 
@@ -275,18 +292,82 @@ async def get_persona_prompt(endpoint: str, variant: Optional[str]) -> Optional[
         async with httpx.AsyncClient(timeout=15.0) as client:
             r = await client.get(f"{CLOUD_API_URL}/api/sessions/{vbot}/effective-prompt")
             r.raise_for_status()
-            rendered = (r.json().get("rendered") or "").strip()
+            payload = r.json()
         cache_dir.mkdir(parents=True, exist_ok=True)
-        target.write_text(rendered, encoding="utf-8")
-        return rendered or None
+        cache.write_text(_json.dumps(payload), encoding="utf-8")
+        return {
+            "rendered": ((payload.get("rendered") or "").strip() or None),
+            "allowed_tools": payload.get("allowed_tools") or [],
+        }
     except Exception as e:
         logger.warning(f"persona fetch failed for {vbot}: {e}; falling back to stale/none")
-        # Best-effort: serve a stale cache rather than dropping the persona
-        try:
-            if target.exists():
-                return target.read_text(encoding="utf-8") or None
-        except OSError:
-            pass
+        stale = _parse(cache) if cache.exists() else None
+        return stale if stale is not None else empty
+
+
+def _load_host_mcp_servers() -> dict:
+    """Return the host bot-home ``.claude.json`` ``mcpServers`` map (name ->
+    server config WITH its auth ``headersHelper``). Located via
+    CLAUDE_CONFIG_DIR so it matches the dir the CLI authenticates from."""
+    import json as _json
+    cfg_dir = os.getenv("CLAUDE_CONFIG_DIR") or os.getenv("HOME") or ""
+    path = Path(cfg_dir) / ".claude.json"
+    try:
+        data = _json.loads(path.read_text(encoding="utf-8"))
+    except Exception as e:
+        logger.warning(f"could not read MCP servers from {path}: {e}")
+        return {}
+
+    def _find(obj):
+        if isinstance(obj, dict):
+            srv = obj.get("mcpServers")
+            if isinstance(srv, dict) and srv:
+                return srv
+            for v in obj.values():
+                r = _find(v)
+                if r:
+                    return r
+        return {}
+
+    return _find(data)
+
+
+def build_mcp_config(persona_dir: Path, allowed_tools: list) -> Optional[Path]:
+    """Materialise a claude ``--mcp-config`` file holding exactly the MCP
+    servers referenced by ``allowed_tools`` (server name = the ``mcp__<server>__``
+    prefix), sourced WITH auth from the host ``.claude.json``. Returns the path,
+    or ``None`` when no servers resolve.
+
+    Why explicit ``--mcp-config`` instead of the CLAUDE_CONFIG_DIR servers: the
+    persona path uses ``--setting-sources project`` which strips user-scoped MCP
+    servers (verified — knowledge/artrack disappear). An explicit ``--mcp-config``
+    + ``--strict-mcp-config`` is independent of setting-sources, so persona
+    suppression and MCP tools coexist. Credentials still load from
+    CLAUDE_CONFIG_DIR/.credentials.json regardless.
+    """
+    import json as _json
+    wanted = set()
+    for t in (allowed_tools or []):
+        if t.startswith("mcp__"):
+            parts = t.split("__")
+            if len(parts) >= 2 and parts[1]:
+                wanted.add(parts[1])
+    if not wanted:
+        return None
+    host = _load_host_mcp_servers()
+    servers = {n: host[n] for n in wanted if n in host}
+    if not servers:
+        logger.warning(
+            f"allowed_tools reference servers {sorted(wanted)} but none found in host .claude.json"
+        )
+        return None
+    try:
+        persona_dir.mkdir(parents=True, exist_ok=True)
+        path = persona_dir / ".mcp.json"
+        path.write_text(_json.dumps({"mcpServers": servers}), encoding="utf-8")
+        return path
+    except OSError as e:
+        logger.warning(f"could not write mcp-config: {e}")
         return None
 
 
@@ -426,7 +507,9 @@ async def claude_endpoint(
         # .credentials.json and load regardless of --setting-sources, so OAuth
         # is unaffected (verified is_error=false). A caller-supplied system
         # prompt then layers ON TOP of the persona base via append.
-        persona = await get_persona_prompt("claude", prompt.persona_variant)
+        bundle = await get_persona_bundle("claude", prompt.persona_variant)
+        persona = bundle["rendered"]
+        allowed_tools = bundle["allowed_tools"]
         if persona:
             cmd.extend(["--system-prompt", persona, "--setting-sources", "project"])
             if prompt.system:
@@ -439,6 +522,28 @@ async def claude_endpoint(
             # No persona: historical behaviour — caller system prompt, bot-home
             # CLAUDE.md still loaded as memory as before.
             cmd.extend(["--system-prompt", prompt.system])
+
+        # MCP tool-gating (opt-in, bot-bound). When the virtual bot declares
+        # allowed_tools, the call becomes an AGENTIC multi-turn run: we re-add
+        # exactly those servers via an explicit --mcp-config (independent of
+        # --setting-sources, which would otherwise strip them) and whitelist the
+        # tools so no interactive permission prompt is needed. Bumps the timeout
+        # since tool round-trips take longer than a single-shot inference.
+        claude_cli_timeout = 300
+        if allowed_tools and prompt.persona_variant:
+            mcp_path = build_mcp_config(
+                persona_dir_for("claude", prompt.persona_variant), allowed_tools
+            )
+            if mcp_path:
+                cmd.extend([
+                    "--mcp-config", str(mcp_path), "--strict-mcp-config",
+                    "--allowedTools", ",".join(allowed_tools),
+                ])
+                claude_cli_timeout = int(os.getenv("API_AI_CLI_AGENTIC_TIMEOUT", "600"))
+                logger.info(
+                    f"Tool-gated agentic call: {len(allowed_tools)} allowed_tools, "
+                    f"servers from {mcp_path}, timeout={claude_cli_timeout}s"
+                )
 
         # Reasoning depth — claude CLI accepts: low, medium, high, xhigh, max
         if prompt.effort:
@@ -479,7 +584,7 @@ async def claude_endpoint(
             # Run claude in its own process-group so timeout cleanup
             # can take out helper procs alongside the main CLI. See
             # _run_cli_with_pgid for the orphan-defense rationale.
-            result = _run_cli_with_pgid(cmd, env=env, timeout=300, cwd="/")
+            result = _run_cli_with_pgid(cmd, env=env, timeout=claude_cli_timeout, cwd="/")
             return result
 
         # Concurrency cap: bound the number of in-flight claude CLI
@@ -661,7 +766,7 @@ async def chatgpt_endpoint(
 
         # Federation persona (opt-in). Codex has no system-prompt flag, so we
         # prepend it ahead of any caller system prompt -> persona, system, user.
-        persona = await get_persona_prompt("chatgpt", prompt.persona_variant)
+        persona = (await get_persona_bundle("chatgpt", prompt.persona_variant))["rendered"]
         if persona:
             prompt_text = f"{persona}\n\n{prompt_text}"
             logger.info(f"Injected persona api-ai-chatgpt-{prompt.persona_variant} ({len(persona)} chars)")
@@ -1019,7 +1124,7 @@ async def gemini_endpoint(
 
         # Federation persona (opt-in). No system-prompt flag -> prepend ahead
         # of any caller system prompt -> persona, system, user.
-        persona = await get_persona_prompt("gemini", prompt.persona_variant)
+        persona = (await get_persona_bundle("gemini", prompt.persona_variant))["rendered"]
         if persona:
             prompt_text = f"{persona}\n\n{prompt_text}"
             logger.info(f"Injected persona api-ai-gemini-{prompt.persona_variant} ({len(persona)} chars)")
