@@ -510,17 +510,21 @@ async def claude_endpoint(
         bundle = await get_persona_bundle("claude", prompt.persona_variant)
         persona = bundle["rendered"]
         allowed_tools = bundle["allowed_tools"]
+        # CLEAN DEFAULT: always suppress the user-level CLAUDE.md from
+        # CLAUDE_CONFIG_DIR (the bot-home identity, e.g. AiApi's 43KB federation
+        # persona) so a bare endpoint call starts with NO inherited Vorwissen.
+        # An ephemeral one-shot call only carries what the caller defines
+        # (persona + tools). Credentials in .credentials.json load regardless of
+        # --setting-sources (verified is_error=false).
+        cmd.extend(["--setting-sources", "project"])
         if persona:
-            cmd.extend(["--system-prompt", persona, "--setting-sources", "project"])
+            cmd.extend(["--system-prompt", persona])
             if prompt.system:
                 cmd.extend(["--append-system-prompt", prompt.system])
             logger.info(
-                f"Injected persona api-ai-claude-{prompt.persona_variant} "
-                f"({len(persona)} chars); user CLAUDE.md suppressed"
+                f"Injected persona api-ai-claude-{prompt.persona_variant} ({len(persona)} chars)"
             )
         elif prompt.system:
-            # No persona: historical behaviour — caller system prompt, bot-home
-            # CLAUDE.md still loaded as memory as before.
             cmd.extend(["--system-prompt", prompt.system])
 
         # MCP tool-gating (opt-in, bot-bound). When the virtual bot declares
@@ -1171,6 +1175,20 @@ async def gemini_endpoint(
             cli_home = os.getenv("CLI_HOME") or pwd.getpwuid(os.getuid()).pw_dir
             env["HOME"] = cli_home
 
+            # CLEAN DEFAULT (cwd isolation): gemini discovers GEMINI.md by
+            # walking the cwd up the directory tree. From the service WorkingDir
+            # (/var/www/...) that walk reaches `/` and picks up `/GEMINI.md`
+            # (the host Dev-Engineer context) as Vorwissen — verified leak. The
+            # walk STOPS at $HOME, so running from a scratch dir UNDER cli_home
+            # (with no GEMINI.md) yields no inherited Vorwissen (verified: the
+            # "are you the dev engineer" probe flips JA->NEIN). The persona, when
+            # set, is prepended to the prompt as before and stays authoritative.
+            neutral_cwd = os.path.join(cli_home, ".aiapi-neutral")
+            try:
+                os.makedirs(neutral_cwd, exist_ok=True)
+            except OSError:
+                neutral_cwd = "/"
+
             # Hardening 2026-05-30 (GCP cost incident, 209.56 EUR Mai):
             # The previous conditional `if google_key: env["GEMINI_API_KEY"] = google_key`
             # caused the CLI to fall back to Gemini-API-billing-mode instead of
@@ -1182,7 +1200,7 @@ async def gemini_endpoint(
             # Own-pgid + killpg-on-timeout — critical for gemini-cli
             # specifically because it forks helper procs (model router,
             # telemetry) that won't die with a plain proc.kill()
-            result = _run_cli_with_pgid(cmd, env=env, timeout=300)
+            result = _run_cli_with_pgid(cmd, env=env, timeout=300, cwd=neutral_cwd)
             return result
 
         sem = await _acquire_cli_slot("gemini")
