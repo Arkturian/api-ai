@@ -376,6 +376,11 @@ async def generate_video_endpoint(
                 message="Video generation queued. Use /ai/genvideo/status/{request_id} to check progress."
             )
 
+    except HTTPException:
+        # Let the billing gate (403 / 429) and other HTTPException paths
+        # propagate untouched — wrapping them in a 500 below would mask
+        # the actual user-actionable status code.
+        raise
     except TimeoutError as e:
         logger.error(f"Video generation timeout: {e}")
         raise HTTPException(status_code=504, detail="Video generation timed out")
