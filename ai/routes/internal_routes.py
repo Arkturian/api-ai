@@ -271,7 +271,13 @@ async def minimax_cost_shared_state_track(
     # ``_track_local`` is used because the master IS the source of
     # truth — recursing through ``_track`` (which would post-to-master
     # if it had a master_url set) would loop infinitely.
-    if modality == "image":
+    if modality == "text":
+        minimax_cost_tracker._track_local(
+            "text", model,
+            input_tokens=units.get("input_tokens", 0),
+            output_tokens=units.get("output_tokens", 0),
+        )
+    elif modality == "image":
         minimax_cost_tracker._track_local(
             "image", model, num_images=units.get("num_images", 1)
         )
@@ -295,7 +301,7 @@ async def minimax_cost_shared_state_track(
         raise HTTPException(
             status_code=400,
             detail=f"unknown modality '{modality}' — "
-                   f"valid: image|video|tts|voice_clone|music",
+                   f"valid: text|image|video|tts|voice_clone|music",
         )
 
     status = minimax_cost_tracker.get_status()

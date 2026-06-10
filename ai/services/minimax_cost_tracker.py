@@ -44,6 +44,11 @@ logger = logging.getLogger(__name__)
 # MiniMax pricing (USD per unit). Verify against platform.minimax.io
 # before publishing a PR that adds a new model.
 MINIMAX_PRICING = {
+    # ── Text (per million tokens, input + output) ────────────────────
+    # M3 PAYG pricing per Minimax-bot's IACP cee14357 (heute verified):
+    # ~$0.20 / 1M input tokens, ~$1.10 / 1M output tokens.
+    "minimax-m3":               {"input_per_1m": 0.20, "output_per_1m": 1.10},
+
     # ── Image (per image) ────────────────────────────────────────────
     "minimax-image-01":         {"per_image": 0.003},
 
@@ -187,7 +192,14 @@ class MinimaxCostTracker:
         """
         pricing = MINIMAX_PRICING.get(model, MINIMAX_PRICING["default"])
         cost_usd = 0.0
-        if "per_image" in pricing:
+        if "input_per_1m" in pricing:
+            in_tok = units.get("input_tokens", 0)
+            out_tok = units.get("output_tokens", 0)
+            cost_usd = (
+                (in_tok * pricing["input_per_1m"])
+                + (out_tok * pricing["output_per_1m"])
+            ) / 1_000_000.0
+        elif "per_image" in pricing:
             cost_usd = pricing["per_image"] * units.get("num_images", 1)
         elif "per_second" in pricing:
             cost_usd = pricing["per_second"] * units.get("seconds", 0)
@@ -203,6 +215,12 @@ class MinimaxCostTracker:
         return cost_usd, cost_eur
 
     # ── Public track methods (one per metering shape) ─────────────────
+
+    def track_text(self, model: str, input_tokens: int, output_tokens: int) -> None:
+        self._track(
+            "text", model,
+            input_tokens=input_tokens, output_tokens=output_tokens,
+        )
 
     def track_image(self, model: str, num_images: int = 1) -> None:
         self._track("image", model, num_images=num_images)

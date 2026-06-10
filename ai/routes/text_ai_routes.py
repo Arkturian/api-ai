@@ -236,6 +236,127 @@ def _check_minimax_billing_gate(confirmed: Optional[bool], endpoint: str) -> Non
         )
 
 
+@router.post("/m3", response_model=AIResponse)
+async def m3_endpoint(
+    prompt: Prompt,
+    model: Optional[str] = None,
+    api_key: str = Depends(get_api_key),
+):
+    """MiniMax M3 text endpoint — API-direct via OpenAI-compatible /v1/chat/completions.
+
+    Architectural choice rationale (Minimax-bot IACP cee14357, 2026-06-10):
+    M3 IS available via claude-CLI with ``ANTHROPIC_BASE_URL=https://api.minimax.io/anthropic``
+    overrides. We deliberately do NOT use that path here because:
+
+    1. claude-CLI injects its agent system-prompt + tool definitions
+       (~10-30k tokens) per call → real PAYG money on a text-completion
+       endpoint that shouldn't be agentic.
+    2. CLI cold-start adds seconds of latency per request.
+    3. Caller gets claude-code's agent behaviour, not the raw M3 model —
+       wrong shape for a callable text endpoint.
+
+    So we go direct OpenAI-compat: ``api.minimax.io/v1/chat/completions``
+    with the multimodal pay-as-you-go key. Cost is metered per token via
+    ``minimax_cost_tracker.track_text`` against the shared 25 EUR/month cap.
+
+    Subscription endpoints (/ai/claude, /ai/chatgpt) remain the right
+    choice for cost-free flat-rate text — /ai/m3 is for callers who
+    specifically want M3's behaviour and accept PAYG billing.
+    """
+    import os
+    from ..services.minimax_cost_tracker import minimax_cost_tracker
+
+    # Gate first — refuse the API call entirely if the caller didn't
+    # opt in to billing, even before we touch the upstream.
+    _check_minimax_billing_gate(
+        prompt.confirm_api_billing, endpoint="m3"
+    )
+
+    api_key_val = os.getenv("MINIMAX_MULTIMODAL_API_KEY", "")
+    if not api_key_val:
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "error": "minimax_api_key_missing",
+                "hint": "MINIMAX_MULTIMODAL_API_KEY not configured in service env.",
+            },
+        )
+
+    # Build OpenAI-style messages list. ``conversation_history`` (if
+    # provided) gives prior user/assistant turns; the current prompt
+    # becomes the final user message. ``system`` lands at the front.
+    if isinstance(prompt.prompt, str):
+        user_text = prompt.prompt
+    else:
+        user_text = prompt.prompt.text
+
+    messages: list = []
+    if prompt.system:
+        messages.append({"role": "system", "content": prompt.system})
+    if prompt.conversation_history:
+        messages.extend(prompt.conversation_history)
+    messages.append({"role": "user", "content": user_text})
+
+    selected_model = model or "MiniMax-M3"
+    logger.info(
+        f"Calling MiniMax M3 API: model={selected_model}, messages={len(messages)}, "
+        f"max_tokens={prompt.max_tokens}, temp={prompt.temperature}"
+    )
+
+    try:
+        from openai import AsyncOpenAI
+    except ImportError:
+        raise HTTPException(
+            status_code=500,
+            detail="openai SDK not installed in api-ai venv",
+        )
+
+    client = AsyncOpenAI(
+        api_key=api_key_val,
+        base_url=os.getenv("MINIMAX_TEXT_BASE_URL", "https://api.minimax.io/v1"),
+    )
+
+    try:
+        resp = await client.chat.completions.create(
+            model=selected_model,
+            messages=messages,
+            max_tokens=prompt.max_tokens or 1000,
+            temperature=prompt.temperature if prompt.temperature is not None else 0.7,
+        )
+    except Exception as e:
+        logger.error(f"MiniMax M3 upstream error: {e}")
+        raise HTTPException(
+            status_code=502,
+            detail={"error": "minimax_m3_upstream_error", "exc": str(e)[:300]},
+        )
+
+    if not resp.choices:
+        raise HTTPException(
+            status_code=502,
+            detail={"error": "minimax_m3_no_choices"},
+        )
+    text = resp.choices[0].message.content or ""
+    usage = resp.usage
+    in_tok = getattr(usage, "prompt_tokens", 0) if usage else 0
+    out_tok = getattr(usage, "completion_tokens", 0) if usage else 0
+
+    # Track AFTER success — half-failed calls don't bill.
+    if in_tok or out_tok:
+        minimax_cost_tracker.track_text(
+            model="minimax-m3",
+            input_tokens=in_tok,
+            output_tokens=out_tok,
+        )
+
+    return AIResponse(
+        response=text,
+        message=text,
+        model=selected_model,
+        tokens_used=in_tok + out_tok if (in_tok or out_tok) else None,
+        finish_reason=getattr(resp.choices[0], "finish_reason", None),
+    )
+
+
 async def _acquire_cli_slot(provider: str):
     """Wait up to ACQUIRE_TIMEOUT for a CLI slot; raise 503 on overflow."""
     sem = _get_cli_semaphore(provider)
