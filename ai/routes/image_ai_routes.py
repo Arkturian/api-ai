@@ -27,10 +27,15 @@ class ImageGenRequest(BaseModel):
     image_size: Optional[str] = Field(default=None, description="Resolution: 1K, 2K, 4K (Nano Banana 2 only)")
     model: Optional[str] = Field(
         default="nano-banana-2",
-        description="Model: nano-banana-2 (default), nano-banana-pro, imagen-4, higgsfield, higgsfield-reve"
+        description="Model: nano-banana-2 (default), nano-banana-pro, imagen-4, higgsfield, higgsfield-reve, minimax-image-01"
     )
     collection_id: Optional[str] = Field(default="ai-generated-images", description="Storage collection")
     link_id: Optional[str] = Field(default=None, description="Link ID for related objects")
+    # MiniMax API-billed (pay-as-you-go). The MiniMax dispatch branch
+    # enforces this via `_check_minimax_billing_gate` — default deny.
+    # Subscription / free-tier providers (Higgsfield, Gemini-CLI) ignore
+    # this flag.
+    confirm_api_billing: Optional[bool] = Field(default=False, description="Required true for MiniMax models (pay-as-you-go)")
 
 
 class ImageResponse(BaseModel):
@@ -76,6 +81,11 @@ MODEL_MAPPING = {
     "imagen-4": "imagen-4.0-generate-001",
     "imagen-4.0-generate-001": "imagen-4.0-generate-001",
 
+    # MiniMax Image-01 (pay-as-you-go, gated via confirm_api_billing)
+    "minimax-image-01": "image-01",
+    "minimax-image": "image-01",
+    "image-01": "image-01",
+
     # Others
     "dall-e-3": "dall-e-3",
 }
@@ -91,6 +101,12 @@ def is_gemini_model(model: str) -> bool:
     """Check if model should use Gemini/Google provider"""
     gemini_prefixes = ["gemini", "imagen", "nano-banana"]
     return any(model.startswith(p) for p in gemini_prefixes)
+
+
+def is_minimax_model(model: str) -> bool:
+    """Check if model should use MiniMax provider."""
+    minimax_prefixes = ["minimax-image", "image-01"]
+    return any(model.startswith(p) for p in minimax_prefixes)
 
 
 async def generate_with_higgsfield(
@@ -159,6 +175,94 @@ async def generate_with_higgsfield(
         "file_url": saved_obj.file_url,
         "storage_object_id": saved_obj.id,
         "request_id": result.request_id
+    }
+
+
+async def generate_with_minimax(
+    prompt: str,
+    model: str,
+    aspect_ratio: str,
+    collection_id: str,
+    link_id: Optional[str],
+) -> dict:
+    """Generate image using MiniMax Image-01 (pay-as-you-go REST API).
+
+    Caller-side billing gate is enforced by the route handler before this
+    function is reached. The MiniMax response is the canonical URL list
+    on a successful ``base_resp.status_code == 0`` — we download the
+    first image and save it via storage-api.
+
+    Cost-tracking: one ``track_image`` call per request. Federation-
+    shared via ``minimax_cost_tracker`` (master arkserver).
+    """
+    import httpx
+    from ai.clients.minimax_client import post_json, base_resp_failed
+    from ai.clients.storage_client import save_file_and_record
+    from ai.services.minimax_cost_tracker import minimax_cost_tracker
+
+    logger.info(f"MiniMax image gen: model={model}, aspect={aspect_ratio}")
+
+    payload = {
+        "model": model,
+        "prompt": prompt,
+        "aspect_ratio": aspect_ratio or "1:1",
+        "response_format": "url",
+        "n": 1,
+        "prompt_optimizer": True,
+    }
+    body = await post_json("image_generation", payload, timeout=120.0)
+    err = base_resp_failed(body)
+    if err:
+        raise HTTPException(
+            status_code=502,
+            detail={"error": "minimax_image_generation_failed", "upstream_msg": err},
+        )
+
+    # Response shape (MiniMax Image-01): ``data.image_urls: [<url>, ...]``
+    data = body.get("data") or {}
+    urls = data.get("image_urls") or []
+    if not urls:
+        raise HTTPException(
+            status_code=502,
+            detail={"error": "minimax_no_image_returned", "upstream_body": body},
+        )
+
+    image_url = urls[0]
+    logger.info(f"MiniMax returned image URL: {image_url}")
+
+    # Download + save to storage. MiniMax-hosted CDN URLs are short-lived,
+    # so we always persist locally before responding to the caller.
+    async with httpx.AsyncClient(timeout=60.0) as http_client:
+        r = await http_client.get(image_url)
+        r.raise_for_status()
+        image_bytes = r.content
+        content_type = r.headers.get("content-type", "image/png")
+
+    ext = "png" if "png" in content_type else "jpg"
+    request_id = body.get("id") or body.get("request_id") or "unknown"
+    filename = f"img_minimax_{request_id[:12]}.{ext}"
+
+    saved_obj = await save_file_and_record(
+        data=image_bytes,
+        original_filename=filename,
+        context="image-generation",
+        is_public=True,
+        collection_id=collection_id,
+        link_id=link_id,
+    )
+
+    # Track usage AFTER successful save so a half-failed call doesn't
+    # bill against the cap.
+    minimax_cost_tracker.track_image(model=f"minimax-{model}" if not model.startswith("minimax-") else model)
+
+    logger.info(f"Saved MiniMax image to storage: ID={saved_obj.id}")
+
+    return {
+        "id": saved_obj.id,
+        "image_url": saved_obj.file_url,
+        "file_url": saved_obj.file_url,
+        "storage_object_id": saved_obj.id,
+        "request_id": request_id,
     }
 
 
@@ -348,6 +452,21 @@ async def generate_image_endpoint(
                 link_id=request.link_id,
                 aspect_ratio=request.aspect_ratio,
                 image_size=request.image_size
+            )
+
+        elif is_minimax_model(model_name) or is_minimax_model(actual_model):
+            # MiniMax Image-01 is pay-as-you-go API — require explicit
+            # billing opt-in, then run the federation-shared cap check.
+            from ai.routes.text_ai_routes import _check_minimax_billing_gate
+            _check_minimax_billing_gate(
+                request.confirm_api_billing, endpoint="minimax-image"
+            )
+            result = await generate_with_minimax(
+                prompt=request.prompt,
+                model=actual_model,
+                aspect_ratio=request.aspect_ratio or "1:1",
+                collection_id=request.collection_id or "ai-generated-images",
+                link_id=request.link_id,
             )
 
         elif model_name == "dall-e-3":
