@@ -190,6 +190,52 @@ def _download_storage_images(prompt_text):
     return out
 
 
+def _check_minimax_billing_gate(confirmed: Optional[bool], endpoint: str) -> None:
+    """MiniMax-side twin of ``_check_api_billing_gate``.
+
+    Same default-deny semantics, separate cost-tracker (25 EUR/month cap).
+    Reject the request unless the caller explicitly opted in via
+    ``confirm_api_billing: true`` AND the MiniMax monthly cap has not
+    been reached.
+
+    Raises:
+      HTTPException(403) when the body flag is missing.
+      HTTPException(429) when the cap is reached — hard cutoff for ALL
+        callers including those who sent confirm_api_billing=true.
+    """
+    from ..services.minimax_cost_tracker import minimax_cost_tracker
+
+    if not confirmed:
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "error": "api_billing_confirmation_required",
+                "endpoint": endpoint,
+                "provider": "minimax",
+                "hint": ("This path hits the MiniMax API (pay-as-you-go, "
+                         "billed against MINIMAX_MULTIMODAL_API_KEY). Send "
+                         "`confirm_api_billing: true` in the request body to "
+                         "acknowledge billing exposure."),
+            },
+        )
+
+    if minimax_cost_tracker.should_block_request():
+        status = minimax_cost_tracker.get_status()
+        raise HTTPException(
+            status_code=429,
+            detail={
+                "error": "monthly_api_cap_reached",
+                "endpoint": endpoint,
+                "provider": "minimax",
+                "spent_eur": round(status.get("total_cost_eur", 0.0), 2),
+                "budget_eur": status.get("monthly_budget_eur"),
+                "hint": ("MiniMax monthly cap reached. Cap resets at the "
+                         "start of the next calendar month. Subscription "
+                         "endpoints (/ai/claude, /ai/chatgpt) are unaffected."),
+            },
+        )
+
+
 async def _acquire_cli_slot(provider: str):
     """Wait up to ACQUIRE_TIMEOUT for a CLI slot; raise 503 on overflow."""
     sem = _get_cli_semaphore(provider)

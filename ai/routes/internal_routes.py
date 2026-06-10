@@ -169,6 +169,17 @@ class _SharedTrackPayload(BaseModel):
     source_host: Optional[str] = None
 
 
+class _MinimaxSharedTrackPayload(BaseModel):
+    """Payload posted by a sibling host to log a MiniMax API call into the
+    shared monthly counter. Mirrors ``_SharedTrackPayload`` but with the
+    MiniMax-specific per-modality units (per_image / per_second / etc.)."""
+
+    modality: str  # "image" | "video" | "tts" | "voice_clone" | "music"
+    model: str
+    units: dict = {}  # e.g. {"num_images": 1} or {"seconds": 5}
+    source_host: Optional[str] = None
+
+
 @router.get("/cost-shared-state")
 async def cost_shared_state_get(
     x_internal_auth: Optional[str] = Header(default=None, alias="X-Internal-Auth"),
@@ -212,6 +223,83 @@ async def cost_shared_state_track(
     )
     status = cost_tracker.get_status()
     status["would_block"] = cost_tracker.should_block_request()
+    return status
+
+
+@router.get("/minimax-cost-shared-state")
+async def minimax_cost_shared_state_get(
+    x_internal_auth: Optional[str] = Header(default=None, alias="X-Internal-Auth"),
+):
+    """Master-side state read for the MiniMax shared counter.
+
+    Federation-internal twin of ``/internal/cost-shared-state`` (Gemini).
+    Sibling api-ai hosts query this before serving an API-billed MiniMax
+    call so the 25 EUR monthly cap is enforced against a single shared
+    counter instead of N independent per-host counters.
+
+    Auth contract identical: caller sends the configured shared secret in
+    the ``X-Internal-Auth`` header. The secret env (``COST_TRACKER_SHARED_SECRET``)
+    is shared with the Gemini-side counter — one secret, two endpoints,
+    same trust model (same-owner federation).
+    """
+    _verify_shared_counter_auth(x_internal_auth)
+    from ..services.minimax_cost_tracker import minimax_cost_tracker
+    status = minimax_cost_tracker.get_status()
+    status["would_block"] = minimax_cost_tracker.should_block_request()
+    return status
+
+
+@router.post("/minimax-cost-shared-state")
+async def minimax_cost_shared_state_track(
+    payload: _MinimaxSharedTrackPayload,
+    x_internal_auth: Optional[str] = Header(default=None, alias="X-Internal-Auth"),
+):
+    """Master-side increment for the MiniMax shared counter.
+
+    Sibling host calls this *before* serving an API-billed MiniMax call.
+    The master attributes the call to the matching modality method on
+    its local ``minimax_cost_tracker`` so arkserver-direct calls and
+    arkturian-reported calls accumulate into the same monthly file.
+    """
+    _verify_shared_counter_auth(x_internal_auth)
+    from ..services.minimax_cost_tracker import minimax_cost_tracker
+    modality = payload.modality
+    model = payload.model
+    units = payload.units or {}
+
+    # Dispatch to the matching local-track method based on modality.
+    # ``_track_local`` is used because the master IS the source of
+    # truth — recursing through ``_track`` (which would post-to-master
+    # if it had a master_url set) would loop infinitely.
+    if modality == "image":
+        minimax_cost_tracker._track_local(
+            "image", model, num_images=units.get("num_images", 1)
+        )
+    elif modality == "video":
+        minimax_cost_tracker._track_local(
+            "video", model, seconds=units.get("seconds", 0)
+        )
+    elif modality == "tts":
+        minimax_cost_tracker._track_local(
+            "tts", model, chars=units.get("chars", 0)
+        )
+    elif modality == "voice_clone":
+        minimax_cost_tracker._track_local(
+            "voice_clone", model, num_clones=units.get("num_clones", 1)
+        )
+    elif modality == "music":
+        minimax_cost_tracker._track_local(
+            "music", model, num_tracks=units.get("num_tracks", 1)
+        )
+    else:
+        raise HTTPException(
+            status_code=400,
+            detail=f"unknown modality '{modality}' — "
+                   f"valid: image|video|tts|voice_clone|music",
+        )
+
+    status = minimax_cost_tracker.get_status()
+    status["would_block"] = minimax_cost_tracker.should_block_request()
     return status
 
 
