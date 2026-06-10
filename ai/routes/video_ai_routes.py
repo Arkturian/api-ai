@@ -35,7 +35,7 @@ class VideoGenRequest(BaseModel):
     duration: int = Field(default=5, ge=1, le=10, description="Video duration in seconds (1-10)")
     model: str = Field(
         default="higgsfield-ai/dop/standard",
-        description="Model to use: higgsfield-ai/dop/standard, kling-video/v2.1/pro/image-to-video, bytedance/seedance/v1/pro/image-to-video"
+        description="Model: higgsfield-ai/dop/standard, kling-video/v2.1/pro/image-to-video, bytedance/seedance/v1/pro/image-to-video, minimax-hailuo-pro, minimax-hailuo-fast"
     )
     wait_for_result: bool = Field(
         default=True,
@@ -43,6 +43,9 @@ class VideoGenRequest(BaseModel):
     )
     collection_id: Optional[str] = Field(default="ai-generated-videos", description="Storage collection")
     link_id: Optional[str] = Field(default=None, description="Link ID for related objects")
+    # MiniMax pay-as-you-go gate (Hailuo). Subscription / free-tier
+    # providers (Higgsfield, Kling, Seedance) ignore this flag.
+    confirm_api_billing: Optional[bool] = Field(default=False, description="Required true for MiniMax Hailuo models (pay-as-you-go)")
 
 
 class VideoGenResponse(BaseModel):
@@ -69,6 +72,150 @@ class VideoStatusResponse(BaseModel):
 def get_api_key():
     """Placeholder for API key validation"""
     return "placeholder"
+
+
+# ── MiniMax Hailuo video dispatch ─────────────────────────────────────
+
+MINIMAX_VIDEO_MODEL_MAPPING = {
+    "minimax-hailuo-pro":  "MiniMax-Hailuo-02-Pro",
+    "minimax-hailuo-fast": "MiniMax-Hailuo-02-Fast",
+    "minimax-hailuo":      "MiniMax-Hailuo-02-Pro",  # alias to pro
+    "hailuo-pro":          "MiniMax-Hailuo-02-Pro",
+    "hailuo-fast":         "MiniMax-Hailuo-02-Fast",
+}
+
+
+def is_minimax_video_model(model: str) -> bool:
+    return model.startswith("minimax-hailuo") or model.startswith("hailuo")
+
+
+async def generate_with_minimax_video(
+    image_url: str,
+    prompt: str,
+    duration: int,
+    model: str,
+    collection_id: str,
+    link_id: Optional[str],
+    wait_for_result: bool,
+) -> dict:
+    """MiniMax Hailuo image-to-video (sync polling).
+
+    Async-mode for MiniMax is not yet exposed via ``/genvideo/status/``
+    (would need provider-aware routing in get_video_status). For now,
+    ``wait_for_result=false`` is honoured by returning the queued task_id
+    and letting the caller poll MiniMax directly — most callers should
+    just use sync with the 8-minute polling window.
+    """
+    import asyncio
+    import httpx
+    from ai.clients.minimax_client import post_json, get_json, base_resp_failed
+    from ai.services.minimax_cost_tracker import minimax_cost_tracker
+    from ai.routes.text_ai_routes import _check_minimax_billing_gate
+
+    actual_model = MINIMAX_VIDEO_MODEL_MAPPING.get(model, model)
+    logger.info(
+        f"MiniMax video gen: model={model} -> {actual_model}, "
+        f"duration={duration}s, wait={wait_for_result}"
+    )
+
+    submit = await post_json(
+        "video_generation",
+        {
+            "model": actual_model,
+            "prompt": prompt,
+            "first_frame_image": image_url,
+            "duration": duration,
+        },
+        timeout=60.0,
+    )
+    err = base_resp_failed(submit)
+    if err:
+        raise HTTPException(
+            status_code=502,
+            detail={"error": "minimax_video_submit_failed", "upstream_msg": err},
+        )
+
+    task_id = submit.get("task_id") or (submit.get("data") or {}).get("task_id")
+    if not task_id:
+        raise HTTPException(
+            status_code=502,
+            detail={"error": "minimax_no_task_id", "upstream_body": submit},
+        )
+
+    if not wait_for_result:
+        return {
+            "request_id": task_id,
+            "status": "queued",
+            "video_url": None,
+            "storage_object_id": None,
+            "message": (
+                f"MiniMax queued task {task_id}. Poll status at "
+                f"https://api.minimax.io/v1/query/video_generation?task_id={task_id} "
+                f"directly (provider-aware /ai/genvideo/status routing is a follow-up)."
+            ),
+        }
+
+    # Sync polling — up to 8 minutes
+    file_id = None
+    for attempt in range(48):  # 48 * 10s = 480s = 8min
+        await asyncio.sleep(10.0)
+        status_body = await get_json(
+            "query/video_generation", params={"task_id": task_id}, timeout=30.0
+        )
+        # ``status`` and ``file_id`` live at the top level of the response
+        status = status_body.get("status") or (status_body.get("data") or {}).get("status")
+        if status == "Success":
+            file_id = status_body.get("file_id") or (status_body.get("data") or {}).get("file_id")
+            break
+        if status == "Fail":
+            raise HTTPException(
+                status_code=502,
+                detail={"error": "minimax_video_failed", "upstream_body": status_body},
+            )
+        # else: Queueing / Processing — keep polling
+        logger.info(f"MiniMax video {task_id} status={status} (attempt {attempt+1}/48)")
+
+    if not file_id:
+        raise HTTPException(
+            status_code=504,
+            detail={"error": "minimax_video_timeout", "task_id": task_id, "after_s": 480},
+        )
+
+    file_body = await get_json("files/retrieve", params={"file_id": file_id}, timeout=30.0)
+    download_url = (file_body.get("file") or {}).get("download_url") or file_body.get(
+        "download_url"
+    )
+    if not download_url:
+        raise HTTPException(
+            status_code=502,
+            detail={"error": "minimax_no_download_url", "upstream_body": file_body},
+        )
+
+    async with httpx.AsyncClient(timeout=120.0) as client:
+        r = await client.get(download_url)
+        r.raise_for_status()
+        video_bytes = r.content
+
+    filename = f"video_minimax_{task_id[:12]}.mp4"
+    saved_obj = await save_file_and_record(
+        data=video_bytes,
+        original_filename=filename,
+        context="video-generation",
+        is_public=True,
+        collection_id=collection_id,
+        link_id=link_id,
+    )
+
+    minimax_cost_tracker.track_video(model=f"minimax-hailuo-{'fast' if 'Fast' in actual_model else 'pro'}", seconds=duration)
+    logger.info(f"Saved MiniMax video to storage: ID={saved_obj.id}")
+
+    return {
+        "request_id": task_id,
+        "status": "completed",
+        "video_url": saved_obj.file_url,
+        "storage_object_id": saved_obj.id,
+        "message": "Video generation completed",
+    }
 
 
 async def download_and_save_video(
@@ -143,6 +290,31 @@ async def generate_video_endpoint(
     ```
     """
     try:
+        # MiniMax dispatch — Hailuo I2V, pay-as-you-go gated.
+        if is_minimax_video_model(request.model):
+            from ai.routes.text_ai_routes import _check_minimax_billing_gate
+            _check_minimax_billing_gate(
+                request.confirm_api_billing, endpoint="minimax-video"
+            )
+            result = await generate_with_minimax_video(
+                image_url=request.image_url,
+                prompt=request.prompt,
+                duration=request.duration,
+                model=request.model,
+                collection_id=request.collection_id or "ai-generated-videos",
+                link_id=request.link_id,
+                wait_for_result=request.wait_for_result,
+            )
+            return VideoGenResponse(
+                request_id=result["request_id"],
+                status=result["status"],
+                video_url=result.get("video_url"),
+                storage_object_id=result.get("storage_object_id"),
+                model=request.model,
+                duration=request.duration,
+                message=result.get("message"),
+            )
+
         client = get_client()
 
         logger.info(
