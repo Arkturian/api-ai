@@ -535,6 +535,17 @@ async def list_image_models():
                 "name": "Reve",
                 "provider": "Higgsfield",
                 "description": "Versatile text-to-image (requires credits)"
+            },
+            {
+                "id": "minimax-image-01",
+                "name": "MiniMax Image-01",
+                "provider": "MiniMax",
+                "description": (
+                    "Pay-as-you-go ($0.003/image, ~1/10 of typical price). "
+                    "Requires confirm_api_billing=true. Counts against the "
+                    "shared 25 EUR/month MiniMax cap."
+                ),
+                "billing": "payg"
             }
         ]
     }
