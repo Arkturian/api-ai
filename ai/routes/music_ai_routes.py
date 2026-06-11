@@ -37,6 +37,10 @@ class MusicGenRequest(BaseModel):
     """
 
     prompt: str = Field(..., description="Style / genre / mood description")
+    lyrics: str = Field(
+        ...,
+        description="Sung lyrics (MiniMax Music 2.6 pflicht-feld). Für reine instrumental tracks: '[Instrumental]' oder einen kurzen Marker übergeben.",
+    )
     mode: Literal["full", "cover"] = Field(
         default="full",
         description="full = original generation, cover = re-stylise reference_audio_url",
@@ -107,6 +111,7 @@ async def generate_music_endpoint(
     submit_payload: dict = {
         "model": "music-2.6",
         "prompt": request.prompt,
+        "lyrics": request.lyrics,
         "duration": request.duration,
         "mode": request.mode,
     }
