@@ -123,81 +123,50 @@ async def generate_music_endpoint(
         f"duration={request.duration}s wait={request.wait_for_result}"
     )
 
-    submit = await post_json("music_generation", submit_payload, timeout=60.0)
-    err = base_resp_failed(submit)
+    # MiniMax Music 2.6 returns the audio SYNCHRONOUSLY in a single call —
+    # the response body carries ``data.audio`` as a hex string of the MP3
+    # bytes (same shape as the TTS endpoint). No task_id, no polling.
+    # Verified empirically 2026-06-11 via direct curl probe.
+    #
+    # The endpoint takes ~60-90s to respond, so we must allow a generous
+    # client-side timeout (180s) — otherwise the connection drops while
+    # the model is still synthesising and we get a transport_error="".
+    sync_body = await post_json("music_generation", submit_payload, timeout=180.0)
+    err = base_resp_failed(sync_body)
     if err:
         raise HTTPException(
             status_code=502,
-            detail={"error": "minimax_music_submit_failed", "upstream_msg": err},
+            detail={"error": "minimax_music_failed", "upstream_msg": err},
         )
 
-    task_id = submit.get("task_id") or (submit.get("data") or {}).get("task_id")
-    if not task_id:
+    audio_data = (sync_body.get("data") or {}).get("audio")
+    if not audio_data:
         raise HTTPException(
             status_code=502,
-            detail={"error": "minimax_no_task_id", "upstream_body": submit},
+            detail={"error": "minimax_no_audio_returned", "upstream_body": sync_body},
         )
-
-    if not request.wait_for_result:
-        return MusicGenResponse(
-            request_id=task_id,
-            status="queued",
-            audio_url=None,
-            storage_object_id=None,
-            model=request.model,
-            duration=request.duration,
-            mode=request.mode,
-            message=(
-                f"MiniMax queued music task {task_id}. Poll "
-                f"/ai/music/status/{task_id} or query MiniMax directly."
-            ),
-        )
-
-    # Sync poll — up to ~10 min (60 * 10s)
-    file_id: Optional[str] = None
-    for attempt in range(60):
-        await asyncio.sleep(10.0)
-        status_body = await get_json(
-            "query/music_generation",
-            params={"task_id": task_id},
-            timeout=30.0,
-        )
-        status = status_body.get("status") or (status_body.get("data") or {}).get("status")
-        if status == "Success":
-            file_id = status_body.get("file_id") or (
-                status_body.get("data") or {}
-            ).get("file_id")
-            break
-        if status == "Fail":
+    try:
+        audio_bytes = bytes.fromhex(audio_data)
+    except ValueError:
+        import base64
+        try:
+            audio_bytes = base64.b64decode(audio_data)
+        except Exception as e:
             raise HTTPException(
                 status_code=502,
-                detail={"error": "minimax_music_failed", "upstream_body": status_body},
+                detail={"error": "minimax_audio_decode_failed", "exc": str(e)[:120]},
             )
-        logger.info(f"MiniMax music {task_id} status={status} (attempt {attempt+1}/60)")
 
-    if not file_id:
-        raise HTTPException(
-            status_code=504,
-            detail={"error": "minimax_music_timeout", "task_id": task_id, "after_s": 600},
+    request_id = sync_body.get("trace_id") or sync_body.get("request_id") or "sync"
+    filename = f"music_minimax_{request_id[:12]}.mp3"
+
+    # wait_for_result honoured by the API itself (it always blocks until
+    # done) — keep the request param for API-shape consistency, but flag
+    # that async-mode isn't applicable to Music 2.6.
+    if not request.wait_for_result:
+        logger.info(
+            "music_ai_routes: wait_for_result=false ignored — MiniMax Music 2.6 is sync-only"
         )
-
-    file_body = await get_json("files/retrieve", params={"file_id": file_id}, timeout=30.0)
-    download_url = (file_body.get("file") or {}).get("download_url") or file_body.get(
-        "download_url"
-    )
-    if not download_url:
-        raise HTTPException(
-            status_code=502,
-            detail={"error": "minimax_no_download_url", "upstream_body": file_body},
-        )
-
-    async with httpx.AsyncClient(timeout=120.0) as client:
-        r = await client.get(download_url)
-        r.raise_for_status()
-        audio_bytes = r.content
-        content_type = r.headers.get("content-type", "audio/mpeg")
-    ext = "mp3" if "mpeg" in content_type or "mp3" in content_type else "wav"
-    filename = f"music_minimax_{task_id[:12]}.{ext}"
 
     saved_obj = await save_file_and_record(
         data=audio_bytes,
@@ -212,7 +181,7 @@ async def generate_music_endpoint(
     logger.info(f"Saved MiniMax music to storage: ID={saved_obj.id}")
 
     return MusicGenResponse(
-        request_id=task_id,
+        request_id=request_id,
         status="completed",
         audio_url=saved_obj.file_url,
         storage_object_id=saved_obj.id,
