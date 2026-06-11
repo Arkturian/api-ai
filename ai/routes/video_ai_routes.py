@@ -77,11 +77,24 @@ def get_api_key():
 # ── MiniMax Hailuo video dispatch ─────────────────────────────────────
 
 MINIMAX_VIDEO_MODEL_MAPPING = {
-    "minimax-hailuo-pro":  "MiniMax-Hailuo-02-Pro",
-    "minimax-hailuo-fast": "MiniMax-Hailuo-02-Fast",
-    "minimax-hailuo":      "MiniMax-Hailuo-02-Pro",  # alias to pro
-    "hailuo-pro":          "MiniMax-Hailuo-02-Pro",
-    "hailuo-fast":         "MiniMax-Hailuo-02-Fast",
+    # Verified by direct API probe 2026-06-11 — the `02-Pro`/`02-Fast`
+    # suffixes I'd assumed initially are rejected with
+    # ``invalid params, incorrect model param input``. The actually
+    # valid model strings for /v1/video_generation are:
+    #
+    #   "MiniMax-Hailuo-02"  — current default Hailuo I2V
+    #   "I2V-01"             — older Hailuo-01 family (works, cheaper)
+    #   "I2V-01-Director"    — same + director-mode prompt tokens
+    #   "T2V-01"             — text-to-video, rejects first_frame_image
+    #
+    "minimax-hailuo":          "MiniMax-Hailuo-02",
+    "minimax-hailuo-pro":      "MiniMax-Hailuo-02",
+    "minimax-hailuo-fast":     "I2V-01",
+    "minimax-hailuo-director": "I2V-01-Director",
+    # Legacy aliases (no provider prefix)
+    "hailuo":                  "MiniMax-Hailuo-02",
+    "hailuo-pro":              "MiniMax-Hailuo-02",
+    "hailuo-fast":             "I2V-01",
 }
 
 
