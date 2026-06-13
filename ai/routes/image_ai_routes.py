@@ -86,6 +86,12 @@ MODEL_MAPPING = {
     "minimax-image": "image-01",
     "image-01": "image-01",
 
+    # OpenAI GPT Image family (pay-as-you-go, gated via confirm_api_billing)
+    "gpt-image-2": "gpt-image-2",
+    "gpt-image-1": "gpt-image-1",
+    "gpt-image-1.5": "gpt-image-1.5",
+    "gpt-image-1-mini": "gpt-image-1-mini",
+
     # Others
     "dall-e-3": "dall-e-3",
 }
@@ -107,6 +113,199 @@ def is_minimax_model(model: str) -> bool:
     """Check if model should use MiniMax provider."""
     minimax_prefixes = ["minimax-image", "image-01"]
     return any(model.startswith(p) for p in minimax_prefixes)
+
+
+def is_openai_image_model(model: str) -> bool:
+    """Check if model should use OpenAI Images API provider."""
+    return model.startswith("gpt-image-") or model == "dall-e-3"
+
+
+async def generate_with_openai_image(
+    prompt: str,
+    model: str,
+    collection_id: str,
+    link_id: Optional[str],
+    width: Optional[int] = None,
+    height: Optional[int] = None,
+    aspect_ratio: Optional[str] = None,
+) -> dict:
+    """Generate image via OpenAI Images API (gpt-image-2 / gpt-image-1 / dall-e-3).
+
+    Pay-as-you-go: the route handler enforces ``_check_openai_billing_gate``
+    before this is reached. Sizes accepted by the OpenAI Images API:
+    ``1024x1024``, ``1536x1024``, ``1024x1536``, ``2048x2048``,
+    ``2048x1152``, ``3840x2160``, ``2160x3840``, plus ``auto``.
+
+    We map our (width, height) form to the closest supported size — falling
+    back to ``2048x2048`` for the default ``1024×1024``-default-but-Story-wants-2k
+    use case, or to ``auto`` when the caller passes nothing.
+    """
+    import base64
+    import httpx
+    import os
+    from ai.clients.storage_client import save_file_and_record
+
+    api_key = os.getenv("OPENAI_API_KEY", "")
+    if not api_key:
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "error": "openai_api_key_missing",
+                "hint": "OPENAI_API_KEY not configured in service env.",
+            },
+        )
+
+    # Map (width, height) → an OpenAI-supported size. We accept the
+    # caller's exact dims if they already match, otherwise round to the
+    # nearest supported preset.
+    supported_sizes = {
+        (1024, 1024), (1536, 1024), (1024, 1536),
+        (2048, 2048), (2048, 1152), (3840, 2160), (2160, 3840),
+    }
+    if width and height and (width, height) in supported_sizes:
+        size = f"{width}x{height}"
+    elif aspect_ratio:
+        ar_map = {
+            "1:1": "2048x2048",
+            "16:9": "2048x1152",
+            "9:16": "1024x1536",
+            "4:3": "1536x1024",
+            "3:4": "1024x1536",
+        }
+        size = ar_map.get(aspect_ratio, "auto")
+    else:
+        size = "auto"
+
+    payload: dict = {
+        "model": model,
+        "prompt": prompt,
+        "size": size,
+        "n": 1,
+        "output_format": "png",
+        # gpt-image-2 supports "high" quality, default for quality is "auto"
+        # which works for both gpt-image-2 and gpt-image-1.
+        "quality": "high" if model.startswith("gpt-image-2") else "auto",
+    }
+    # gpt-image-1.5 and gpt-image-2 accept "background", dall-e-3 does not.
+    if model.startswith("gpt-image-"):
+        payload["background"] = "auto"
+
+    logger.info(
+        f"OpenAI image gen: model={model}, size={size}, quality={payload['quality']}"
+    )
+
+    async with httpx.AsyncClient(timeout=180.0) as client:
+        try:
+            r = await client.post(
+                "https://api.openai.com/v1/images/generations",
+                json=payload,
+                headers={"Authorization": f"Bearer {api_key}"},
+            )
+        except httpx.HTTPError as e:
+            raise HTTPException(
+                status_code=502,
+                detail={
+                    "error": "openai_upstream_unreachable",
+                    "exc": str(e)[:200],
+                },
+            )
+
+    if r.status_code >= 400:
+        try:
+            upstream = r.json()
+        except Exception:
+            upstream = {"raw": r.text[:500]}
+        logger.error(f"OpenAI image gen {model} → {r.status_code}: {upstream}")
+        raise HTTPException(
+            status_code=502 if r.status_code >= 500 else r.status_code,
+            detail={
+                "error": "openai_upstream_error",
+                "upstream_status": r.status_code,
+                "upstream_body": upstream,
+            },
+        )
+
+    body = r.json()
+    data_arr = body.get("data") or []
+    if not data_arr:
+        raise HTTPException(
+            status_code=502,
+            detail={"error": "openai_no_image_returned", "upstream_body": body},
+        )
+
+    entry = data_arr[0]
+
+    # OpenAI returns either ``url`` (older) or ``b64_json`` (default for
+    # gpt-image-*). Prefer b64 to skip a separate download round-trip.
+    if entry.get("b64_json"):
+        image_bytes = base64.b64decode(entry["b64_json"])
+        content_type = "image/png"
+    elif entry.get("url"):
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            dl = await client.get(entry["url"])
+            dl.raise_for_status()
+            image_bytes = dl.content
+            content_type = dl.headers.get("content-type", "image/png")
+    else:
+        raise HTTPException(
+            status_code=502,
+            detail={"error": "openai_no_image_data", "upstream_body": body},
+        )
+
+    ext = "png" if "png" in content_type else "jpg"
+    # ``created`` is a unix timestamp from the OpenAI response — use it as
+    # a stable suffix so re-runs don't clash but we don't fabricate dates
+    # ourselves.
+    request_id = str(body.get("created") or "openai")
+    filename = f"img_openai_{request_id}.{ext}"
+
+    saved_obj = await save_file_and_record(
+        data=image_bytes,
+        original_filename=filename,
+        context="image-generation",
+        is_public=True,
+        collection_id=collection_id,
+        link_id=link_id,
+    )
+
+    logger.info(f"Saved OpenAI image to storage: ID={saved_obj.id}")
+
+    return {
+        "id": saved_obj.id,
+        "image_url": saved_obj.file_url,
+        "file_url": saved_obj.file_url,
+        "storage_object_id": saved_obj.id,
+        "request_id": request_id,
+    }
+
+
+def _check_openai_billing_gate(confirmed: Optional[bool], endpoint: str) -> None:
+    """Default-deny gate for OpenAI Images API.
+
+    Pricing per OpenAI docs: gpt-image-2 high-quality 2048×2048 ≈ $0.15–0.20,
+    gpt-image-1 medium ≈ $0.05, dall-e-3 standard 1024² = $0.04. Even a
+    handful of high-quality calls adds up, so the gate forces an explicit
+    opt-in just like /ai/genimage minimax-image-01 and /ai/m3.
+
+    No federation-shared cap (yet) — separate openai_cost_tracker is a
+    documented follow-up. Story flagged a 50 EUR/month target.
+    """
+    if not confirmed:
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "error": "api_billing_confirmation_required",
+                "endpoint": endpoint,
+                "provider": "openai",
+                "hint": (
+                    "OpenAI Images API is pay-as-you-go billed against "
+                    "OPENAI_API_KEY (separate from MiniMax + GCP caps). "
+                    "Approx pricing: gpt-image-2 high-q 2048² ≈ $0.15-0.20, "
+                    "gpt-image-1 medium ≈ $0.05. Send "
+                    "`confirm_api_billing: true` to acknowledge."
+                ),
+            },
+        )
 
 
 async def generate_with_higgsfield(
@@ -469,6 +668,22 @@ async def generate_image_endpoint(
                 link_id=request.link_id,
             )
 
+        elif is_openai_image_model(model_name) or is_openai_image_model(actual_model):
+            # OpenAI Images API (gpt-image-2, gpt-image-1, gpt-image-1.5,
+            # dall-e-3) — pay-as-you-go, billed against OPENAI_API_KEY.
+            _check_openai_billing_gate(
+                request.confirm_api_billing, endpoint=f"openai-{actual_model}"
+            )
+            result = await generate_with_openai_image(
+                prompt=request.prompt,
+                model=actual_model,
+                collection_id=request.collection_id or "ai-generated-images",
+                link_id=request.link_id,
+                width=request.width,
+                height=request.height,
+                aspect_ratio=request.aspect_ratio,
+            )
+
         elif model_name == "dall-e-3":
             raise HTTPException(status_code=501, detail="DALL-E 3 support coming soon")
 
@@ -544,6 +759,28 @@ async def list_image_models():
                     "Pay-as-you-go ($0.003/image, ~1/10 of typical price). "
                     "Requires confirm_api_billing=true. Counts against the "
                     "shared 25 EUR/month MiniMax cap."
+                ),
+                "billing": "payg"
+            },
+            {
+                "id": "gpt-image-2",
+                "name": "GPT Image 2 (OpenAI)",
+                "provider": "OpenAI",
+                "description": (
+                    "OpenAI gpt-image-2 — best for diagrams, photoreal, up to 4K. "
+                    "Pay-as-you-go (~$0.15-0.20/image high-quality 2048²). "
+                    "Requires confirm_api_billing=true."
+                ),
+                "billing": "payg"
+            },
+            {
+                "id": "gpt-image-1",
+                "name": "GPT Image 1 (OpenAI, legacy)",
+                "provider": "OpenAI",
+                "description": (
+                    "Older gpt-image-1 — cheaper (~$0.05/image medium). "
+                    "Supports native transparent alpha (gpt-image-2 does not). "
+                    "Requires confirm_api_billing=true."
                 ),
                 "billing": "payg"
             }
