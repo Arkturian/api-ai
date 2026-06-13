@@ -36,6 +36,11 @@ class ImageGenRequest(BaseModel):
     # Subscription / free-tier providers (Higgsfield, Gemini-CLI) ignore
     # this flag.
     confirm_api_billing: Optional[bool] = Field(default=False, description="Required true for MiniMax models (pay-as-you-go)")
+    # OpenAI gpt-image-* quality knob. Default null → server picks "auto"
+    # (which itself auto-scales by resolution). Set to "low" / "medium" /
+    # "high" if you explicitly want OpenAI's quality tier (high consistently
+    # >180s for 2048², 4K may exceed the 300s upstream timeout).
+    quality: Optional[str] = Field(default=None, description="OpenAI gpt-image-* quality: low/medium/high/auto. Null = server picks 'auto'.")
 
 
 class ImageResponse(BaseModel):
@@ -128,6 +133,7 @@ async def generate_with_openai_image(
     width: Optional[int] = None,
     height: Optional[int] = None,
     aspect_ratio: Optional[str] = None,
+    quality: Optional[str] = None,
 ) -> dict:
     """Generate image via OpenAI Images API (gpt-image-2 / gpt-image-1 / dall-e-3).
 
@@ -176,18 +182,28 @@ async def generate_with_openai_image(
     else:
         size = "auto"
 
+    # Quality knob: ``auto`` is the safe default (server picks band by
+    # resolution — 1024² stays ~30s, 2048² runs ~200s). Callers can now
+    # opt-in to ``low``/``medium``/``high`` explicitly; ``high`` at 2048²
+    # consistently >180s and may approach the 300s upstream timeout for
+    # 4K. Story IACP b3244014 + Knowledge IACP 20ec50db requested the
+    # exposed knob so Cover-Plates / Botanik-Plates can pick the
+    # quality/latency tradeoff per call.
+    requested_quality = (quality or "").strip().lower() or "auto"
+    if requested_quality not in {"auto", "low", "medium", "high"}:
+        logger.warning(
+            f"OpenAI image gen: unknown quality={requested_quality!r}, "
+            f"falling back to 'auto'"
+        )
+        requested_quality = "auto"
+
     payload: dict = {
         "model": model,
         "prompt": prompt,
         "size": size,
         "n": 1,
         "output_format": "png",
-        # ``auto`` lets OpenAI choose the quality/latency balance —
-        # measured: quality="high" on gpt-image-2 takes >180s consistently
-        # while ``auto`` finishes in 20-60s. Callers can override via a
-        # future ``quality`` field on the request if they explicitly want
-        # high or low. For now we keep the contract simple.
-        "quality": "auto",
+        "quality": requested_quality,
     }
     # gpt-image-1.5 and gpt-image-2 accept "background", dall-e-3 does not.
     if model.startswith("gpt-image-"):
@@ -274,6 +290,11 @@ async def generate_with_openai_image(
         link_id=link_id,
     )
 
+    # Track AFTER successful save so a half-failed call doesn't bill
+    # against the cap. Federation-shared via openai_cost_tracker.
+    from ai.services.openai_cost_tracker import openai_cost_tracker
+    openai_cost_tracker.track_image(model=model, num_images=1)
+
     logger.info(f"Saved OpenAI image to storage: ID={saved_obj.id}")
 
     return {
@@ -288,14 +309,19 @@ async def generate_with_openai_image(
 def _check_openai_billing_gate(confirmed: Optional[bool], endpoint: str) -> None:
     """Default-deny gate for OpenAI Images API.
 
-    Pricing per OpenAI docs: gpt-image-2 high-quality 2048×2048 ≈ $0.15–0.20,
-    gpt-image-1 medium ≈ $0.05, dall-e-3 standard 1024² = $0.04. Even a
-    handful of high-quality calls adds up, so the gate forces an explicit
-    opt-in just like /ai/genimage minimax-image-01 and /ai/m3.
+    Two independent block conditions, either of which trips the gate:
+      1. ``confirm_api_billing`` body-flag missing → 403
+      2. Federation-shared 50 EUR/month cap reached (master arkserver,
+         client arkturian via ``/internal/openai-cost-shared-state``) →
+         429, even for confirmed callers
 
-    No federation-shared cap (yet) — separate openai_cost_tracker is a
-    documented follow-up. Story flagged a 50 EUR/month target.
+    Story IACP b3244014 (2026-06-13) explicitly asked for the 50 EUR/month
+    pattern analog to Gemini (15 EUR) and MiniMax (25 EUR). The three caps
+    are independent so OpenAI burn doesn't accidentally block a MiniMax
+    Image-01 generation and vice versa.
     """
+    from ..services.openai_cost_tracker import openai_cost_tracker
+
     if not confirmed:
         raise HTTPException(
             status_code=403,
@@ -310,6 +336,23 @@ def _check_openai_billing_gate(confirmed: Optional[bool], endpoint: str) -> None
                     "gpt-image-1 medium ≈ $0.05. Send "
                     "`confirm_api_billing: true` to acknowledge."
                 ),
+            },
+        )
+
+    if openai_cost_tracker.should_block_request():
+        status = openai_cost_tracker.get_status()
+        raise HTTPException(
+            status_code=429,
+            detail={
+                "error": "monthly_api_cap_reached",
+                "endpoint": endpoint,
+                "provider": "openai",
+                "spent_eur": round(status.get("total_cost_eur", 0.0), 2),
+                "budget_eur": status.get("monthly_budget_eur"),
+                "hint": ("OpenAI monthly cap reached. Cap resets at the "
+                         "start of the next calendar month. Subscription "
+                         "endpoints (/ai/claude, /ai/chatgpt) are unaffected, "
+                         "MiniMax + Gemini have their own separate caps."),
             },
         )
 
@@ -688,6 +731,7 @@ async def generate_image_endpoint(
                 width=request.width,
                 height=request.height,
                 aspect_ratio=request.aspect_ratio,
+                quality=request.quality,
             )
 
         elif model_name == "dall-e-3":
