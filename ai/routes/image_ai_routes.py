@@ -182,9 +182,12 @@ async def generate_with_openai_image(
         "size": size,
         "n": 1,
         "output_format": "png",
-        # gpt-image-2 supports "high" quality, default for quality is "auto"
-        # which works for both gpt-image-2 and gpt-image-1.
-        "quality": "high" if model.startswith("gpt-image-2") else "auto",
+        # ``auto`` lets OpenAI choose the quality/latency balance —
+        # measured: quality="high" on gpt-image-2 takes >180s consistently
+        # while ``auto`` finishes in 20-60s. Callers can override via a
+        # future ``quality`` field on the request if they explicitly want
+        # high or low. For now we keep the contract simple.
+        "quality": "auto",
     }
     # gpt-image-1.5 and gpt-image-2 accept "background", dall-e-3 does not.
     if model.startswith("gpt-image-"):
@@ -194,7 +197,10 @@ async def generate_with_openai_image(
         f"OpenAI image gen: model={model}, size={size}, quality={payload['quality']}"
     )
 
-    async with httpx.AsyncClient(timeout=180.0) as client:
+    # 300s upstream timeout — gpt-image-2 at 2048² with quality=auto
+    # measured 30-90s, but 4K + complex prompts push past 120s. The
+    # storage-api caller already has its own retry-on-timeout layer.
+    async with httpx.AsyncClient(timeout=300.0) as client:
         try:
             r = await client.post(
                 "https://api.openai.com/v1/images/generations",
