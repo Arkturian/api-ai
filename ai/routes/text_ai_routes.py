@@ -854,15 +854,31 @@ async def chatgpt_endpoint(
             image_paths = list(image_paths) + [_p for _u, _p in _imgs]
             logger.info("codex: localized %d storage image(s) to /tmp -> -i" % len(_imgs))
 
-        # Add image paths via -i flag (Codex supports multiple -i flags)
+        # Image inputs via codex-CLI: the `-i` flag is technically supported,
+        # but as of codex v0.138 the CLI rejects the positional prompt arg
+        # when any -i is present — it switches to stdin-mode and exits with
+        # ``Reading prompt from stdin... No prompt provided via stdin``.
+        # Live verified 2026-06-13 by Storage's video-safety pipeline (5
+        # JPG frames → /ai/chatgpt → 500). Until the CLI behaviour
+        # stabilises (or we switch to stdin-piping), reject image-bearing
+        # /ai/chatgpt calls with a clear 400 + pointer to the canonical
+        # vision path. This is a contract-clarity fix, not a regression:
+        # the previous 500 buried the actual reason in a codex-CLI
+        # stacktrace that callers had to grep through.
         if image_paths:
-            import os
-            for img_path in image_paths:
-                if os.path.exists(img_path):
-                    cmd.extend(["-i", img_path])
-                    logger.info(f"Added image to Codex command: {img_path}")
-                else:
-                    logger.warning(f"Image path does not exist: {img_path}")
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": "chatgpt_image_input_unsupported",
+                    "hint": ("Codex CLI v0.138 rejects the positional prompt "
+                             "arg when -i image flags are present (stdin-mode "
+                             "switch). Use /ai/claude with image_paths for "
+                             "multi-image vision/safety — it's the canonical "
+                             "path and handles base64/URLs/local paths natively."),
+                    "canonical_endpoint": "/ai/claude",
+                    "image_count_received": len(image_paths),
+                },
+            )
 
         # Add prompt as argument
         cmd.append(prompt_text)
