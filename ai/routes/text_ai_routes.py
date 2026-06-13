@@ -854,30 +854,21 @@ async def chatgpt_endpoint(
             image_paths = list(image_paths) + [_p for _u, _p in _imgs]
             logger.info("codex: localized %d storage image(s) to /tmp -> -i" % len(_imgs))
 
-        # Image inputs via codex-CLI: the `-i` flag is technically supported,
-        # but as of codex v0.138 the CLI rejects the positional prompt arg
-        # when any -i is present — it switches to stdin-mode and exits with
-        # ``Reading prompt from stdin... No prompt provided via stdin``.
-        # Live verified 2026-06-13 by Storage's video-safety pipeline (5
-        # JPG frames → /ai/chatgpt → 500). Until the CLI behaviour
-        # stabilises (or we switch to stdin-piping), reject image-bearing
-        # /ai/chatgpt calls with a clear 400 + pointer to the canonical
-        # vision path. This is a contract-clarity fix, not a regression:
-        # the previous 500 buried the actual reason in a codex-CLI
-        # stacktrace that callers had to grep through.
+        # Image inputs: simple-append pattern (same as claude_endpoint:518-524).
+        # The CLI reads paths/URLs out of the prompt text natively — no `-i`
+        # flag dance needed. Local paths, https URLs, mixed list — all fine.
+        # The earlier `-i` injection + later 400-with-hint defense were both
+        # over-engineered; Alex confirmed (2026-06-13) the canonical
+        # convention is "just tell the model where the image is in the
+        # prompt and the CLI fetches it".
         if image_paths:
-            raise HTTPException(
-                status_code=400,
-                detail={
-                    "error": "chatgpt_image_input_unsupported",
-                    "hint": ("Codex CLI v0.138 rejects the positional prompt "
-                             "arg when -i image flags are present (stdin-mode "
-                             "switch). Use /ai/claude with image_paths for "
-                             "multi-image vision/safety — it's the canonical "
-                             "path and handles base64/URLs/local paths natively."),
-                    "canonical_endpoint": "/ai/claude",
-                    "image_count_received": len(image_paths),
-                },
+            paths_text = "\n".join(image_paths)
+            prompt_text = (
+                f"{prompt_text}\n\nBild-Pfade (lokal oder URL):\n{paths_text}"
+            )
+            logger.info(
+                f"Added {len(image_paths)} image ref(s) to prompt for codex-CLI "
+                f"(append-pattern, no -i flag)"
             )
 
         # Add prompt as argument
