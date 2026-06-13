@@ -169,6 +169,16 @@ class _SharedTrackPayload(BaseModel):
     source_host: Optional[str] = None
 
 
+class _OpenAISharedTrackPayload(BaseModel):
+    """Payload posted by a sibling host to log an OpenAI Images API call
+    into the shared monthly counter. Mirror of ``_MinimaxSharedTrackPayload``
+    with the per-image counter shape."""
+
+    model: str
+    num_images: int = 1
+    source_host: Optional[str] = None
+
+
 class _MinimaxSharedTrackPayload(BaseModel):
     """Payload posted by a sibling host to log a MiniMax API call into the
     shared monthly counter. Mirrors ``_SharedTrackPayload`` but with the
@@ -306,6 +316,50 @@ async def minimax_cost_shared_state_track(
 
     status = minimax_cost_tracker.get_status()
     status["would_block"] = minimax_cost_tracker.should_block_request()
+    return status
+
+
+@router.get("/openai-cost-shared-state")
+async def openai_cost_shared_state_get(
+    x_internal_auth: Optional[str] = Header(default=None, alias="X-Internal-Auth"),
+):
+    """Master-side state read for the OpenAI shared counter.
+
+    Federation-internal twin of ``/internal/cost-shared-state`` (Gemini)
+    and ``/internal/minimax-cost-shared-state`` (MiniMax). Sibling api-ai
+    hosts query this before serving an OpenAI Images API call so the
+    50 EUR monthly cap is enforced against a single shared counter
+    instead of N independent per-host counters.
+
+    Auth: same ``X-Internal-Auth`` header + same ``COST_TRACKER_SHARED_SECRET``
+    env as the other two — one secret, three endpoints, same trust model.
+    """
+    _verify_shared_counter_auth(x_internal_auth)
+    from ..services.openai_cost_tracker import openai_cost_tracker
+    status = openai_cost_tracker.get_status()
+    status["would_block"] = openai_cost_tracker.should_block_request()
+    return status
+
+
+@router.post("/openai-cost-shared-state")
+async def openai_cost_shared_state_track(
+    payload: _OpenAISharedTrackPayload,
+    x_internal_auth: Optional[str] = Header(default=None, alias="X-Internal-Auth"),
+):
+    """Master-side increment for the OpenAI shared counter.
+
+    Sibling host calls this *before* (or rather: after) serving an
+    OpenAI Images API call. The master delegates to its local
+    ``openai_cost_tracker._track_local`` so arkserver-direct calls and
+    arkturian-reported calls accumulate into the same monthly file.
+    """
+    _verify_shared_counter_auth(x_internal_auth)
+    from ..services.openai_cost_tracker import openai_cost_tracker
+    openai_cost_tracker._track_local(
+        model=payload.model, num_images=payload.num_images
+    )
+    status = openai_cost_tracker.get_status()
+    status["would_block"] = openai_cost_tracker.should_block_request()
     return status
 
 
