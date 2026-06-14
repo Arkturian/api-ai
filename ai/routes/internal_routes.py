@@ -169,6 +169,17 @@ class _SharedTrackPayload(BaseModel):
     source_host: Optional[str] = None
 
 
+class _DeepSeekSharedTrackPayload(BaseModel):
+    """Payload posted by a sibling host to log a DeepSeek V4 chat-completion
+    call into the shared monthly counter. Mirror of ``_MinimaxSharedTrackPayload``
+    with the M3-style (input_tokens, output_tokens) shape."""
+
+    model: str
+    input_tokens: int = 0
+    output_tokens: int = 0
+    source_host: Optional[str] = None
+
+
 class _OpenAISharedTrackPayload(BaseModel):
     """Payload posted by a sibling host to log an OpenAI Images API call
     into the shared monthly counter. Mirror of ``_MinimaxSharedTrackPayload``
@@ -316,6 +327,42 @@ async def minimax_cost_shared_state_track(
 
     status = minimax_cost_tracker.get_status()
     status["would_block"] = minimax_cost_tracker.should_block_request()
+    return status
+
+
+@router.get("/deepseek-cost-shared-state")
+async def deepseek_cost_shared_state_get(
+    x_internal_auth: Optional[str] = Header(default=None, alias="X-Internal-Auth"),
+):
+    """Master-side state read for the DeepSeek shared counter.
+
+    Federation-internal twin of the Gemini / MiniMax / OpenAI shared-state
+    endpoints. Same ``X-Internal-Auth`` header + same
+    ``COST_TRACKER_SHARED_SECRET`` env — one secret, four endpoints,
+    same trust model.
+    """
+    _verify_shared_counter_auth(x_internal_auth)
+    from ..services.deepseek_cost_tracker import deepseek_cost_tracker
+    status = deepseek_cost_tracker.get_status()
+    status["would_block"] = deepseek_cost_tracker.should_block_request()
+    return status
+
+
+@router.post("/deepseek-cost-shared-state")
+async def deepseek_cost_shared_state_track(
+    payload: _DeepSeekSharedTrackPayload,
+    x_internal_auth: Optional[str] = Header(default=None, alias="X-Internal-Auth"),
+):
+    """Master-side increment for the DeepSeek shared counter."""
+    _verify_shared_counter_auth(x_internal_auth)
+    from ..services.deepseek_cost_tracker import deepseek_cost_tracker
+    deepseek_cost_tracker._track_local(
+        model=payload.model,
+        input_tokens=payload.input_tokens,
+        output_tokens=payload.output_tokens,
+    )
+    status = deepseek_cost_tracker.get_status()
+    status["would_block"] = deepseek_cost_tracker.should_block_request()
     return status
 
 
