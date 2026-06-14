@@ -236,6 +236,52 @@ def _check_minimax_billing_gate(confirmed: Optional[bool], endpoint: str) -> Non
         )
 
 
+def _check_deepseek_billing_gate(confirmed: Optional[bool], endpoint: str) -> None:
+    """DeepSeek-side twin of ``_check_minimax_billing_gate``.
+
+    Same default-deny + cap-check semantics. Cap is 25 EUR/month by
+    default (env: ``DEEPSEEK_MONTHLY_BUDGET_EUR``). Separate envelope
+    from Gemini (15), MiniMax (25), OpenAI (50) — DeepSeek burn doesn't
+    block other providers and vice versa.
+
+    Raises:
+      HTTPException(403) when the body flag is missing.
+      HTTPException(429) when the cap is reached.
+    """
+    from ..services.deepseek_cost_tracker import deepseek_cost_tracker
+
+    if not confirmed:
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "error": "api_billing_confirmation_required",
+                "endpoint": endpoint,
+                "provider": "deepseek",
+                "hint": ("DeepSeek V4 is pay-as-you-go billed against "
+                         "DEEPSEEK_API_KEY (separate from MiniMax + OpenAI "
+                         "+ GCP caps). Approx: deepseek-v4-flash ≈ "
+                         "$0.07/1M input + $0.27/1M output, deepseek-v4-pro "
+                         "≈ $0.27/1M input + $1.10/1M output. Send "
+                         "`confirm_api_billing: true` to acknowledge."),
+            },
+        )
+
+    if deepseek_cost_tracker.should_block_request():
+        status = deepseek_cost_tracker.get_status()
+        raise HTTPException(
+            status_code=429,
+            detail={
+                "error": "monthly_api_cap_reached",
+                "endpoint": endpoint,
+                "provider": "deepseek",
+                "spent_eur": round(status.get("total_cost_eur", 0.0), 2),
+                "budget_eur": status.get("monthly_budget_eur"),
+                "hint": ("DeepSeek monthly cap reached. Cap resets at the "
+                         "start of the next calendar month."),
+            },
+        )
+
+
 async def _acquire_cli_slot(provider: str):
     """Wait up to ACQUIRE_TIMEOUT for a CLI slot; raise 503 on overflow."""
     sem = _get_cli_semaphore(provider)
@@ -1843,6 +1889,122 @@ async def m3_endpoint(
     if in_tok or out_tok:
         minimax_cost_tracker.track_text(
             model="minimax-m3",
+            input_tokens=in_tok,
+            output_tokens=out_tok,
+        )
+
+    return AIResponse(
+        response=text,
+        message=text,
+        model=selected_model,
+        tokens_used=in_tok + out_tok if (in_tok or out_tok) else None,
+        finish_reason=getattr(resp.choices[0], "finish_reason", None),
+    )
+
+
+# ──────────────────────────────────────────────────────────────────────
+# DeepSeek V4 — API-direct text endpoint (Minimax IACP 315228fe, 2026-06-14)
+#
+# DeepSeek's OpenAI-compatible endpoint at api.deepseek.com/v1 mirrors
+# our /ai/m3 architecture exactly: OpenAI SDK with base_url override +
+# bearer auth via DEEPSEEK_API_KEY + PAYG billing tracked through
+# deepseek_cost_tracker (25 EUR/month default cap).
+#
+# Two models:
+#   deepseek-v4-flash — cheaper, ~$0.07/M in + $0.27/M out
+#   deepseek-v4-pro   — capable, ~$0.27/M in + $1.10/M out
+#
+# Both surface a Chain-of-Thought reasoning block in usage.reasoning_tokens
+# similar to MiniMax M3's <think>...</think>. Callers wanting deterministic
+# JSON output should account for the reasoning-token budget when setting
+# max_tokens (raise to 1000+ for non-trivial structured outputs).
+
+@router.post("/deepseek", response_model=AIResponse)
+async def deepseek_endpoint(
+    prompt: Prompt,
+    model: Optional[str] = None,
+    api_key: str = Depends(get_api_key),
+):
+    """DeepSeek V4 text endpoint — API-direct via OpenAI /v1/chat/completions.
+
+    Pay-as-you-go billed against the federation-shared 25 EUR/month cap.
+    """
+    import os
+    from ..services.deepseek_cost_tracker import deepseek_cost_tracker
+
+    _check_deepseek_billing_gate(
+        prompt.confirm_api_billing, endpoint="deepseek"
+    )
+
+    api_key_val = os.getenv("DEEPSEEK_API_KEY", "")
+    if not api_key_val:
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "error": "deepseek_api_key_missing",
+                "hint": "DEEPSEEK_API_KEY not configured in service env.",
+            },
+        )
+
+    if isinstance(prompt.prompt, str):
+        user_text = prompt.prompt
+    else:
+        user_text = prompt.prompt.text
+
+    messages: list = []
+    if prompt.system:
+        messages.append({"role": "system", "content": prompt.system})
+    if prompt.conversation_history:
+        messages.extend(prompt.conversation_history)
+    messages.append({"role": "user", "content": user_text})
+
+    selected_model = model or "deepseek-v4-flash"
+    logger.info(
+        f"Calling DeepSeek API: model={selected_model}, "
+        f"messages={len(messages)}, max_tokens={prompt.max_tokens}, "
+        f"temp={prompt.temperature}"
+    )
+
+    try:
+        from openai import AsyncOpenAI
+    except ImportError:
+        raise HTTPException(
+            status_code=500,
+            detail="openai SDK not installed in api-ai venv",
+        )
+
+    client = AsyncOpenAI(
+        api_key=api_key_val,
+        base_url=os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1"),
+    )
+
+    try:
+        resp = await client.chat.completions.create(
+            model=selected_model,
+            messages=messages,
+            max_tokens=prompt.max_tokens or 1000,
+            temperature=prompt.temperature if prompt.temperature is not None else 0.7,
+        )
+    except Exception as e:
+        logger.error(f"DeepSeek upstream error: {e}")
+        raise HTTPException(
+            status_code=502,
+            detail={"error": "deepseek_upstream_error", "exc": str(e)[:300]},
+        )
+
+    if not resp.choices:
+        raise HTTPException(
+            status_code=502,
+            detail={"error": "deepseek_no_choices"},
+        )
+    text = resp.choices[0].message.content or ""
+    usage = resp.usage
+    in_tok = getattr(usage, "prompt_tokens", 0) if usage else 0
+    out_tok = getattr(usage, "completion_tokens", 0) if usage else 0
+
+    if in_tok or out_tok:
+        deepseek_cost_tracker.track_text(
+            model=selected_model,
             input_tokens=in_tok,
             output_tokens=out_tok,
         )
