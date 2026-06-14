@@ -231,6 +231,7 @@ class DeepSeekCostTracker:
         return self._usage_data.get("total_cost_eur", 0) >= self.monthly_budget_eur
 
     def should_block_request(self) -> bool:
+        self._maybe_reload_from_file()
         if self._usage_data.get("deepseek_hard_cap_active"):
             return True
         if self.master_url and self.shared_secret:
@@ -244,7 +245,33 @@ class DeepSeekCostTracker:
                 )
         return self.block_on_budget_exceeded and self.is_budget_exceeded()
 
+    def _maybe_reload_from_file(self) -> None:
+        """Re-read the on-disk usage file if a sibling uvicorn worker
+        wrote it since our last load. Without this, multi-worker setups
+        (``--workers 2`` is the api-ai default) suffer singleton drift:
+        worker A tracks + saves, worker B's get_status reads its stale
+        in-memory ``_usage_data`` and reports zero.
+
+        Cheap: just an mtime stat + lazy reload. No-op when the file
+        hasn't changed since our last touch.
+        """
+        try:
+            f = self.data_file
+            if not f.exists():
+                return
+            mtime = f.stat().st_mtime
+            last = float(self._usage_data.get("_file_mtime", 0))
+            if mtime > last + 0.001:
+                with open(f, "r") as fh:
+                    fresh = json.load(fh)
+                fresh["_file_mtime"] = mtime
+                self._usage_data = fresh
+                self._alerts_sent = set(fresh.get("alerts_sent", []))
+        except Exception as e:
+            logger.debug(f"deepseek_cost_tracker: reload check skipped ({e})")
+
     def get_status(self) -> dict:
+        self._maybe_reload_from_file()
         with self._data_lock:
             cost_eur = self._usage_data.get("total_cost_eur", 0)
             return {

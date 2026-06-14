@@ -226,11 +226,31 @@ class OpenAICostTracker:
     def is_budget_exceeded(self) -> bool:
         return self._usage_data.get("total_cost_eur", 0) >= self.monthly_budget_eur
 
+    def _maybe_reload_from_file(self) -> None:
+        """Re-read the on-disk usage file if a sibling uvicorn worker
+        wrote it since our last load — see deepseek_cost_tracker for the
+        full rationale (multi-worker singleton drift fix)."""
+        try:
+            f = self.data_file
+            if not f.exists():
+                return
+            mtime = f.stat().st_mtime
+            last = float(self._usage_data.get("_file_mtime", 0))
+            if mtime > last + 0.001:
+                with open(f, "r") as fh:
+                    fresh = json.load(fh)
+                fresh["_file_mtime"] = mtime
+                self._usage_data = fresh
+                self._alerts_sent = set(fresh.get("alerts_sent", []))
+        except Exception as e:
+            logger.debug(f"openai_cost_tracker: reload check skipped ({e})")
+
     def should_block_request(self) -> bool:
         """Three independent block conditions, any of which trips the gate:
         (1) persistent hard-cap flag, (2) shared master state in client
         mode, (3) local-view cap. Mirrors ``minimax_cost_tracker`` shape.
         """
+        self._maybe_reload_from_file()
         if self._usage_data.get("openai_hard_cap_active"):
             return True
         if self.master_url and self.shared_secret:
@@ -245,6 +265,7 @@ class OpenAICostTracker:
         return self.block_on_budget_exceeded and self.is_budget_exceeded()
 
     def get_status(self) -> dict:
+        self._maybe_reload_from_file()
         with self._data_lock:
             cost_eur = self._usage_data.get("total_cost_eur", 0)
             return {
