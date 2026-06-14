@@ -394,6 +394,25 @@ class CostTracker:
         """Check if monthly budget is exceeded."""
         return self._usage_data.get("total_cost_eur", 0) >= self.monthly_budget_eur
 
+    def _maybe_reload_from_file(self) -> None:
+        """Re-read the on-disk usage file if a sibling uvicorn worker
+        wrote it since our last load — see deepseek_cost_tracker for the
+        full rationale (multi-worker singleton drift fix)."""
+        try:
+            f = self.data_file
+            if not f.exists():
+                return
+            mtime = f.stat().st_mtime
+            last = float(self._usage_data.get("_file_mtime", 0))
+            if mtime > last + 0.001:
+                with open(f, "r") as fh:
+                    fresh = json.load(fh)
+                fresh["_file_mtime"] = mtime
+                self._usage_data = fresh
+                self._alerts_sent = set(fresh.get("alerts_sent", []))
+        except Exception as e:
+            logger.debug(f"cost_tracker: reload check skipped ({e})")
+
     def should_block_request(self) -> bool:
         """Check if request should be blocked due to budget.
 
@@ -410,6 +429,7 @@ class CostTracker:
 
         3. **Local view**: ``block_on_budget_exceeded`` + monthly cap.
         """
+        self._maybe_reload_from_file()
         # (1) Persistent GCP-side kill switch
         if self._usage_data.get("gcp_hard_cap_active"):
             return True
@@ -512,6 +532,7 @@ class CostTracker:
 
     def get_status(self) -> dict:
         """Get current usage status."""
+        self._maybe_reload_from_file()
         with self._data_lock:
             current_cost = self._usage_data.get("total_cost_eur", 0)
             return {
