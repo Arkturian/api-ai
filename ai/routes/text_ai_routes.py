@@ -161,18 +161,33 @@ def _check_api_billing_gate(confirmed: Optional[bool], endpoint: str) -> None:
 
 
 def _download_storage_images(prompt_text):
-    # Scan the prompt for storage media URLs, download each to /tmp; return
-    # [(url, local_path)]. Lets the CLI read a LOCAL file instead of WebFetching
-    # the URL -> no storage-MCP asset lookups, deterministic for codex/gemini.
+    # Scan the prompt for storage media URLs, download each to a HOME-rooted
+    # vision-tmp dir; return [(url, local_path)]. Lets the CLI read a LOCAL
+    # file instead of WebFetching the URL -> deterministic for codex/gemini.
     # X-API-KEY bypasses the storage quarantine gate (re-scan of flagged imgs).
     # Caller MUST delete the local files after the CLI call.
-    import re, uuid
+    #
+    # Path-under-$HOME, NOT /tmp: gemini-cli v0.46+ enforces a workspace
+    # sandbox even with --no-sandbox --yolo --skip-trust. /tmp resolves
+    # "outside the allowed workspace", the internal read_file tool-call
+    # silently fails, and the model answers from the text prompt alone
+    # — producing confident hallucinated species. Verified 2026-06-15
+    # via SWFME's Knowledge pipeline (bee image -> "Gentiana verna @1.0").
+    # HOME-rooted vision dir gets through the workspace check and the
+    # @path reference attaches the image as a multimodal part.
+    import re, uuid, pwd
     try:
         import httpx
     except Exception:
         return []
     urls = [u.rstrip('.,;:)]}>') for u in re.findall(r'https?://\S+', prompt_text or '') if '/storage/media/' in u]
     out = []
+    cli_home = os.getenv("CLI_HOME") or pwd.getpwuid(os.getuid()).pw_dir
+    img_dir = os.path.join(cli_home, ".aiapi-vision")
+    try:
+        os.makedirs(img_dir, exist_ok=True)
+    except OSError:
+        img_dir = "/tmp"
     for url in dict.fromkeys(urls):
         try:
             with httpx.Client(timeout=30.0, follow_redirects=True) as c:
@@ -180,7 +195,7 @@ def _download_storage_images(prompt_text):
                 r.raise_for_status()
             ct = r.headers.get('content-type', '')
             ext = 'png' if 'png' in ct else ('webp' if 'webp' in ct else 'jpg')
-            p = '/tmp/aiimg_' + uuid.uuid4().hex[:10] + '.' + ext
+            p = os.path.join(img_dir, 'aiimg_' + uuid.uuid4().hex[:10] + '.' + ext)
             with open(p, 'wb') as fh:
                 fh.write(r.content)
             out.append((url, p))
