@@ -167,14 +167,16 @@ def _download_storage_images(prompt_text):
     # X-API-KEY bypasses the storage quarantine gate (re-scan of flagged imgs).
     # Caller MUST delete the local files after the CLI call.
     #
-    # Path-under-$HOME, NOT /tmp: gemini-cli v0.46+ enforces a workspace
-    # sandbox even with --no-sandbox --yolo --skip-trust. /tmp resolves
-    # "outside the allowed workspace", the internal read_file tool-call
-    # silently fails, and the model answers from the text prompt alone
-    # — producing confident hallucinated species. Verified 2026-06-15
+    # Path-under-cwd, NOT /tmp and NOT just under $HOME: gemini-cli v0.46+
+    # enforces a workspace sandbox scoped to the **cwd** (not $HOME) even
+    # with --no-sandbox --yolo --skip-trust. Anything outside the cwd
+    # resolves "outside the allowed workspace", the internal read_file
+    # tool-call silently fails, and the model answers from the text
+    # prompt alone — confident hallucinated species. Verified 2026-06-15
     # via SWFME's Knowledge pipeline (bee image -> "Gentiana verna @1.0").
-    # HOME-rooted vision dir gets through the workspace check and the
-    # @path reference attaches the image as a multimodal part.
+    # Service runs CLI with cwd=$HOME/.aiapi-neutral, so images must go
+    # UNDER that directory (.aiapi-neutral/.vision/) so the workspace
+    # check passes and the @path attaches the image as a multimodal part.
     import re, uuid, pwd
     try:
         import httpx
@@ -183,7 +185,7 @@ def _download_storage_images(prompt_text):
     urls = [u.rstrip('.,;:)]}>') for u in re.findall(r'https?://\S+', prompt_text or '') if '/storage/media/' in u]
     out = []
     cli_home = os.getenv("CLI_HOME") or pwd.getpwuid(os.getuid()).pw_dir
-    img_dir = os.path.join(cli_home, ".aiapi-vision")
+    img_dir = os.path.join(cli_home, ".aiapi-neutral", ".vision")
     try:
         os.makedirs(img_dir, exist_ok=True)
     except OSError:
