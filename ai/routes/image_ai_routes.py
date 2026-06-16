@@ -10,7 +10,7 @@ Endpoints for image generation and processing:
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
-from typing import Optional
+from typing import List, Optional
 import logging
 
 logger = logging.getLogger(__name__)
@@ -41,6 +41,20 @@ class ImageGenRequest(BaseModel):
     # "high" if you explicitly want OpenAI's quality tier (high consistently
     # >180s for 2048², 4K may exceed the 300s upstream timeout).
     quality: Optional[str] = Field(default=None, description="OpenAI gpt-image-* quality: low/medium/high/auto. Null = server picks 'auto'.")
+    # Reference images for style-transfer / image-to-image. Currently only
+    # supported by the OpenAI gpt-image-* family (routed via /v1/images/edits
+    # multipart). HTTP(S) URLs allowed; storage-api URLs are fetched with
+    # X-API-KEY so private/quarantined assets work too. Max 16 references
+    # (OpenAI hard limit). dall-e-3 does NOT support edits — rejected at
+    # dispatch. Non-OpenAI models reject too with a 400 pointing at gpt-image-2.
+    reference_image_urls: Optional[List[str]] = Field(
+        default=None,
+        description=(
+            "Reference images as visual style/composition anchors. Only "
+            "supported with gpt-image-1 / gpt-image-1.5 / gpt-image-2 — "
+            "switches dispatch to OpenAI /v1/images/edits. Max 16 URLs."
+        ),
+    )
 
 
 class ImageResponse(BaseModel):
@@ -125,6 +139,54 @@ def is_openai_image_model(model: str) -> bool:
     return model.startswith("gpt-image-") or model == "dall-e-3"
 
 
+async def _download_reference_images(urls: List[str]) -> List[tuple]:
+    """Fetch reference image bytes for OpenAI /v1/images/edits multipart upload.
+
+    Returns [(filename, bytes, mime_type), ...] suitable for httpx files-param.
+    Storage-api URLs are fetched with X-API-KEY so quarantined/private assets
+    work; other URLs are fetched anonymously. Fail fast — if any URL 404s we
+    raise 422 with the bad URL, so the caller sees which reference was wrong
+    instead of getting a confidently wrong generated image.
+    """
+    import httpx
+    import os
+    import uuid
+
+    out = []
+    storage_key = os.getenv("STORAGE_API_KEY", "Inetpass1")
+    async with httpx.AsyncClient(timeout=60.0, follow_redirects=True) as client:
+        for i, url in enumerate(urls):
+            headers = {}
+            if "/storage/media/" in url:
+                headers["X-API-KEY"] = storage_key
+            try:
+                r = await client.get(url, headers=headers)
+                r.raise_for_status()
+            except httpx.HTTPError as e:
+                raise HTTPException(
+                    status_code=422,
+                    detail={
+                        "error": "reference_image_fetch_failed",
+                        "url": url,
+                        "exc": str(e)[:200],
+                    },
+                )
+            ct = r.headers.get("content-type", "image/png")
+            # OpenAI Images API accepts png / jpg / webp on edits.
+            mime = "image/png" if "png" in ct else (
+                "image/webp" if "webp" in ct else "image/jpeg"
+            )
+            ext = "png" if mime == "image/png" else (
+                "webp" if mime == "image/webp" else "jpg"
+            )
+            filename = f"ref_{i}_{uuid.uuid4().hex[:6]}.{ext}"
+            out.append((filename, r.content, mime))
+            logger.info(
+                f"OpenAI edits ref[{i}]: {url} -> {len(r.content)} bytes ({mime})"
+            )
+    return out
+
+
 async def generate_with_openai_image(
     prompt: str,
     model: str,
@@ -134,6 +196,7 @@ async def generate_with_openai_image(
     height: Optional[int] = None,
     aspect_ratio: Optional[str] = None,
     quality: Optional[str] = None,
+    reference_image_urls: Optional[List[str]] = None,
 ) -> dict:
     """Generate image via OpenAI Images API (gpt-image-2 / gpt-image-1 / dall-e-3).
 
@@ -145,6 +208,11 @@ async def generate_with_openai_image(
     We map our (width, height) form to the closest supported size — falling
     back to ``2048x2048`` for the default ``1024×1024``-default-but-Story-wants-2k
     use case, or to ``auto`` when the caller passes nothing.
+
+    When ``reference_image_urls`` is set the call switches from
+    ``/v1/images/generations`` (JSON, text-only) to ``/v1/images/edits``
+    (multipart, with up to 16 image[] file uploads as visual anchors).
+    dall-e-3 is rejected on the edits path — only gpt-image-* supports it.
     """
     import base64
     import httpx
@@ -158,6 +226,31 @@ async def generate_with_openai_image(
             detail={
                 "error": "openai_api_key_missing",
                 "hint": "OPENAI_API_KEY not configured in service env.",
+            },
+        )
+
+    use_edits = bool(reference_image_urls)
+    if use_edits and model == "dall-e-3":
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "reference_image_not_supported",
+                "model": model,
+                "hint": (
+                    "dall-e-3 does not support /v1/images/edits. Switch to "
+                    "gpt-image-2 (or gpt-image-1 / gpt-image-1.5) to use "
+                    "reference_image_urls as visual style anchors."
+                ),
+            },
+        )
+    if use_edits and len(reference_image_urls) > 16:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "too_many_reference_images",
+                "got": len(reference_image_urls),
+                "max": 16,
+                "hint": "OpenAI /v1/images/edits accepts at most 16 image[] uploads.",
             },
         )
 
@@ -197,40 +290,78 @@ async def generate_with_openai_image(
         )
         requested_quality = "auto"
 
-    payload: dict = {
-        "model": model,
-        "prompt": prompt,
-        "size": size,
-        "n": 1,
-        "output_format": "png",
-        "quality": requested_quality,
-    }
-    # gpt-image-1.5 and gpt-image-2 accept "background", dall-e-3 does not.
-    if model.startswith("gpt-image-"):
-        payload["background"] = "auto"
-
-    logger.info(
-        f"OpenAI image gen: model={model}, size={size}, quality={payload['quality']}"
-    )
-
     # 300s upstream timeout — gpt-image-2 at 2048² with quality=auto
     # measured 30-90s, but 4K + complex prompts push past 120s. The
     # storage-api caller already has its own retry-on-timeout layer.
-    async with httpx.AsyncClient(timeout=300.0) as client:
-        try:
-            r = await client.post(
-                "https://api.openai.com/v1/images/generations",
-                json=payload,
-                headers={"Authorization": f"Bearer {api_key}"},
-            )
-        except httpx.HTTPError as e:
-            raise HTTPException(
-                status_code=502,
-                detail={
-                    "error": "openai_upstream_unreachable",
-                    "exc": str(e)[:200],
-                },
-            )
+    if use_edits:
+        # /v1/images/edits — multipart upload, model+prompt+size+quality
+        # as form fields, image[] for each reference. OpenAI accepts the
+        # `image` field repeated (sent as `image` + `image` + ...) or as
+        # `image[]`; httpx encodes a list of ("image", (...)) tuples as
+        # the repeated form which OpenAI parses correctly.
+        ref_files = await _download_reference_images(reference_image_urls)
+        form: list = [
+            ("model", (None, model)),
+            ("prompt", (None, prompt)),
+            ("size", (None, size)),
+            ("quality", (None, requested_quality)),
+            ("n", (None, "1")),
+        ]
+        if model.startswith("gpt-image-"):
+            form.append(("output_format", (None, "png")))
+            form.append(("background", (None, "auto")))
+        files = [("image", (fn, content, mime)) for fn, content, mime in ref_files]
+        logger.info(
+            f"OpenAI image edit: model={model}, size={size}, "
+            f"quality={requested_quality}, refs={len(ref_files)}"
+        )
+        async with httpx.AsyncClient(timeout=300.0) as client:
+            try:
+                r = await client.post(
+                    "https://api.openai.com/v1/images/edits",
+                    data=form,
+                    files=files,
+                    headers={"Authorization": f"Bearer {api_key}"},
+                )
+            except httpx.HTTPError as e:
+                raise HTTPException(
+                    status_code=502,
+                    detail={
+                        "error": "openai_upstream_unreachable",
+                        "exc": str(e)[:200],
+                    },
+                )
+    else:
+        payload: dict = {
+            "model": model,
+            "prompt": prompt,
+            "size": size,
+            "n": 1,
+            "output_format": "png",
+            "quality": requested_quality,
+        }
+        # gpt-image-1.5 and gpt-image-2 accept "background", dall-e-3 does not.
+        if model.startswith("gpt-image-"):
+            payload["background"] = "auto"
+
+        logger.info(
+            f"OpenAI image gen: model={model}, size={size}, quality={payload['quality']}"
+        )
+        async with httpx.AsyncClient(timeout=300.0) as client:
+            try:
+                r = await client.post(
+                    "https://api.openai.com/v1/images/generations",
+                    json=payload,
+                    headers={"Authorization": f"Bearer {api_key}"},
+                )
+            except httpx.HTTPError as e:
+                raise HTTPException(
+                    status_code=502,
+                    detail={
+                        "error": "openai_upstream_unreachable",
+                        "exc": str(e)[:200],
+                    },
+                )
 
     if r.status_code >= 400:
         try:
@@ -682,6 +813,29 @@ async def generate_image_endpoint(
 
         logger.info(f"Image gen request: model={model_name} -> {actual_model}")
 
+        # Reject reference_image_urls early if the chosen model can't use
+        # them. Only OpenAI gpt-image-* takes refs (via /v1/images/edits);
+        # everything else is text-to-image only on this endpoint.
+        if request.reference_image_urls:
+            if not (
+                is_openai_image_model(model_name)
+                or is_openai_image_model(actual_model)
+            ) or actual_model == "dall-e-3":
+                raise HTTPException(
+                    status_code=400,
+                    detail={
+                        "error": "reference_image_not_supported_for_model",
+                        "model": model_name,
+                        "hint": (
+                            "reference_image_urls is only wired for "
+                            "gpt-image-2 / gpt-image-1 / gpt-image-1.5 "
+                            "(OpenAI /v1/images/edits). Pick one of those, "
+                            "or drop reference_image_urls and use the model "
+                            "with text-only generation."
+                        ),
+                    },
+                )
+
         # Route to appropriate provider
         if is_higgsfield_model(actual_model):
             result = await generate_with_higgsfield(
@@ -732,6 +886,7 @@ async def generate_image_endpoint(
                 height=request.height,
                 aspect_ratio=request.aspect_ratio,
                 quality=request.quality,
+                reference_image_urls=request.reference_image_urls,
             )
 
         elif model_name == "dall-e-3":
