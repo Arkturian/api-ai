@@ -300,16 +300,16 @@ async def generate_with_openai_image(
         # `image[]`; httpx encodes a list of ("image", (...)) tuples as
         # the repeated form which OpenAI parses correctly.
         ref_files = await _download_reference_images(reference_image_urls)
-        form: list = [
-            ("model", (None, model)),
-            ("prompt", (None, prompt)),
-            ("size", (None, size)),
-            ("quality", (None, requested_quality)),
-            ("n", (None, "1")),
-        ]
+        form: dict = {
+            "model": model,
+            "prompt": prompt,
+            "size": size,
+            "quality": requested_quality,
+            "n": "1",
+        }
         if model.startswith("gpt-image-"):
-            form.append(("output_format", (None, "png")))
-            form.append(("background", (None, "auto")))
+            form["output_format"] = "png"
+            form["background"] = "auto"
         files = [("image", (fn, content, mime)) for fn, content, mime in ref_files]
         logger.info(
             f"OpenAI image edit: model={model}, size={size}, "
