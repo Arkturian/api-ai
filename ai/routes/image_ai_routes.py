@@ -310,7 +310,15 @@ async def generate_with_openai_image(
         if model.startswith("gpt-image-"):
             form["output_format"] = "png"
             form["background"] = "auto"
-        files = [("image", (fn, content, mime)) for fn, content, mime in ref_files]
+        # OpenAI /v1/images/edits accepts the `image` field as either a
+        # SINGLE upload (field name `image`) or an ARRAY (field name
+        # `image[]` repeated). Sending `image` more than once gets you
+        # a 400 invalid_request_error with code `duplicate_parameter`.
+        # So: pick the field name based on count. Verified live by CHAP2
+        # IACP 6aee6916 — single ref worked with `image`, 3 refs failed
+        # until switched to `image[]`.
+        field_name = "image" if len(ref_files) == 1 else "image[]"
+        files = [(field_name, (fn, content, mime)) for fn, content, mime in ref_files]
         logger.info(
             f"OpenAI image edit: model={model}, size={size}, "
             f"quality={requested_quality}, refs={len(ref_files)}"
