@@ -786,9 +786,34 @@ def _artrack_api_base() -> str:
 
 
 def _guide_api_base() -> str:
+    # Default to arkserver:8095 — guide-api's authoritative host where
+    # the /api/v1/realtime/* wrapper endpoints landed (GuideDevBot IACP
+    # 4152ba46, commit 9ecaee5). The .arkturian.com vhost would also
+    # work, but the direct URL keeps the service-trust auth path
+    # symmetric with the host that owns the corpus.
     return os.getenv(
-        "GUIDE_API_URL", "https://guide-api.arkturian.com"
+        "GUIDE_API_URL", "http://127.0.0.1:8095"
     ).rstrip("/")
+
+
+def _guide_api_service_auth() -> tuple[dict, dict]:
+    """Service-trust auth pair for AiApi -> guide-api calls inside a
+    Realtime tool-call: ``X-API-KEY`` header + ``user_id`` query param.
+
+    Realtime tool-calls don't carry a user JWT — the OpenAI model fires
+    function_calls and the browser forwards them through AiApi where no
+    end-user identity is in scope. GuideDevBot exposed the service-trust
+    path (IACP 4152ba46) specifically so we can hit /realtime/narration*
+    with a bot-identity. ``user_id`` is symbolic here — guide-api uses
+    it to attribute the corpus write to a known relaxed-trust caller.
+    """
+    headers = {
+        "X-API-KEY": os.getenv("GUIDE_API_KEY") or os.getenv(
+            "STORAGE_API_KEY", "Inetpass1"
+        ),
+    }
+    params = {"user_id": os.getenv("GUIDE_API_SERVICE_USER", "agent:AiApi")}
+    return headers, params
 
 
 async def _tool_knowledge_query(args: dict) -> dict:
@@ -862,15 +887,18 @@ async def _tool_pois_near(args: dict) -> dict:
 
 async def _tool_narration_near(args: dict) -> dict:
     """Wraps guide-api narration-near lookup. Owned by GuideDevBot's
-    wrapper endpoint; we POST to ``/api/v1/realtime/narration/near``
-    (the dual to ``/api/v1/realtime/narration``)."""
+    wrapper endpoint; we GET ``/api/v1/realtime/narration/near`` with
+    the service-trust auth pair (X-API-KEY + user_id) because Realtime
+    tool-calls don't carry a user JWT."""
     lat = float(args["lat"])
     lon = float(args["lon"])
     radius_m = float(args.get("radius_m", 100))
+    headers, auth_params = _guide_api_service_auth()
     async with httpx.AsyncClient(timeout=2.0) as client:
         r = await client.get(
             f"{_guide_api_base()}/api/v1/realtime/narration/near",
-            params={"lat": lat, "lon": lon, "radius_m": radius_m},
+            params={"lat": lat, "lon": lon, "radius_m": radius_m, **auth_params},
+            headers=headers,
         )
         # 404 = endpoint not deployed yet (GuideDevBot's side). Return an
         # empty result so the model can proceed rather than failing the
