@@ -804,8 +804,10 @@ def _knowledge_api_base() -> str:
 
 
 def _artrack_api_base() -> str:
+    # ArTrack-API is hosted at api-artrack.arkturian.com (not the natural
+    # artrack-api.* you might guess — that NXDOMAIN'd in the first smoke).
     return os.getenv(
-        "ARTRACK_API_URL", "https://artrack-api.arkturian.com"
+        "ARTRACK_API_URL", "https://api-artrack.arkturian.com"
     ).rstrip("/")
 
 
@@ -841,34 +843,46 @@ def _guide_api_service_auth() -> tuple[dict, dict]:
 
 
 async def _tool_knowledge_query(args: dict) -> dict:
-    """Wraps ``mcp__knowledge__knowledge_query``.
+    """Routes the model's ``knowledge_query`` to knowledge-api's geo
+    lookup ``GET /api/v1/knowledge/near``.
 
-    We hit the HTTP endpoint directly rather than going through the
-    MCP-server so the latency stays under control. The MCP layer adds
-    a tmux-bot roundtrip we cannot afford during a live conversation.
+    The knowledge-api ``POST /knowledge/query`` is per-storage-object
+    Q&A (needs ``storage_id`` + ``prompt``), not free-text search —
+    semantic-string search isn't exposed yet. We use the geo lookup
+    when the model provides lat/lon, which is the realistic Wanderlaut
+    case ("what's around me"). Without coords we fail-soft empty so
+    the model speaks from its general knowledge.
     """
-    query = args.get("query") or ""
-    if not query:
-        raise HTTPException(status_code=400, detail="knowledge_query: 'query' required")
-    payload = {
-        "query": query,
+    lat = args.get("lat")
+    lon = args.get("lon")
+    if lat is None or lon is None:
+        # No coords — knowledge-api has no free-text search endpoint
+        # we can route to. Return empty + note so the model proceeds.
+        return {
+            "items": [],
+            "count": 0,
+            "note": (
+                "knowledge_query without lat/lon falls back to empty; "
+                "the model should speak from general knowledge instead."
+            ),
+        }
+    params = {
+        "lat": float(lat),
+        "lon": float(lon),
+        "radius_m": float(args.get("radius_m", 500)),
         "limit": int(args.get("limit", 5)),
     }
-    if "lat" in args and "lon" in args:
-        payload["lat"] = float(args["lat"])
-        payload["lon"] = float(args["lon"])
-        payload["radius_m"] = float(args.get("radius_m", 500))
+    # Optional kind filter from the query string heuristic — knowledge-api
+    # supports plant|animal scoping. If the model passes ``query`` we
+    # leave it as a soft hint in the response so the caller can match.
     async with httpx.AsyncClient(timeout=2.0) as client:
-        r = await client.post(
-            f"{_knowledge_api_base()}/api/v1/knowledge/query",
-            json=payload,
+        r = await client.get(
+            f"{_knowledge_api_base()}/api/v1/knowledge/near", params=params
         )
         r.raise_for_status()
         data = r.json()
-    # Trim to what the model can speak about — title + summary + storage_id
-    # for image hand-off.
     items = []
-    for it in (data.get("items") or [])[: payload["limit"]]:
+    for it in (data.get("items") or data.get("knowledge_posts") or [])[: params["limit"]]:
         items.append({
             "id": it.get("id"),
             "title": it.get("title"),
@@ -877,32 +891,46 @@ async def _tool_knowledge_query(args: dict) -> dict:
             "storage_id": it.get("hero_storage_id") or it.get("storage_id"),
             "lat": it.get("lat"),
             "lon": it.get("lon"),
+            "distance_m": it.get("distance_m"),
         })
     return {"items": items, "count": len(items)}
 
 
 async def _tool_pois_near(args: dict) -> dict:
-    """Wraps ``mcp__artrack__pois_near`` / ``waypoints near``."""
+    """Wraps ArTrack's nearby endpoints.
+
+    Routes based on whether the model passes ``track_id`` (then we use
+    the track-scoped POI lookup, which is dramatically smaller + faster)
+    or only lat/lon (then we use the general places lookup).
+
+    ArTrack-API uses ``lng`` (not ``lon``) for longitude; we translate.
+    """
     lat = float(args["lat"])
-    lon = float(args["lon"])
+    lng = float(args["lon"])
     radius_m = float(args.get("radius_m", 200))
-    params = {"lat": lat, "lon": lon, "radius_m": radius_m}
-    if "track_id" in args:
-        params["track_id"] = int(args["track_id"])
+    track_id = args.get("track_id")
+    params = {"lat": lat, "lng": lng, "radius_m": radius_m}
+    if track_id:
+        params["limit"] = 10
+        url = f"{_artrack_api_base()}/tracks/{int(track_id)}/pois-near"
+    else:
+        url = f"{_artrack_api_base()}/places/nearby/compact"
     async with httpx.AsyncClient(timeout=2.0) as client:
-        r = await client.get(
-            f"{_artrack_api_base()}/api/v1/waypoints/near", params=params
-        )
+        r = await client.get(url, params=params)
         r.raise_for_status()
         data = r.json()
+    # Both endpoints return either a top-level list or {pois|places|items: [...]}.
+    raw = data if isinstance(data, list) else (
+        data.get("pois") or data.get("places") or data.get("items") or []
+    )
     items = []
-    for wp in (data.get("waypoints") or data.get("items") or [])[:10]:
+    for wp in raw[:10]:
         items.append({
             "id": wp.get("id"),
             "title": wp.get("title") or wp.get("name"),
-            "category": wp.get("category") or wp.get("type"),
+            "category": wp.get("category") or wp.get("type") or wp.get("kind"),
             "lat": wp.get("lat"),
-            "lon": wp.get("lon"),
+            "lon": wp.get("lon") or wp.get("lng"),
             "distance_m": wp.get("distance_m"),
             "knowledge_id": wp.get("knowledge_id"),
         })
