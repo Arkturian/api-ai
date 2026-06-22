@@ -495,24 +495,30 @@ async def mint_realtime_token(
         )
 
     tools = _all_tool_defs()
+    # OpenAI's GA Realtime session shape (2025-Q4+) nests audio knobs
+    # under ``audio.input`` / ``audio.output`` instead of the legacy
+    # flat ``voice`` / ``input_audio_format`` fields. The mint endpoint
+    # surfaces "Unknown parameter: 'session.voice'" when you use the
+    # old layout, so we ship the new layout from day one.
     session_config = {
-        # ``session.type`` is required by the v1 token-mint endpoint
-        # (``/v1/realtime/client_secrets``). The only valid value today
-        # is ``realtime`` — but OpenAI's response surfaces it explicitly
-        # if missing, so we keep this concrete instead of computed.
         "type": "realtime",
         "model": model,
-        "voice": voice,
         "instructions": instructions,
         "tools": tools,
-        "modalities": ["audio", "text"],
-        "input_audio_format": "pcm16",
-        "output_audio_format": "pcm16",
-        "input_audio_transcription": {"model": "whisper-1"},
-        "turn_detection": {
-            "type": "server_vad",
-            "threshold": 0.5,
-            "silence_duration_ms": 500,
+        "audio": {
+            "input": {
+                "format": {"type": "audio/pcm", "rate": 24000},
+                "transcription": {"model": "whisper-1"},
+                "turn_detection": {
+                    "type": "server_vad",
+                    "threshold": 0.5,
+                    "silence_duration_ms": 500,
+                },
+            },
+            "output": {
+                "format": {"type": "audio/pcm", "rate": 24000},
+                "voice": voice,
+            },
         },
         # session metadata so the browser can stamp it on every tool
         # routing request — and so OpenAI's response.done events carry
