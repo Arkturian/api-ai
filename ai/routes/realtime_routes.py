@@ -520,15 +520,11 @@ async def mint_realtime_token(
                 "voice": voice,
             },
         },
-        # session metadata so the browser can stamp it on every tool
-        # routing request — and so OpenAI's response.done events carry
-        # it through to the usage callback.
-        "metadata": {
-            "guide_session_id": request.session_id or "",
-            "track_id": str(request.track_id or ""),
-            "minted_by": "api-ai",
-        },
     }
+    # NOTE: session.metadata is not (yet?) accepted on the
+    # client_secrets mint — we drop it from the session-config and
+    # stamp guide_session_id / track_id only in our own response, where
+    # the browser already needs to read it to wire X-Session-ID headers.
 
     # Token-mint upstream — OpenAI's /v1/realtime/client_secrets endpoint
     # returns an ephemeral client secret with the session_config baked in.
