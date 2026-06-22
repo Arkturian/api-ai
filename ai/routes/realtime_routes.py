@@ -889,17 +889,34 @@ async def _tool_narration_near(args: dict) -> dict:
     """Wraps guide-api narration-near lookup. Owned by GuideDevBot's
     wrapper endpoint; we GET ``/api/v1/realtime/narration/near`` with
     the service-trust auth pair (X-API-KEY + user_id) because Realtime
-    tool-calls don't carry a user JWT."""
+    tool-calls don't carry a user JWT.
+
+    Fail-soft on connection refused / DNS failure — the corpus may not
+    be reachable from every api-ai host (guide-api is single-host on
+    arkserver:8095 today), and we'd rather let the model speak from
+    knowledge_query results than abort the whole tool-call chain.
+    """
     lat = float(args["lat"])
     lon = float(args["lon"])
     radius_m = float(args.get("radius_m", 100))
     headers, auth_params = _guide_api_service_auth()
-    async with httpx.AsyncClient(timeout=2.0) as client:
-        r = await client.get(
-            f"{_guide_api_base()}/api/v1/realtime/narration/near",
-            params={"lat": lat, "lon": lon, "radius_m": radius_m, **auth_params},
-            headers=headers,
+    try:
+        async with httpx.AsyncClient(timeout=2.0) as client:
+            r = await client.get(
+                f"{_guide_api_base()}/api/v1/realtime/narration/near",
+                params={"lat": lat, "lon": lon, "radius_m": radius_m, **auth_params},
+                headers=headers,
+            )
+    except httpx.HTTPError as e:
+        logger.info(
+            f"narration_near: guide-api unreachable from this host "
+            f"({type(e).__name__}: {str(e)[:80]}) — returning empty"
         )
+        return {
+            "items": [],
+            "count": 0,
+            "note": "guide-api unreachable from this api-ai host",
+        }
         # 404 = endpoint not deployed yet (GuideDevBot's side). Return an
         # empty result so the model can proceed rather than failing the
         # whole tool-call chain.
