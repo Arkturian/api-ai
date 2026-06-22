@@ -225,7 +225,15 @@ def _read_tool_defs() -> List[dict]:
                 "properties": {
                     "lat": {"type": "number"},
                     "lon": {"type": "number"},
-                    "radius_m": {"type": "number", "description": "Default 100m."},
+                    "radius_m": {
+                        "type": "number",
+                        "description": (
+                            "Default 500m. The persist path re-grounds coords "
+                            "via Nominatim (~2km cap, typical ~300m drift), "
+                            "so 500m is the minimum that reliably finds the "
+                            "same place again. Tighter values miss real hits."
+                        ),
+                    },
                 },
                 "required": ["lat", "lon"],
             },
@@ -274,7 +282,16 @@ def _display_hint_tool_defs() -> List[dict]:
 
     The model still benefits from declaring them so it actually emits
     the calls. The browser's RealtimeFunctionRouter (GuideDevBot2) is
-    in charge of recognising the tool names and skipping the proxy."""
+    in charge of recognising the tool names and skipping the proxy.
+
+    HARD RULE for the router (per GuideDevBot2 IACP, Content-Post #1196):
+    these tools NEVER speak. In the Realtime mode the audio comes from
+    the WebRTC stream, not from the audio-guide library's TTS. The
+    router applies visuals (``_applyPackageVisuals``, ``_bus.emit``,
+    ``updateNarrationImages``) but stays away from any TTS code path —
+    deliverNarration's card-first split already makes this clean. The
+    system prompt also instructs the model accordingly so it doesn't
+    fall into "I called show_topic, now I must speak" reasoning."""
     return [
         {
             "type": "function",
@@ -362,6 +379,13 @@ def _default_instructions(language: str = "de", track_id: Optional[int] = None) 
         f"{ {'de': 'German', 'sl': 'Slovenian', 'it': 'Italian', 'en': 'English'}.get(language, 'German') }, "
         "but mirror the user's language when they switch. Keep replies "
         "short (1-3 sentences) and conversational; never lecture.\n\n"
+        "AUDIO MODEL — important to understand:\n"
+        "Your spoken reply is delivered via the WebRTC audio stream (live, "
+        "real-time). The show_topic / show_image / show_knowledge_pin / "
+        "focus_map tools are PURE VISUAL HINTS for the browser client — "
+        "they do NOT speak, they only update what the user sees. Keep "
+        "talking normally while you call them; the visuals appear in "
+        "parallel to your voice without any TTS being involved.\n\n"
         "TOOL DISCIPLINE — this is critical:\n"
         "  * ALWAYS call `knowledge_query` or `narration_near` BEFORE making "
         "a factual claim about a POI, plant or animal. Never invent details.\n"
@@ -898,7 +922,13 @@ async def _tool_narration_near(args: dict) -> dict:
     """
     lat = float(args["lat"])
     lon = float(args["lon"])
-    radius_m = float(args.get("radius_m", 100))
+    # Default 500m, not 100m: GuideDevBot's persist path re-grounds
+    # coords via Nominatim (typical ~300m drift). 100m would miss hits
+    # that the persist round just attributed to a slightly different
+    # spot. Verified live by GuideDevBot's server-side smoke (IACP
+    # 664b5040): input 46.6211/14.3055 -> persisted 46.6222/14.3091,
+    # 296m apart. radius_m=500 catches it, 100m doesn't.
+    radius_m = float(args.get("radius_m", 500))
     headers, auth_params = _guide_api_service_auth()
     try:
         async with httpx.AsyncClient(timeout=2.0) as client:
