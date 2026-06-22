@@ -190,6 +190,20 @@ class _OpenAISharedTrackPayload(BaseModel):
     source_host: Optional[str] = None
 
 
+class _OpenAIRealtimeSharedTrackPayload(BaseModel):
+    """Payload posted by a sibling host to log an OpenAI Realtime session's
+    token usage into the shared monthly counter. Distinct audio + text
+    input/output counts so the per-modality billing model is preserved."""
+
+    model: str
+    audio_input_tokens: int = 0
+    audio_output_tokens: int = 0
+    text_input_tokens: int = 0
+    text_output_tokens: int = 0
+    duration_sec: float = 0.0
+    source_host: Optional[str] = None
+
+
 class _MinimaxSharedTrackPayload(BaseModel):
     """Payload posted by a sibling host to log a MiniMax API call into the
     shared monthly counter. Mirrors ``_SharedTrackPayload`` but with the
@@ -407,6 +421,45 @@ async def openai_cost_shared_state_track(
     )
     status = openai_cost_tracker.get_status()
     status["would_block"] = openai_cost_tracker.should_block_request()
+    return status
+
+
+@router.get("/openai-realtime-cost-shared-state")
+async def openai_realtime_cost_shared_state_get(
+    x_internal_auth: Optional[str] = Header(default=None, alias="X-Internal-Auth"),
+):
+    """Master-side state read for the OpenAI Realtime shared counter.
+
+    Federation-internal twin of the four older shared-state endpoints.
+    Sibling api-ai hosts query this before minting an ephemeral Realtime
+    token so the 100 EUR monthly cap is enforced against a single shared
+    counter instead of N independent per-host counters.
+    """
+    _verify_shared_counter_auth(x_internal_auth)
+    from ..services.openai_realtime_cost_tracker import openai_realtime_cost_tracker
+    status = openai_realtime_cost_tracker.get_status()
+    status["would_block"] = openai_realtime_cost_tracker.should_block_request()
+    return status
+
+
+@router.post("/openai-realtime-cost-shared-state")
+async def openai_realtime_cost_shared_state_track(
+    payload: _OpenAIRealtimeSharedTrackPayload,
+    x_internal_auth: Optional[str] = Header(default=None, alias="X-Internal-Auth"),
+):
+    """Master-side increment for the OpenAI Realtime shared counter."""
+    _verify_shared_counter_auth(x_internal_auth)
+    from ..services.openai_realtime_cost_tracker import openai_realtime_cost_tracker
+    openai_realtime_cost_tracker._track_local(
+        model=payload.model,
+        audio_input_tokens=payload.audio_input_tokens,
+        audio_output_tokens=payload.audio_output_tokens,
+        text_input_tokens=payload.text_input_tokens,
+        text_output_tokens=payload.text_output_tokens,
+        duration_sec=payload.duration_sec,
+    )
+    status = openai_realtime_cost_tracker.get_status()
+    status["would_block"] = openai_realtime_cost_tracker.should_block_request()
     return status
 
 
