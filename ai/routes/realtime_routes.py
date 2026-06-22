@@ -775,19 +775,19 @@ async def realtime_tool_call(
 
 def _knowledge_api_base() -> str:
     return os.getenv(
-        "KNOWLEDGE_API_URL", "https://knowledge-api.arkserver.arkturian.com"
+        "KNOWLEDGE_API_URL", "https://knowledge-api.arkturian.com"
     ).rstrip("/")
 
 
 def _artrack_api_base() -> str:
     return os.getenv(
-        "ARTRACK_API_URL", "https://artrack-api.arkserver.arkturian.com"
+        "ARTRACK_API_URL", "https://artrack-api.arkturian.com"
     ).rstrip("/")
 
 
 def _guide_api_base() -> str:
     return os.getenv(
-        "GUIDE_API_URL", "https://guide-api.arkserver.arkturian.com"
+        "GUIDE_API_URL", "https://guide-api.arkturian.com"
     ).rstrip("/")
 
 
