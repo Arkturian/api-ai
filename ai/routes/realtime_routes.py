@@ -561,6 +561,13 @@ async def mint_realtime_token(
 
     # Token-mint upstream — OpenAI's /v1/realtime/client_secrets endpoint
     # returns an ephemeral client secret with the session_config baked in.
+    #
+    # NO "OpenAI-Beta: realtime=v1" header — that header is what marks the
+    # minted ek_ token as beta-shaped, and OpenAI now rejects beta tokens
+    # at the SDP exchange with "beta_api_shape_disabled" (verified live by
+    # GuideDevBot2's browser voice attempt + AiApi's own headless smoke).
+    # The /client_secrets endpoint accepts the call without the header and
+    # returns a GA-shaped token usable against the /v1/realtime SDP path.
     async with httpx.AsyncClient(timeout=30.0) as client:
         try:
             r = await client.post(
@@ -568,7 +575,6 @@ async def mint_realtime_token(
                 json={"session": session_config},
                 headers={
                     "Authorization": f"Bearer {api_key_env}",
-                    "OpenAI-Beta": "realtime=v1",
                 },
             )
         except httpx.HTTPError as e:
