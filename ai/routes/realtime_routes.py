@@ -61,13 +61,17 @@ router = APIRouter()
 # wired to mint tokens against; the browser picks one when it asks for
 # a token. Adding a new model means: (1) add it here, (2) add pricing
 # to ``openai_realtime_cost_tracker.OPENAI_REALTIME_PRICING``.
+# OpenAI moved Realtime to GA; the preview aliases (gpt-4o-realtime-preview,
+# gpt-4o-mini-realtime-preview) still accept token mints via
+# /v1/realtime/client_secrets but fail the WS/SDP connect with
+# 4004 invalid_request_error.model_not_found. Verified live in AiApi
+# headless smoke (this session) and reproduced by GuideDevBot2's browser
+# voice attempt. Only ``gpt-realtime`` is supported end-to-end today.
 SUPPORTED_REALTIME_MODELS = {
-    "gpt-realtime",                     # default upgrade, premium voice
-    "gpt-4o-realtime-preview",
-    "gpt-4o-mini-realtime-preview",     # MVP — cheapest, 6x less than gpt-realtime
+    "gpt-realtime",
 }
 
-DEFAULT_REALTIME_MODEL = "gpt-4o-mini-realtime-preview"
+DEFAULT_REALTIME_MODEL = "gpt-realtime"
 
 # Voices OpenAI Realtime exposes today. The browser can pick or default.
 DEFAULT_REALTIME_VOICE = "marin"
@@ -88,8 +92,9 @@ class RealtimeTokenRequest(BaseModel):
     model: Optional[str] = Field(
         default=DEFAULT_REALTIME_MODEL,
         description=(
-            "Realtime model. Default 'gpt-4o-mini-realtime-preview' for the MVP "
-            "(cheap, multilingual DE/SL/IT/EN). 'gpt-realtime' for premium voice."
+            "Realtime model. Only 'gpt-realtime' is supported end-to-end "
+            "today — OpenAI's preview aliases still accept token mints but "
+            "fail the WS/SDP connect with model_not_found."
         ),
     )
     voice: Optional[str] = Field(
@@ -616,32 +621,17 @@ async def list_realtime_models():
     return {
         "models": [
             {
-                "id": "gpt-4o-mini-realtime-preview",
-                "provider": "openai",
-                "default": True,
-                "tier": "mvp",
-                "description": (
-                    "Cheap, multilingual (DE/SL/IT/EN), 300-500ms roundtrip. "
-                    "Recommended for the Tscheppa spike."
-                ),
-                "price_per_min_usd_estimate": "$0.05-0.10",
-            },
-            {
                 "id": "gpt-realtime",
                 "provider": "openai",
-                "tier": "premium",
+                "default": True,
+                "tier": "ga",
                 "description": (
-                    "Best voice quality, lower roundtrip latency. Upgrade "
-                    "from mini once the spike is validated."
+                    "OpenAI Realtime GA. Multilingual DE/SL/IT/EN, "
+                    "200-400ms roundtrip, premium voice quality. "
+                    "The only model whose SDP-connect path works today — "
+                    "the preview aliases mint a token but 4004 on WS."
                 ),
                 "price_per_min_usd_estimate": "$0.15-0.30",
-            },
-            {
-                "id": "gpt-4o-realtime-preview",
-                "provider": "openai",
-                "tier": "legacy-preview",
-                "description": "Older preview model, kept for migration only.",
-                "price_per_min_usd_estimate": "$0.20-0.40",
             },
         ],
         "voices": sorted(SUPPORTED_REALTIME_VOICES),
