@@ -917,18 +917,20 @@ async def _tool_narration_near(args: dict) -> dict:
             "count": 0,
             "note": "guide-api unreachable from this api-ai host",
         }
-        # 404 = endpoint not deployed yet (GuideDevBot's side). Return an
-        # empty result so the model can proceed rather than failing the
-        # whole tool-call chain.
-        if r.status_code == 404:
-            logger.info(
-                "narration_near: guide-api endpoint 404 — "
-                "GuideDevBot wrapper not deployed yet, returning empty"
-            )
-            return {"items": [], "count": 0, "note": "guide-api endpoint pending"}
-        r.raise_for_status()
-        data = r.json()
+    # 404 = endpoint not deployed yet on guide-api. Return empty so the
+    # model can proceed rather than failing the whole tool-call chain.
+    if r.status_code == 404:
+        logger.info(
+            "narration_near: guide-api endpoint 404 — wrapper pending, "
+            "returning empty"
+        )
+        return {"items": [], "count": 0, "note": "guide-api endpoint pending"}
+    r.raise_for_status()
+    data = r.json()
     return {
-        "items": data.get("items", []),
-        "count": data.get("count", 0),
+        "items": data.get("narration_points")
+            or data.get("items")
+            or [],
+        "count": data.get("count")
+            or len(data.get("narration_points") or data.get("items") or []),
     }
