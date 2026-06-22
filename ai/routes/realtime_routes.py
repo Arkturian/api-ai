@@ -496,6 +496,11 @@ async def mint_realtime_token(
 
     tools = _all_tool_defs()
     session_config = {
+        # ``session.type`` is required by the v1 token-mint endpoint
+        # (``/v1/realtime/client_secrets``). The only valid value today
+        # is ``realtime`` — but OpenAI's response surfaces it explicitly
+        # if missing, so we keep this concrete instead of computed.
+        "type": "realtime",
         "model": model,
         "voice": voice,
         "instructions": instructions,
