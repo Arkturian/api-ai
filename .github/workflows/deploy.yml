@@ -134,7 +134,7 @@ jobs:
             # Defense-in-depth: even if CI compileall was bypassed, never
             # restart the service on a syntax-broken extracted tree.
             # On fail, restore backup before exiting.
-            if ! python3 -m compileall -q -q "$DEPLOY_PATH"; then
+            if ! python3 -m compileall -q -q -x '(^|/)(venv|\.venv|__pycache__|\.git)(/|$)' "$DEPLOY_PATH"; then
               echo "❌ compileall failed on extracted archive — rolling back"
               if [ -n "${BACKUP_PATH:-}" ] && [ -d "$BACKUP_PATH" ]; then
                 rm -rf "$DEPLOY_PATH"
