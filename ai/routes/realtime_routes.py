@@ -164,6 +164,19 @@ class RealtimeTokenRequest(BaseModel):
             "Null = legacy / generic realtime token (e.g. Wanderlaut-Guide)."
         ),
     )
+    detail_level: Optional[str] = Field(
+        default="balanced",
+        description=(
+            "Narration depth (Content-Post #1215 Cloud+Codex). "
+            "'brief' = nur Status-Wendepunkte, sonst still. "
+            "'balanced' = laufende Zusammenfassung, 1 Satz alle 5-15s "
+            "(Codex-Default für Step-1-Abnahme). "
+            "'technical' = Tool-Calls + Code-Snippets + Diff-Targets "
+            "werden mitgenarratiert (Operator ist Developer). "
+            "Frozen per Session — Wechsel braucht Re-Mint + neuen "
+            "WebRTC-Connect. Nur wirksam wenn companion_mode gesetzt ist."
+        ),
+    )
     agent_id: Optional[str] = Field(
         default=None,
         description=(
@@ -431,6 +444,47 @@ def _all_tool_defs() -> List[dict]:
 
 
 SUPPORTED_COMPANION_MODES = {"narrator-only", "talkback-enabled"}
+SUPPORTED_DETAIL_LEVELS = {"brief", "balanced", "technical"}
+
+
+def _detail_level_addendum(detail_level: str) -> str:
+    """Modulation paragraph appended to companion prompts. Steers HOW
+    MUCH and WHAT KIND the voice narrates (Content-Post #1215).
+
+    The model is told the operator's preference once, at session start,
+    so it stays consistent throughout. Frequency hints are explicit
+    because OpenAI Realtime tends to be chatty by default."""
+    if detail_level == "brief":
+        return (
+            "\n\nDETAIL-LEVEL: brief.\n"
+            "Sprich NUR bei echten Status-Wendungen: 'Agent fertig', "
+            "'Fehler aufgetreten', 'Agent wartet auf deine Antwort'. "
+            "Zwischen den Wendungen STILL bleiben — keine Zwischen-"
+            "Erklärungen, keine Verlaufs-Updates. Eine Zeile oder "
+            "weniger pro Meldung. Wenn nichts Wichtiges passiert: nicht "
+            "sprechen."
+        )
+    if detail_level == "technical":
+        return (
+            "\n\nDETAIL-LEVEL: technical.\n"
+            "Der Operator ist Developer und will technische Tiefe. "
+            "Sprich auch über Tool-Calls (Methodennamen explizit), "
+            "Code-Snippets (kurz aber wörtlich), Diff-Targets (Datei + "
+            "Funktion), Test-Ergebnisse (Pass/Fail-Zahlen). Skipfe keine "
+            "Implementierungs-Details als zu kleinteilig — wenn der Agent "
+            "z.B. eine Funktion umbaut, sag 'Er ändert refresh_token in "
+            "auth.py:fetch_credentials von blocking zu async'. Frequenz: "
+            "1 Satz alle 3-8s ist OK, bei dichter Aktivität auch öfter."
+        )
+    # balanced (default)
+    return (
+        "\n\nDETAIL-LEVEL: balanced.\n"
+        "Laufende Zusammenfassung — ein Satz alle 5-15 Sekunden. Fokus "
+        "auf WAS der Agent gerade tut, nicht WIE er es technisch macht. "
+        "Tool-Calls + Code-Details nur erwähnen wenn sie für das "
+        "Verständnis nötig sind. Bei dichten Phasen lieber zusammen-"
+        "fassen statt jeden Schritt einzeln nennen."
+    )
 
 
 def _companion_narrator_prompt(language: str = "de") -> str:
@@ -942,19 +996,33 @@ async def mint_realtime_token(
                 "supported": sorted(SUPPORTED_COMPANION_MODES),
             },
         )
+    detail_level = (request.detail_level or "balanced").lower()
+    if detail_level not in SUPPORTED_DETAIL_LEVELS:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "unsupported_detail_level",
+                "detail_level": detail_level,
+                "supported": sorted(SUPPORTED_DETAIL_LEVELS),
+            },
+        )
     companion_tools_override: Optional[List[dict]] = None
     if companion_mode == "narrator-only":
         instructions = _companion_narrator_prompt(request.language or "de")
+        instructions += _detail_level_addendum(detail_level)
         companion_tools_override = []  # zero-tools hardening
         logger.info(
             f"Realtime: companion_mode=narrator-only "
+            f"detail_level={detail_level} "
             f"({len(instructions)} chars, 0 tools)"
         )
     elif companion_mode == "talkback-enabled":
         instructions = _companion_talkback_prompt(request.language or "de")
+        instructions += _detail_level_addendum(detail_level)
         companion_tools_override = _companion_talkback_tools()
         logger.info(
             f"Realtime: companion_mode=talkback-enabled "
+            f"detail_level={detail_level} "
             f"({len(instructions)} chars, "
             f"{len(companion_tools_override)} tools)"
         )
@@ -1084,6 +1152,8 @@ async def mint_realtime_token(
         "voice": voice,
         "tools": [t["name"] for t in tools],
         "session_id": request.session_id,
+        "companion_mode": companion_mode,
+        "detail_level": detail_level if companion_mode else None,
         "raw": body,
     }
 
