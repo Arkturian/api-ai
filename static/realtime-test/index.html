@@ -206,7 +206,9 @@ async function mintToken() {
     body: JSON.stringify(body),
   });
   if (!r.ok) {
-    const err = await r.json().catch(() => ({ raw: await r.text() }));
+    let err;
+    try { err = await r.json(); }
+    catch { err = { raw: await r.text() }; }
     throw new Error('token mint ' + r.status + ': ' + JSON.stringify(err));
   }
   return r.json();
