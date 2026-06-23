@@ -240,6 +240,10 @@ class OpenAIRealtimeCostTracker:
         # Idempotency check — only applies when both ids are present.
         if voice_session_id and usage_event_id:
             dedup_key = f"{voice_session_id}::{usage_event_id}"
+            # Reload from disk first so sibling-worker dedup state is
+            # visible — critical for the multi-worker uvicorn setup
+            # where successive retries can land on different workers.
+            self._maybe_reload_from_file()
             with self._data_lock:
                 seen = set(self._usage_data.get("seen_event_ids", []))
                 if dedup_key in seen:
@@ -249,9 +253,13 @@ class OpenAIRealtimeCostTracker:
                     )
                     return {"deduped": True, "accepted": False}
                 # Mark seen BEFORE the actual track so concurrent retries
-                # in two workers race on the lock + only one wins.
+                # in two workers race on the lock + only one wins. Save
+                # immediately so a sibling worker sees the mark even on
+                # the master-forwarding path (where _track_local that
+                # would normally save is skipped).
                 seen.add(dedup_key)
                 self._usage_data["seen_event_ids"] = list(seen)[-5000:]
+                self._save_data()
                 # Keep the dedup-set bounded — 5000 keys is roughly
                 # 20-30 sessions of turn-records, plenty for a month.
         else:
