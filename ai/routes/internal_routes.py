@@ -193,7 +193,12 @@ class _OpenAISharedTrackPayload(BaseModel):
 class _OpenAIRealtimeSharedTrackPayload(BaseModel):
     """Payload posted by a sibling host to log an OpenAI Realtime session's
     token usage into the shared monthly counter. Distinct audio + text
-    input/output counts so the per-modality billing model is preserved."""
+    input/output counts so the per-modality billing model is preserved.
+
+    Idempotency keys (Content-Post #1215 Codex contract): the originating
+    api-ai host forwards ``(voice_session_id, usage_event_id)`` along so
+    the master dedupes there too. Without dedup at the master, retries
+    from the client host could still double-count federation-wide."""
 
     model: str
     audio_input_tokens: int = 0
@@ -202,6 +207,8 @@ class _OpenAIRealtimeSharedTrackPayload(BaseModel):
     text_output_tokens: int = 0
     duration_sec: float = 0.0
     source_host: Optional[str] = None
+    voice_session_id: Optional[str] = None
+    usage_event_id: Optional[str] = None
 
 
 class _MinimaxSharedTrackPayload(BaseModel):
@@ -447,19 +454,37 @@ async def openai_realtime_cost_shared_state_track(
     payload: _OpenAIRealtimeSharedTrackPayload,
     x_internal_auth: Optional[str] = Header(default=None, alias="X-Internal-Auth"),
 ):
-    """Master-side increment for the OpenAI Realtime shared counter."""
+    """Master-side increment for the OpenAI Realtime shared counter.
+
+    Dedup on ``(voice_session_id, usage_event_id)`` (Post #1215 Codex
+    contract). The master uses ``track_session`` (not ``_track_local``)
+    so the dedup path runs at the master too — without it, retries from
+    a sibling host would still double-count federation-wide.
+    """
     _verify_shared_counter_auth(x_internal_auth)
     from ..services.openai_realtime_cost_tracker import openai_realtime_cost_tracker
-    openai_realtime_cost_tracker._track_local(
-        model=payload.model,
-        audio_input_tokens=payload.audio_input_tokens,
-        audio_output_tokens=payload.audio_output_tokens,
-        text_input_tokens=payload.text_input_tokens,
-        text_output_tokens=payload.text_output_tokens,
-        duration_sec=payload.duration_sec,
-    )
+    # Avoid recursion: temporarily clear master_url so this call writes
+    # locally (we ARE the master). _track_local doesn't carry the dedup
+    # key, so we go through the dedup-aware ``track_session`` path with
+    # master_url stubbed out for the duration of this call.
+    saved = openai_realtime_cost_tracker.master_url
+    openai_realtime_cost_tracker.master_url = ""
+    try:
+        result = openai_realtime_cost_tracker.track_session(
+            model=payload.model,
+            audio_input_tokens=payload.audio_input_tokens,
+            audio_output_tokens=payload.audio_output_tokens,
+            text_input_tokens=payload.text_input_tokens,
+            text_output_tokens=payload.text_output_tokens,
+            duration_sec=payload.duration_sec,
+            voice_session_id=payload.voice_session_id,
+            usage_event_id=payload.usage_event_id,
+        )
+    finally:
+        openai_realtime_cost_tracker.master_url = saved
     status = openai_realtime_cost_tracker.get_status()
     status["would_block"] = openai_realtime_cost_tracker.should_block_request()
+    status["deduped"] = bool(result and result.get("deduped"))
     return status
 
 

@@ -175,9 +175,16 @@ class RealtimeTokenRequest(BaseModel):
 
 
 class RealtimeUsageReport(BaseModel):
-    """Body for ``POST /ai/realtime/usage`` — the browser reports the
-    final usage block it received from OpenAI's ``response.done`` events
-    so the cost-tracker sees real numbers."""
+    """Body for ``POST /ai/realtime/usage`` — the browser posts the
+    per-turn usage delta it pulled from each OpenAI ``response.done``
+    event. Server tracks idempotently per ``(voice_session_id,
+    usage_event_id)`` so a retry / pending-queue flush / final
+    sendBeacon doesn't double-count.
+
+    Per Codex contract in Content-Post #1215: ``usage_event_id`` SHOULD
+    be the OpenAI ``response.id`` (stable per turn). Older callers
+    without those two fields still work but lose dedup protection —
+    they get a warning header. New callers MUST set both."""
 
     model: str
     session_id: Optional[str] = None
@@ -186,6 +193,26 @@ class RealtimeUsageReport(BaseModel):
     text_input_tokens: int = 0
     text_output_tokens: int = 0
     duration_sec: float = 0.0
+    # Idempotency keys (Codex IACP, Post #1215). Pre-existing callers
+    # may not set these; we'll log a non-idempotent warning. New
+    # CloudV2 Voice-Companion sessions MUST pass both.
+    voice_session_id: Optional[str] = Field(
+        default=None,
+        description=(
+            "Stable id for the entire WebRTC voice session — typically "
+            "the ``session_id`` echoed back from /ai/realtime/token. "
+            "Part of the dedup key."
+        ),
+    )
+    usage_event_id: Optional[str] = Field(
+        default=None,
+        description=(
+            "Stable id for this specific turn's usage delta — use the "
+            "OpenAI ``response.id`` from the response.done event. The "
+            "server dedupes on (voice_session_id, usage_event_id), so "
+            "retries + final flushes never double-count."
+        ),
+    )
 
 
 class RealtimeToolCall(BaseModel):
@@ -1118,22 +1145,38 @@ async def realtime_usage_report(report: RealtimeUsageReport):
 
     OpenAI Realtime emits ``response.done`` events with a usage block:
     ``input_tokens.audio_tokens``, ``output_tokens.audio_tokens``, plus
-    the text-token mirror. The browser sums these across the session
-    and POSTs the totals here at session-end.
+    the text-token mirror. The browser SHOULD post one record per
+    ``response.done`` (not aggregate at session-end) so a tab-crash
+    only loses one turn, not the whole session — see Content-Post
+    #1215 reconciliation thread.
+
+    Idempotency (Codex contract, #1215): pass ``voice_session_id`` AND
+    ``usage_event_id`` (= OpenAI ``response.id``). The server dedupes
+    on that pair so retries / final-flushes / sendBeacon-on-pagehide
+    never double-count. Records without those keys still get accepted
+    but log a non-idempotent warning.
+
+    Response carries ``deduped: bool`` so the client can mark the
+    record acked in its pending queue.
 
     No auth gate — the cost tracker is the source of truth, and
     over-reporting only hurts the caller's own cap.
     """
     from ..services.openai_realtime_cost_tracker import openai_realtime_cost_tracker
-    openai_realtime_cost_tracker.track_session(
+    result = openai_realtime_cost_tracker.track_session(
         model=report.model,
         audio_input_tokens=report.audio_input_tokens,
         audio_output_tokens=report.audio_output_tokens,
         text_input_tokens=report.text_input_tokens,
         text_output_tokens=report.text_output_tokens,
         duration_sec=report.duration_sec,
+        voice_session_id=report.voice_session_id or report.session_id,
+        usage_event_id=report.usage_event_id,
     )
-    return openai_realtime_cost_tracker.get_status()
+    status = openai_realtime_cost_tracker.get_status()
+    status["deduped"] = bool(result and result.get("deduped"))
+    status["accepted"] = bool(result and result.get("accepted"))
+    return status
 
 
 # ── Tool-routing proxy ────────────────────────────────────────────────
