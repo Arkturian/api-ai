@@ -151,6 +151,19 @@ class RealtimeTokenRequest(BaseModel):
             "(same scheme as /ai/{claude,chatgpt,gemini}). Optional."
         ),
     )
+    companion_mode: Optional[str] = Field(
+        default=None,
+        description=(
+            "CloudV2 Voice-Companion preset (Content-Post #1215). "
+            "'narrator-only' = read-only narrator over the focused agent "
+            "stream, NO tools (the model literally cannot send anything "
+            "to the agent — architecture-level hardening). "
+            "'talkback-enabled' = narrator + propose_to_agent tool with "
+            "safety-by-confirm (browser must POST the proposal to Cloud's "
+            "/api/voice/realtime/proposals gate). "
+            "Null = legacy / generic realtime token (e.g. Wanderlaut-Guide)."
+        ),
+    )
     agent_id: Optional[str] = Field(
         default=None,
         description=(
@@ -388,6 +401,152 @@ def _display_hint_tool_defs() -> List[dict]:
 
 def _all_tool_defs() -> List[dict]:
     return _read_tool_defs() + _persist_tool_defs() + _display_hint_tool_defs()
+
+
+SUPPORTED_COMPANION_MODES = {"narrator-only", "talkback-enabled"}
+
+
+def _companion_narrator_prompt(language: str = "de") -> str:
+    """Read-only narrator over a focused tmux-agent stream.
+
+    No tools — the model literally cannot send back. This is the
+    architecture-level hardening that Codex called out in Post #1215
+    State-Machine v1 (step 1 of build order: read-only narrator E2E,
+    proves audio + session + delta-feed + cost before any relay).
+    """
+    lang_name = {
+        "de": "German", "sl": "Slovenian",
+        "it": "Italian", "en": "English",
+    }.get(language, "German")
+    return (
+        "Du bist eine ambiente Voice-Companion für einen Operator, der einen "
+        "KI-Agenten beobachtet. Du bekommst LIVE den Output-Stream des "
+        "fokussierten Agenten als laufenden Context.\n\n"
+        f"Sprache: {lang_name} (Default). Mirror die Sprache des Operators "
+        "wenn er sich auf eine andere wechselt. Bei technischem Englisch "
+        "vom Agenten: übersetze sinngemäß, paraphrasiere nicht 1:1.\n\n"
+        "AUFGABEN:\n"
+        "  1. ERZÄHLEN: Fasse zusammen was der Agent gerade tut. "
+        "Kurz, konversationell, ein Satz alle 5-15 Sekunden — NICHT jeder "
+        "Token, nicht jedes Tool-Result. Weniger ist mehr.\n"
+        "  2. MELDEN: Aktive Status-Hinweise bei wichtigen Wendungen — "
+        "Agent fertig, Fehler, wartet auf Input.\n"
+        "  3. ANTWORTEN: Wenn der Operator dich direkt etwas fragt "
+        "('Was macht er gerade?', 'Erklär mir das'), antworte direkt.\n\n"
+        "WICHTIG — DU BIST READ-ONLY:\n"
+        "Du hast KEINE Möglichkeit, irgendetwas an den Agenten zurückzusenden. "
+        "Wenn der Operator dir einen Befehl an den Agenten gibt, sag: 'Den "
+        "Befehl kann ich aktuell nicht weiterleiten — schreib ihn bitte "
+        "direkt in den Text-Chat.' Erfinde keine Tool-Calls.\n\n"
+        "Stimme: ruhig, konzentriert, etwas freundlich. Nie dramatisch."
+    )
+
+
+def _companion_talkback_prompt(language: str = "de") -> str:
+    """Narrator + propose_to_agent tool with safety-by-confirm.
+
+    Adds the talk-back path on top of the narrator role. The model
+    NEVER sends directly — it only proposes via propose_to_agent.
+    The browser's confirm-chip + Cloud's policy gate
+    (POST /api/voice/realtime/proposals) decide whether to send.
+    """
+    base = _companion_narrator_prompt(language)
+    # Strip the "you are read-only" paragraph from the narrator base
+    # (talkback mode CAN propose) — we replace it with the talkback rules.
+    base = base.replace(
+        "WICHTIG — DU BIST READ-ONLY:\n"
+        "Du hast KEINE Möglichkeit, irgendetwas an den Agenten zurückzusenden. "
+        "Wenn der Operator dir einen Befehl an den Agenten gibt, sag: 'Den "
+        "Befehl kann ich aktuell nicht weiterleiten — schreib ihn bitte "
+        "direkt in den Text-Chat.' Erfinde keine Tool-Calls.\n\n",
+        "",
+    )
+    return base + (
+        "\n\nTALK-BACK (BEFEHLE AN DEN AGENTEN):\n"
+        "Wenn der Operator dir einen Befehl an den Agenten gibt:\n"
+        "  1. Rufe propose_to_agent(text, session_id, rationale, danger_class).\n"
+        "  2. Warte auf das function_call_output — die UI zeigt deinen "
+        "Vorschlag als Confirm-Chip und gibt dir die Operator-Entscheidung "
+        "zurück: {confirmed: bool, edited_text?: string}.\n"
+        "  3. Wenn confirmed=true: bestätige verbal kurz ('ok, gesendet'). "
+        "Wenn confirmed=false: 'ok, lassen wir' und mach mit normaler "
+        "Narration weiter. Nie heimlich retry.\n\n"
+        "Du sendest NIEMALS direkt. Immer über propose_to_agent.\n"
+        "Setze danger_class korrekt: 'none' für harmlose Befehle, "
+        "'data-loss' für rm/delete/drop, 'irreversible-git' für "
+        "force-push/reset --hard, 'process-kill' für kill/systemctl stop, "
+        "'permission-grant' für chmod/chown/sudo. Bei Unsicherheit: 'other'."
+    )
+
+
+def _companion_talkback_tools() -> List[dict]:
+    """Single propose_to_agent tool with safety-by-confirm.
+
+    Per Codex consolidation in #1215: never two tools, never a direct
+    relay path. The model only proposes; the FE confirm-chip plus
+    Cloud's /api/voice/realtime/proposals policy gate are the safety
+    boundaries.
+    """
+    return [
+        {
+            "type": "function",
+            "name": "propose_to_agent",
+            "description": (
+                "Propose to send the operator's spoken intent to the "
+                "focused agent. NEVER assume auto-send — the operator's UI "
+                "shows a confirm chip and waits for explicit yes/no "
+                "(verbal or tap). Cloud's server-side policy gate "
+                "/api/voice/realtime/proposals re-validates focus_epoch + "
+                "re-classifies danger_class before any actual relay. "
+                "Returns {confirmed: bool, edited_text?: str}. If "
+                "confirmed=false drop the proposal and continue narrating; "
+                "do not retry."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "text": {
+                        "type": "string",
+                        "description": (
+                            "The command, paraphrased clearly in the "
+                            "language the agent expects (typically English "
+                            "for tmux-claude operator commands)."
+                        ),
+                    },
+                    "session_id": {
+                        "type": "string",
+                        "description": (
+                            "The focused agent's session id "
+                            "(provided to you in session context at start)."
+                        ),
+                    },
+                    "rationale": {
+                        "type": "string",
+                        "description": (
+                            "One sentence — why this is what the operator "
+                            "asked for. Used in the confirm chip so the "
+                            "operator can verify intent before sending."
+                        ),
+                    },
+                    "danger_class": {
+                        "type": "string",
+                        "enum": [
+                            "none", "data-loss", "irreversible-git",
+                            "process-kill", "permission-grant", "other",
+                        ],
+                        "description": (
+                            "Flag the proposal's destructive potential. "
+                            "Browser uses this to vary the confirm UI; "
+                            "Cloud's policy gate may overrule + deny."
+                        ),
+                    },
+                },
+                "required": [
+                    "text", "session_id", "rationale", "danger_class",
+                ],
+            },
+        }
+    ]
 
 
 def _default_instructions(language: str = "de", track_id: Optional[int] = None) -> str:
@@ -733,10 +892,41 @@ async def mint_realtime_token(
             },
         )
 
-    instructions = request.instructions or _default_instructions(
-        language=request.language or "de",
-        track_id=request.track_id,
-    )
+    # Companion-mode preset (Content-Post #1215). When set, picks the
+    # right narrator system-prompt + restricts the tool set accordingly.
+    # Always wins over both ``instructions`` and the default Wanderlaut
+    # tool set — the caller asked specifically for the CloudV2 preset.
+    companion_mode = request.companion_mode
+    if companion_mode and companion_mode not in SUPPORTED_COMPANION_MODES:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "unsupported_companion_mode",
+                "companion_mode": companion_mode,
+                "supported": sorted(SUPPORTED_COMPANION_MODES),
+            },
+        )
+    companion_tools_override: Optional[List[dict]] = None
+    if companion_mode == "narrator-only":
+        instructions = _companion_narrator_prompt(request.language or "de")
+        companion_tools_override = []  # zero-tools hardening
+        logger.info(
+            f"Realtime: companion_mode=narrator-only "
+            f"({len(instructions)} chars, 0 tools)"
+        )
+    elif companion_mode == "talkback-enabled":
+        instructions = _companion_talkback_prompt(request.language or "de")
+        companion_tools_override = _companion_talkback_tools()
+        logger.info(
+            f"Realtime: companion_mode=talkback-enabled "
+            f"({len(instructions)} chars, "
+            f"{len(companion_tools_override)} tools)"
+        )
+    else:
+        instructions = request.instructions or _default_instructions(
+            language=request.language or "de",
+            track_id=request.track_id,
+        )
 
     # Federation persona — optional. Uses the same get_persona_bundle
     # helper as the text routes so the same virtual-bots that work
@@ -767,7 +957,7 @@ async def mint_realtime_token(
             },
         )
 
-    tools = _all_tool_defs()
+    tools = _all_tool_defs() if companion_tools_override is None else companion_tools_override
     # OpenAI's GA Realtime session shape (2025-Q4+) nests audio knobs
     # under ``audio.input`` / ``audio.output`` instead of the legacy
     # flat ``voice`` / ``input_audio_format`` fields. The mint endpoint
