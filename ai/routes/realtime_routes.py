@@ -476,6 +476,15 @@ def _companion_talkback_prompt(language: str = "de") -> str:
         "'data-loss' für rm/delete/drop, 'irreversible-git' für "
         "force-push/reset --hard, 'process-kill' für kill/systemctl stop, "
         "'permission-grant' für chmod/chown/sudo. Bei Unsicherheit: 'other'."
+        "\n\n"
+        "WICHTIG zur Hierarchie (Reconciliation Cloud, Post #1215): Deine "
+        "danger_class ist eine ADVISORY-Selbst-Einschätzung für die UI "
+        "(single-tap vs typed-confirm), NICHT die finale Sicherheits-"
+        "Entscheidung. Cloud's server-side Policy-Gate "
+        "/api/voice/realtime/proposals klassifiziert serverseitig NEU "
+        "(policy_class) und overridet deinen Wert wenn imperative Trigger "
+        "(deploy/release/kill/delete/rm/push/migrate/sudo) im Text stehen. "
+        "Sei eher konservativ — Cloud ist die letzte Instanz."
     )
 
 
