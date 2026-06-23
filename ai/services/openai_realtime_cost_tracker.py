@@ -207,14 +207,27 @@ class OpenAIRealtimeCostTracker:
         text_input_tokens: int = 0,
         text_output_tokens: int = 0,
         duration_sec: float = 0.0,
-    ) -> None:
-        """Track a Realtime session's token usage.
+        voice_session_id: Optional[str] = None,
+        usage_event_id: Optional[str] = None,
+    ) -> dict:
+        """Track a Realtime session's per-turn usage delta.
 
         OpenAI Realtime emits ``response.done`` events with a ``usage``
         block carrying ``input_tokens``, ``output_tokens`` and a
         ``details.audio_tokens`` / ``details.text_tokens`` split. The
         caller is expected to extract these and call us with all four
         numbers; we attribute to the bill correctly.
+
+        Idempotency (Codex IACP, Content-Post #1215): when both
+        ``voice_session_id`` and ``usage_event_id`` are passed, we dedup
+        on that key before adding. Retries / sendBeacon flushes / final
+        usage-pumps cannot double-count.
+
+        Returns ``{deduped: bool, accepted: bool}``. ``deduped=true``
+        means the (voice_session_id, usage_event_id) pair was already
+        accounted for and no further work happened. ``accepted=true``
+        means it was tracked (either locally or forwarded to the
+        federation master).
         """
         if (
             audio_input_tokens <= 0
@@ -222,7 +235,32 @@ class OpenAIRealtimeCostTracker:
             and text_input_tokens <= 0
             and text_output_tokens <= 0
         ):
-            return
+            return {"deduped": False, "accepted": False}
+
+        # Idempotency check — only applies when both ids are present.
+        if voice_session_id and usage_event_id:
+            dedup_key = f"{voice_session_id}::{usage_event_id}"
+            with self._data_lock:
+                seen = set(self._usage_data.get("seen_event_ids", []))
+                if dedup_key in seen:
+                    logger.info(
+                        f"openai_realtime_cost_tracker: dedup hit for "
+                        f"{dedup_key[:80]} — skipping double-count"
+                    )
+                    return {"deduped": True, "accepted": False}
+                # Mark seen BEFORE the actual track so concurrent retries
+                # in two workers race on the lock + only one wins.
+                seen.add(dedup_key)
+                self._usage_data["seen_event_ids"] = list(seen)[-5000:]
+                # Keep the dedup-set bounded — 5000 keys is roughly
+                # 20-30 sessions of turn-records, plenty for a month.
+        else:
+            logger.warning(
+                "openai_realtime_cost_tracker: track_session called "
+                "without (voice_session_id, usage_event_id) — non-idempotent "
+                "path, retries may double-count (legacy caller?)"
+            )
+
         if self.master_url and self.shared_secret:
             try:
                 self._post_to_master(
@@ -232,8 +270,10 @@ class OpenAIRealtimeCostTracker:
                     text_input_tokens=text_input_tokens,
                     text_output_tokens=text_output_tokens,
                     duration_sec=duration_sec,
+                    voice_session_id=voice_session_id,
+                    usage_event_id=usage_event_id,
                 )
-                return
+                return {"deduped": False, "accepted": True}
             except Exception as e:
                 logger.error(
                     f"openai_realtime_cost_tracker: master post failed "
@@ -247,6 +287,7 @@ class OpenAIRealtimeCostTracker:
             text_output_tokens,
             duration_sec,
         )
+        return {"deduped": False, "accepted": True}
 
     def _track_local(
         self,
@@ -458,6 +499,8 @@ class OpenAIRealtimeCostTracker:
         text_input_tokens: int,
         text_output_tokens: int,
         duration_sec: float,
+        voice_session_id: Optional[str] = None,
+        usage_event_id: Optional[str] = None,
     ) -> None:
         url = f"{self.master_url}/internal/openai-realtime-cost-shared-state"
         with httpx.Client(timeout=5.0) as client:
@@ -470,6 +513,8 @@ class OpenAIRealtimeCostTracker:
                     "text_input_tokens": text_input_tokens,
                     "text_output_tokens": text_output_tokens,
                     "duration_sec": duration_sec,
+                    "voice_session_id": voice_session_id,
+                    "usage_event_id": usage_event_id,
                     "source_host": os.environ.get("API_AI_HOST_KEY")
                     or os.uname().nodename.split(".")[0],
                 },
