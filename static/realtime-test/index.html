@@ -110,7 +110,7 @@
       <button id="start">Start</button>
       <button id="stop" class="danger" disabled>Stop</button>
     </div>
-    <audio id="remoteAudio" autoplay playsinline></audio>
+    <audio id="remoteAudio" autoplay playsinline controls></audio>
   </div>
 
   <div class="panel">
@@ -230,8 +230,16 @@ async function startOpenAI() {
   pc.onconnectionstatechange = () => log('pc.state=' + pc.connectionState, 'info');
   pc.oniceconnectionstatechange = () => log('ice.state=' + pc.iceConnectionState, 'info');
   pc.ontrack = (e) => {
-    log('remote track: ' + e.track.kind, 'ok');
+    log('remote track: ' + e.track.kind + ' (state=' + e.track.readyState + ', muted=' + e.track.muted + ')', 'ok');
     els.remoteAudio.srcObject = e.streams[0];
+    els.remoteAudio.volume = 1.0;
+    els.remoteAudio.muted = false;
+    // Explicit play() after user-gesture (Start click) — autoplay alone
+    // is sometimes blocked by Safari/Chromium even with the attribute.
+    els.remoteAudio.play().then(
+      () => log('remoteAudio.play() ok', 'ok'),
+      (err) => log('remoteAudio.play() blocked: ' + err.message + ' — click the audio player to start sound', 'warn')
+    );
   };
   micStream.getTracks().forEach((t) => pc.addTrack(t, micStream));
 
