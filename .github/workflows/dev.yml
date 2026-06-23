@@ -26,10 +26,13 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Check Python syntax
+      - name: Check Python syntax (recursive, fail on error)
         run: |
-          python -m py_compile main.py
-          python -m py_compile ai/**/*.py || echo "Some files may have syntax issues"
+          # compileall walks the tree and fails the job on the first
+          # SyntaxError. Quiet flag suppresses per-file success lines.
+          # `-q -q` = only errors. No `|| echo` fallback — a syntax
+          # error here MUST fail the job and block the PR.
+          python -m compileall -q -q .
 
       - name: Run basic tests
         run: |

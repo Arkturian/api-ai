@@ -17,10 +17,27 @@ on:
 
 jobs:
   # ============================================================================
+  # Syntax gate — runs before everything. compileall on every .py file;
+  # SyntaxError here MUST block the build/deploy chain. PR #56 (U+201E
+  # quotes) slipped past CI because the old check used `|| echo`.
+  # ============================================================================
+  validate-syntax:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+      - name: Recursive compileall (fail on SyntaxError)
+        run: python -m compileall -q -q .
+
+  # ============================================================================
   # Build archive (shared by all deployments)
   # ============================================================================
   build-archive:
     runs-on: ubuntu-latest
+    needs: validate-syntax
     outputs:
       artifact-name: deploy-archive
     steps:
@@ -112,6 +129,20 @@ jobs:
             # Extract archive directly to deploy path
             tar -xzf /tmp/deploy.tar.gz -C "$DEPLOY_PATH"
             rm -f /tmp/deploy.tar.gz
+
+            echo "🔬 Pre-restart syntax check (post-extract guard)..."
+            # Defense-in-depth: even if CI compileall was bypassed, never
+            # restart the service on a syntax-broken extracted tree.
+            # On fail, restore backup before exiting.
+            if ! python3 -m compileall -q -q "$DEPLOY_PATH"; then
+              echo "❌ compileall failed on extracted archive — rolling back"
+              if [ -n "${BACKUP_PATH:-}" ] && [ -d "$BACKUP_PATH" ]; then
+                rm -rf "$DEPLOY_PATH"
+                cp -r "$BACKUP_PATH" "$DEPLOY_PATH"
+                echo "✅ Rolled back from $BACKUP_PATH"
+              fi
+              exit 1
+            fi
 
             echo "📦 Installing Python dependencies..."
             cd "$DEPLOY_PATH"
