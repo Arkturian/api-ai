@@ -128,10 +128,21 @@ async def generate_music_endpoint(
     # bytes (same shape as the TTS endpoint). No task_id, no polling.
     # Verified empirically 2026-06-11 via direct curl probe.
     #
-    # The endpoint takes ~60-90s to respond, so we must allow a generous
-    # client-side timeout (180s) — otherwise the connection drops while
-    # the model is still synthesising and we get a transport_error="".
-    sync_body = await post_json("music_generation", submit_payload, timeout=180.0)
+    # MusicGenie IACP ad948e77 (2026-06-23) reported 60s/90s tracks
+    # reproducibly 502'ing at the old 180s timeout. Generation time
+    # scales roughly with output duration — empirically:
+    #
+    #   30-45s output → ~60-90s upstream
+    #   60s output    → ~150-250s upstream
+    #   90-120s output→ ~250-400s upstream
+    #   180s output   → can hit 500s+
+    #
+    # We push the timeout proportional to the requested duration with a
+    # generous safety factor (~6x), capped at 600s. 600s is the longest
+    # the FastAPI worker should hold a single connection — beyond that
+    # the load balancer / nginx will start tearing it down anyway.
+    music_timeout = min(600.0, max(180.0, request.duration * 6.0))
+    sync_body = await post_json("music_generation", submit_payload, timeout=music_timeout)
     err = base_resp_failed(sync_body)
     if err:
         raise HTTPException(

@@ -79,13 +79,31 @@ async def post_json(
         try:
             r = await client.post(url, json=payload, headers=headers)
         except httpx.HTTPError as e:
-            logger.error(f"MiniMax POST {path} network error: {e}")
+            # httpx.ReadTimeout / ConnectTimeout / PoolTimeout all carry
+            # an empty str(e) by default — surfacing only an empty
+            # transport_error has burned callers (MusicGenie IACP
+            # ad948e77). Always include the exception class name + the
+            # configured timeout in the detail so the consumer can
+            # distinguish a timeout from a real connection failure.
+            error_class = type(e).__name__
+            logger.error(
+                f"MiniMax POST {path} {error_class} after {timeout}s "
+                f"timeout: {str(e) or '(empty)'}"
+            )
+            is_timeout = isinstance(e, (httpx.ReadTimeout, httpx.ConnectTimeout, httpx.PoolTimeout, httpx.WriteTimeout))
             raise HTTPException(
-                status_code=502,
+                status_code=504 if is_timeout else 502,
                 detail={
-                    "error": "minimax_upstream_unreachable",
+                    "error": "minimax_upstream_timeout" if is_timeout else "minimax_upstream_unreachable",
                     "path": path,
-                    "transport_error": str(e)[:200],
+                    "transport_error": str(e) or "(no message)",
+                    "exception_class": error_class,
+                    "timeout_sec": timeout,
+                    "hint": (
+                        "MiniMax took longer than the configured timeout. "
+                        "For music_generation the empirical floor is ~300s "
+                        "for 60-90s tracks; raise the caller-side timeout."
+                    ) if is_timeout else None,
                 },
             )
     if r.status_code >= 400:
@@ -124,12 +142,16 @@ async def get_json(path: str, params: Optional[dict] = None, timeout: float = 30
         try:
             r = await client.get(url, headers=headers, params=params or {})
         except httpx.HTTPError as e:
+            error_class = type(e).__name__
+            is_timeout = isinstance(e, (httpx.ReadTimeout, httpx.ConnectTimeout, httpx.PoolTimeout, httpx.WriteTimeout))
             raise HTTPException(
-                status_code=502,
+                status_code=504 if is_timeout else 502,
                 detail={
-                    "error": "minimax_upstream_unreachable",
+                    "error": "minimax_upstream_timeout" if is_timeout else "minimax_upstream_unreachable",
                     "path": path,
-                    "transport_error": str(e)[:200],
+                    "transport_error": str(e) or "(no message)",
+                    "exception_class": error_class,
+                    "timeout_sec": timeout,
                 },
             )
     if r.status_code >= 400:
@@ -165,12 +187,16 @@ async def post_multipart(
         try:
             r = await client.post(url, data=fields, files=files, headers=headers)
         except httpx.HTTPError as e:
+            error_class = type(e).__name__
+            is_timeout = isinstance(e, (httpx.ReadTimeout, httpx.ConnectTimeout, httpx.PoolTimeout, httpx.WriteTimeout))
             raise HTTPException(
-                status_code=502,
+                status_code=504 if is_timeout else 502,
                 detail={
-                    "error": "minimax_upstream_unreachable",
+                    "error": "minimax_upstream_timeout" if is_timeout else "minimax_upstream_unreachable",
                     "path": path,
-                    "transport_error": str(e)[:200],
+                    "transport_error": str(e) or "(no message)",
+                    "exception_class": error_class,
+                    "timeout_sec": timeout,
                 },
             )
     if r.status_code >= 400:
