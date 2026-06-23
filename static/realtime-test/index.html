@@ -1,0 +1,424 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AiApi — Realtime Test</title>
+<style>
+  :root {
+    --bg: #0e0f12; --fg: #e7e7ea; --muted: #8a8a93; --accent: #6ee7b7;
+    --warn: #fbbf24; --err: #f87171; --ok: #34d399; --panel: #16181d;
+    --border: #2a2d36;
+  }
+  * { box-sizing: border-box; }
+  body { background: var(--bg); color: var(--fg); font: 14px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif; margin: 0; padding: 24px; }
+  h1 { margin: 0 0 4px; font-weight: 600; font-size: 22px; }
+  .sub { color: var(--muted); font-size: 13px; margin-bottom: 24px; }
+  .grid { display: grid; grid-template-columns: 380px 1fr; gap: 24px; }
+  @media (max-width: 880px) { .grid { grid-template-columns: 1fr; } }
+  .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 18px; }
+  .row { margin-bottom: 14px; }
+  label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 4px; text-transform: uppercase; letter-spacing: 0.04em; }
+  input[type=text], select, textarea {
+    width: 100%; padding: 9px 11px; background: #0a0b0e; color: var(--fg);
+    border: 1px solid var(--border); border-radius: 6px; font: inherit;
+  }
+  textarea { resize: vertical; min-height: 90px; font-family: ui-monospace,SFMono-Regular,Consolas,monospace; font-size: 12.5px; }
+  button {
+    padding: 10px 18px; background: var(--accent); color: #0a0b0e; border: 0;
+    border-radius: 6px; font-weight: 600; cursor: pointer; font-size: 14px;
+  }
+  button.secondary { background: transparent; color: var(--fg); border: 1px solid var(--border); }
+  button.danger { background: var(--err); color: #0a0b0e; }
+  button:disabled { opacity: 0.4; cursor: not-allowed; }
+  .controls { display: flex; gap: 8px; flex-wrap: wrap; }
+  .status { display: inline-block; padding: 3px 9px; border-radius: 999px; font-size: 11px; font-weight: 600; text-transform: uppercase; }
+  .status.idle { background: #2a2d36; color: var(--muted); }
+  .status.connecting { background: var(--warn); color: #0a0b0e; }
+  .status.live { background: var(--ok); color: #0a0b0e; }
+  .status.error { background: var(--err); color: #0a0b0e; }
+  .log {
+    background: #0a0b0e; border: 1px solid var(--border); border-radius: 6px;
+    padding: 12px; height: 360px; overflow-y: auto; font-family: ui-monospace,SFMono-Regular,Consolas,monospace;
+    font-size: 12px; line-height: 1.4; white-space: pre-wrap;
+  }
+  .log .l { color: var(--muted); }
+  .log .l.info { color: #93c5fd; }
+  .log .l.ok { color: var(--ok); }
+  .log .l.warn { color: var(--warn); }
+  .log .l.err { color: var(--err); }
+  .log .l.tool { color: var(--accent); }
+  .log .l.user { color: #f0abfc; }
+  .log .l.assistant { color: var(--fg); }
+  .transcript { background: #0a0b0e; border: 1px solid var(--border); border-radius: 6px; padding: 12px; height: 240px; overflow-y: auto; }
+  .transcript .turn { margin-bottom: 8px; }
+  .transcript .role { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 2px; }
+  .transcript .role.user { color: #f0abfc; }
+  .transcript .role.assistant { color: var(--accent); }
+  .small { font-size: 12px; color: var(--muted); }
+  .badge { display: inline-block; padding: 2px 7px; border-radius: 4px; background: #2a2d36; color: var(--muted); font-size: 11px; }
+  hr { border: 0; border-top: 1px solid var(--border); margin: 16px 0; }
+  audio { width: 100%; margin-top: 10px; }
+</style>
+</head>
+<body>
+
+<h1>AiApi Realtime Test <span id="cap" class="badge">cap loading…</span></h1>
+<div class="sub">Sprich live mit einem Modell — OpenAI gpt-realtime via WebRTC oder ElevenLabs Conversational AI via WebSocket. Mic-Zustimmung nötig.</div>
+
+<div class="grid">
+
+  <div class="panel">
+    <div class="row">
+      <label for="provider">Provider</label>
+      <select id="provider">
+        <option value="openai" selected>OpenAI · gpt-realtime (WebRTC)</option>
+        <option value="elevenlabs">ElevenLabs · Conversational AI (WebSocket)</option>
+      </select>
+    </div>
+
+    <div class="row" id="openai-opts">
+      <label for="voice">Voice (OpenAI)</label>
+      <select id="voice">
+        <option>marin</option><option>alloy</option><option>ash</option>
+        <option>ballad</option><option>coral</option><option>echo</option>
+        <option>sage</option><option>shimmer</option><option>verse</option>
+      </select>
+    </div>
+
+    <div class="row" id="lang-row">
+      <label for="lang">Sprache (Hint)</label>
+      <select id="lang">
+        <option value="de">Deutsch</option>
+        <option value="en">English</option>
+        <option value="sl">Slovenščina</option>
+        <option value="it">Italiano</option>
+      </select>
+    </div>
+
+    <div class="row">
+      <label for="instructions">System-Prompt Override (optional)</label>
+      <textarea id="instructions" placeholder="Leer lassen für Default — sonst hier deine eigene Persona-Beschreibung."></textarea>
+    </div>
+
+    <hr>
+
+    <div class="row">
+      <span>Status: <span id="status" class="status idle">idle</span></span>
+    </div>
+    <div class="row controls">
+      <button id="start">Start</button>
+      <button id="stop" class="danger" disabled>Stop</button>
+    </div>
+    <audio id="remoteAudio" autoplay playsinline></audio>
+  </div>
+
+  <div class="panel">
+    <div class="row">
+      <label>Transcript</label>
+      <div id="transcript" class="transcript"></div>
+    </div>
+    <div class="row">
+      <label>Event Log</label>
+      <div id="log" class="log"></div>
+    </div>
+  </div>
+
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const els = {
+  provider: $('provider'),
+  voice: $('voice'),
+  lang: $('lang'),
+  instructions: $('instructions'),
+  status: $('status'),
+  start: $('start'),
+  stop: $('stop'),
+  log: $('log'),
+  transcript: $('transcript'),
+  cap: $('cap'),
+  remoteAudio: $('remoteAudio'),
+  openaiOpts: $('openai-opts'),
+};
+
+let pc = null;
+let dc = null;
+let ws = null;
+let micStream = null;
+let session = null;
+
+function log(msg, cls = '') {
+  const div = document.createElement('div');
+  div.className = 'l ' + cls;
+  const t = new Date().toISOString().slice(11, 23);
+  div.textContent = '[' + t + '] ' + msg;
+  els.log.appendChild(div);
+  els.log.scrollTop = els.log.scrollHeight;
+}
+
+function setStatus(s, cls = 'idle') {
+  els.status.textContent = s;
+  els.status.className = 'status ' + cls;
+}
+
+function addTranscript(role, text) {
+  const div = document.createElement('div');
+  div.className = 'turn';
+  div.innerHTML = '<div class="role ' + role + '">' + role + '</div><div>' + text + '</div>';
+  els.transcript.appendChild(div);
+  els.transcript.scrollTop = els.transcript.scrollHeight;
+}
+
+async function loadCap() {
+  try {
+    const r = await fetch('/ai/realtime/cost-status');
+    const d = await r.json();
+    els.cap.textContent = 'cap ' + d.total_cost_eur.toFixed(2) + ' / ' + d.monthly_budget_eur.toFixed(0) + ' EUR';
+    if (d.requests_blocked) els.cap.style.background = 'var(--err)';
+  } catch (e) {
+    els.cap.textContent = 'cap ?';
+  }
+}
+loadCap();
+
+els.provider.addEventListener('change', () => {
+  const isOpenAI = els.provider.value === 'openai';
+  els.openaiOpts.style.display = isOpenAI ? '' : 'none';
+});
+
+async function mintToken() {
+  const body = {
+    provider: els.provider.value,
+    language: els.lang.value,
+    confirm_api_billing: true,
+    session_id: 'realtime-test-' + Math.random().toString(36).slice(2, 9),
+  };
+  if (els.provider.value === 'openai') {
+    body.voice = els.voice.value;
+    if (els.instructions.value.trim()) body.instructions = els.instructions.value.trim();
+  }
+  log('POST /ai/realtime/token  ' + JSON.stringify(body), 'info');
+  const r = await fetch('/ai/realtime/token', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!r.ok) {
+    const err = await r.json().catch(() => ({ raw: await r.text() }));
+    throw new Error('token mint ' + r.status + ': ' + JSON.stringify(err));
+  }
+  return r.json();
+}
+
+async function startOpenAI() {
+  setStatus('connecting', 'connecting');
+  session = await mintToken();
+  log('token ok — model=' + session.model + ', ek_…' + session.client_secret.slice(-12), 'ok');
+  log('tools: ' + (session.tools || []).join(', '), 'info');
+
+  log('getUserMedia({audio: { echoCancellation: true }}) …', 'info');
+  micStream = await navigator.mediaDevices.getUserMedia({
+    audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+  });
+  log('  ✓ mic stream acquired', 'ok');
+
+  pc = new RTCPeerConnection();
+  pc.onconnectionstatechange = () => log('pc.state=' + pc.connectionState, 'info');
+  pc.oniceconnectionstatechange = () => log('ice.state=' + pc.iceConnectionState, 'info');
+  pc.ontrack = (e) => {
+    log('remote track: ' + e.track.kind, 'ok');
+    els.remoteAudio.srcObject = e.streams[0];
+  };
+  micStream.getTracks().forEach((t) => pc.addTrack(t, micStream));
+
+  dc = pc.createDataChannel('oai-events');
+  dc.onopen = () => log('data channel open', 'ok');
+  dc.onmessage = (e) => handleOpenAIEvent(JSON.parse(e.data));
+
+  const offer = await pc.createOffer();
+  await pc.setLocalDescription(offer);
+  log('SDP offer created (' + offer.sdp.length + ' bytes)', 'info');
+
+  // GA WebRTC path: /v1/realtime/calls (per GuideDevBot2 verification)
+  const sdpUrl = 'https://api.openai.com/v1/realtime/calls?model=' + encodeURIComponent(session.model);
+  log('POST ' + sdpUrl, 'info');
+  const sdpResp = await fetch(sdpUrl, {
+    method: 'POST',
+    body: offer.sdp,
+    headers: {
+      Authorization: 'Bearer ' + session.client_secret,
+      'Content-Type': 'application/sdp',
+    },
+  });
+  if (!sdpResp.ok) {
+    const errText = await sdpResp.text();
+    throw new Error('SDP exchange ' + sdpResp.status + ': ' + errText.slice(0, 400));
+  }
+  const answerSdp = await sdpResp.text();
+  log('SDP answer received (' + answerSdp.length + ' bytes)', 'ok');
+  await pc.setRemoteDescription({ type: 'answer', sdp: answerSdp });
+
+  setStatus('live', 'live');
+  log('OpenAI session live — sprich rein!', 'ok');
+}
+
+function handleOpenAIEvent(evt) {
+  switch (evt.type) {
+    case 'session.created':
+    case 'session.updated':
+      log(evt.type + ' (id=' + (evt.session && evt.session.id) + ')', 'info');
+      break;
+    case 'conversation.item.input_audio_transcription.completed':
+      addTranscript('user', evt.transcript);
+      log('user said: ' + evt.transcript, 'user');
+      break;
+    case 'response.output_audio_transcript.done':
+    case 'response.audio_transcript.done':
+      addTranscript('assistant', evt.transcript);
+      log('assistant said: ' + evt.transcript, 'assistant');
+      break;
+    case 'response.function_call_arguments.done':
+      const args = JSON.parse(evt.arguments || '{}');
+      log('tool call: ' + evt.name + '(' + JSON.stringify(args).slice(0, 100) + ')', 'tool');
+      handleToolCall(evt.name, args, evt.call_id);
+      break;
+    case 'response.done': {
+      const u = evt.response && evt.response.usage;
+      if (u) log('response.done usage in=' + (u.input_tokens || 0) + ' out=' + (u.output_tokens || 0), 'info');
+      break;
+    }
+    case 'error':
+      log('ERROR: ' + JSON.stringify(evt), 'err');
+      setStatus('error', 'error');
+      break;
+    default:
+      // many transcript-delta events; ignore in log to avoid spam
+      break;
+  }
+}
+
+async function handleToolCall(name, args, callId) {
+  const READ = ['knowledge_query', 'pois_near', 'narration_near'];
+  const PERSIST = ['persist_narration'];
+  const DISPLAY = ['show_topic', 'show_image', 'show_knowledge_pin', 'focus_map'];
+  let result;
+  try {
+    if (READ.includes(name)) {
+      const r = await fetch('/ai/realtime/tool/' + name, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Session-ID': session.session_id || '' },
+        body: JSON.stringify({ arguments: args, call_id: callId }),
+      });
+      const data = await r.json();
+      result = data.result || data;
+    } else if (DISPLAY.includes(name)) {
+      log('  display hint (test HP just acks): ' + name, 'info');
+      result = { display_hint_ack: true, tool: name };
+    } else if (PERSIST.includes(name)) {
+      log('  persist tool (test HP does NOT write to guide-api): skipping persist', 'warn');
+      result = { skipped: true, reason: 'realtime test HP avoids polluting the corpus' };
+    } else {
+      result = { error: 'unknown tool: ' + name };
+    }
+  } catch (e) {
+    result = { error: e.message };
+  }
+  log('  → result: ' + JSON.stringify(result).slice(0, 160), 'tool');
+  dc.send(JSON.stringify({
+    type: 'conversation.item.create',
+    item: { type: 'function_call_output', call_id: callId, output: JSON.stringify(result) },
+  }));
+  dc.send(JSON.stringify({ type: 'response.create' }));
+}
+
+async function startElevenLabs() {
+  setStatus('connecting', 'connecting');
+  session = await mintToken();
+  log('signed_url ok — agent_id=' + session.agent_id, 'ok');
+
+  log('getUserMedia …', 'info');
+  micStream = await navigator.mediaDevices.getUserMedia({
+    audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+  });
+
+  // Minimal ElevenLabs conversational client. The signed URL points
+  // at their WS endpoint where audio + events flow. For a full UX we
+  // would lean on @11labs/client; for the spike we just open the WS
+  // and pipe PCM frames over it.
+  ws = new WebSocket(session.signed_url);
+  ws.binaryType = 'arraybuffer';
+  ws.onopen = () => {
+    log('ElevenLabs WS open', 'ok');
+    setStatus('live', 'live');
+  };
+  ws.onmessage = (e) => {
+    if (typeof e.data === 'string') {
+      try {
+        const evt = JSON.parse(e.data);
+        if (evt.type === 'conversation_initiation_metadata') {
+          log('11labs: session ' + evt.conversation_initiation_metadata_event.conversation_id, 'info');
+        } else if (evt.type === 'agent_response') {
+          addTranscript('assistant', evt.agent_response_event.agent_response);
+          log('agent: ' + evt.agent_response_event.agent_response, 'assistant');
+        } else if (evt.type === 'user_transcript') {
+          addTranscript('user', evt.user_transcription_event.user_transcript);
+          log('user: ' + evt.user_transcription_event.user_transcript, 'user');
+        } else if (evt.type === 'audio') {
+          // base64-decoded mp3 chunks; play via AudioContext (left as TODO for spike)
+        } else if (evt.type === 'ping') {
+          ws.send(JSON.stringify({ type: 'pong', event_id: evt.ping_event.event_id }));
+        } else {
+          log('11labs evt: ' + evt.type, 'info');
+        }
+      } catch (err) {
+        log('11labs msg parse: ' + err.message, 'warn');
+      }
+    }
+  };
+  ws.onerror = (e) => { log('ws error: ' + e, 'err'); setStatus('error', 'error'); };
+  ws.onclose = (e) => log('ws close (code=' + e.code + ')', 'warn');
+
+  // For PCM upload we would use an AudioWorklet to capture mic and send
+  // base64-encoded PCM frames over the WS. ElevenLabs accepts the same
+  // format their UI client does. Out of scope for the first spike — the
+  // OpenAI path is the priority test.
+  log('NOTE: ElevenLabs mic-upload pipeline not wired in this minimal test HP — receive-only verification of WS handshake works.', 'warn');
+}
+
+async function start() {
+  els.start.disabled = true;
+  try {
+    if (els.provider.value === 'openai') await startOpenAI();
+    else await startElevenLabs();
+    els.stop.disabled = false;
+  } catch (e) {
+    log('start failed: ' + e.message, 'err');
+    setStatus('error', 'error');
+    els.start.disabled = false;
+    await cleanup();
+  }
+}
+
+async function stop() {
+  els.stop.disabled = true;
+  await cleanup();
+  setStatus('idle', 'idle');
+  els.start.disabled = false;
+  loadCap();
+}
+
+async function cleanup() {
+  if (dc) { try { dc.close(); } catch {} dc = null; }
+  if (pc) { try { pc.close(); } catch {} pc = null; }
+  if (ws) { try { ws.close(); } catch {} ws = null; }
+  if (micStream) { micStream.getTracks().forEach((t) => t.stop()); micStream = null; }
+}
+
+els.start.addEventListener('click', start);
+els.stop.addEventListener('click', stop);
+window.addEventListener('beforeunload', cleanup);
+</script>
+</body>
+</html>
