@@ -111,6 +111,21 @@
       <button id="stop" class="danger" disabled>Stop</button>
     </div>
     <audio id="remoteAudio" autoplay playsinline controls></audio>
+
+    <hr>
+    <div class="row">
+      <label>Voice-Clone (ElevenLabs IVC)</label>
+      <div class="small" style="margin-bottom:8px">
+        30-60s deine Stimme aufnehmen → klont sie sofort + erstellt einen Agent damit.
+        Dialekt klingt mit <code>multilingual_v2</code> am besten, geht bei starker Mundart trotzdem teilweise Richtung Standard.
+      </div>
+      <div class="controls">
+        <button id="recordBtn" class="secondary">⏺ Mic aufnehmen</button>
+        <button id="cloneBtn" class="secondary" disabled>Klonen + Agent erstellen</button>
+        <button id="resetCloneBtn" class="secondary" disabled>Default-Agent</button>
+      </div>
+      <div class="small" id="recStatus" style="margin-top:8px"></div>
+    </div>
   </div>
 
   <div class="panel">
@@ -141,7 +156,17 @@ const els = {
   cap: $('cap'),
   remoteAudio: $('remoteAudio'),
   openaiOpts: $('openai-opts'),
+  recordBtn: $('recordBtn'),
+  cloneBtn: $('cloneBtn'),
+  resetCloneBtn: $('resetCloneBtn'),
+  recStatus: $('recStatus'),
 };
+
+let clonedAgentId = null;
+let cloneRecorder = null;
+let cloneChunks = [];
+let cloneStartedAt = 0;
+let cloneTimerId = null;
 
 let pc = null;
 let dc = null;
@@ -198,6 +223,8 @@ async function mintToken() {
   if (els.provider.value === 'openai') {
     body.voice = els.voice.value;
     if (els.instructions.value.trim()) body.instructions = els.instructions.value.trim();
+  } else if (els.provider.value === 'elevenlabs' && clonedAgentId) {
+    body.agent_id = clonedAgentId;
   }
   log('POST /ai/realtime/token  ' + JSON.stringify(body), 'info');
   const r = await fetch('/ai/realtime/token', {
@@ -343,58 +370,48 @@ async function handleToolCall(name, args, callId) {
   dc.send(JSON.stringify({ type: 'response.create' }));
 }
 
+// ElevenLabs Conversational AI — uses the official @11labs/client which
+// handles mic capture, PCM upload, audio playback, ping/pong and event
+// dispatch for us. We just need the signed_url our backend already mints.
+let elevenConversation = null;
+
 async function startElevenLabs() {
   setStatus('connecting', 'connecting');
   session = await mintToken();
   log('signed_url ok — agent_id=' + session.agent_id, 'ok');
 
-  log('getUserMedia …', 'info');
-  micStream = await navigator.mediaDevices.getUserMedia({
-    audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
-  });
+  // Dynamic ESM import so the page loads fast and only pulls the SDK
+  // when actually needed.
+  log('loading @11labs/client SDK …', 'info');
+  const mod = await import('https://cdn.jsdelivr.net/npm/@elevenlabs/client@latest/+esm');
+  const { Conversation } = mod;
 
-  // Minimal ElevenLabs conversational client. The signed URL points
-  // at their WS endpoint where audio + events flow. For a full UX we
-  // would lean on @11labs/client; for the spike we just open the WS
-  // and pipe PCM frames over it.
-  ws = new WebSocket(session.signed_url);
-  ws.binaryType = 'arraybuffer';
-  ws.onopen = () => {
-    log('ElevenLabs WS open', 'ok');
-    setStatus('live', 'live');
-  };
-  ws.onmessage = (e) => {
-    if (typeof e.data === 'string') {
-      try {
-        const evt = JSON.parse(e.data);
-        if (evt.type === 'conversation_initiation_metadata') {
-          log('11labs: session ' + evt.conversation_initiation_metadata_event.conversation_id, 'info');
-        } else if (evt.type === 'agent_response') {
-          addTranscript('assistant', evt.agent_response_event.agent_response);
-          log('agent: ' + evt.agent_response_event.agent_response, 'assistant');
-        } else if (evt.type === 'user_transcript') {
-          addTranscript('user', evt.user_transcription_event.user_transcript);
-          log('user: ' + evt.user_transcription_event.user_transcript, 'user');
-        } else if (evt.type === 'audio') {
-          // base64-decoded mp3 chunks; play via AudioContext (left as TODO for spike)
-        } else if (evt.type === 'ping') {
-          ws.send(JSON.stringify({ type: 'pong', event_id: evt.ping_event.event_id }));
-        } else {
-          log('11labs evt: ' + evt.type, 'info');
-        }
-      } catch (err) {
-        log('11labs msg parse: ' + err.message, 'warn');
+  elevenConversation = await Conversation.startSession({
+    signedUrl: session.signed_url,
+    onConnect: ({ conversationId }) => {
+      log('11labs: connected (conversation_id=' + conversationId + ')', 'ok');
+      setStatus('live', 'live');
+    },
+    onDisconnect: () => {
+      log('11labs: disconnected', 'warn');
+      setStatus('idle', 'idle');
+    },
+    onError: (e) => {
+      log('11labs ERROR: ' + (e && e.message || JSON.stringify(e)).slice(0, 300), 'err');
+      setStatus('error', 'error');
+    },
+    onMessage: (m) => {
+      if (m.source === 'user') {
+        addTranscript('user', m.message);
+        log('user: ' + m.message, 'user');
+      } else if (m.source === 'ai') {
+        addTranscript('assistant', m.message);
+        log('agent: ' + m.message, 'assistant');
       }
-    }
-  };
-  ws.onerror = (e) => { log('ws error: ' + e, 'err'); setStatus('error', 'error'); };
-  ws.onclose = (e) => log('ws close (code=' + e.code + ')', 'warn');
-
-  // For PCM upload we would use an AudioWorklet to capture mic and send
-  // base64-encoded PCM frames over the WS. ElevenLabs accepts the same
-  // format their UI client does. Out of scope for the first spike — the
-  // OpenAI path is the priority test.
-  log('NOTE: ElevenLabs mic-upload pipeline not wired in this minimal test HP — receive-only verification of WS handshake works.', 'warn');
+    },
+    onModeChange: ({ mode }) => log('11labs mode=' + mode, 'info'),
+  });
+  log('11labs Conversation session started', 'ok');
 }
 
 async function start() {
@@ -423,11 +440,102 @@ async function cleanup() {
   if (dc) { try { dc.close(); } catch {} dc = null; }
   if (pc) { try { pc.close(); } catch {} pc = null; }
   if (ws) { try { ws.close(); } catch {} ws = null; }
+  if (elevenConversation) {
+    try { await elevenConversation.endSession(); } catch {}
+    elevenConversation = null;
+  }
   if (micStream) { micStream.getTracks().forEach((t) => t.stop()); micStream = null; }
+}
+
+// ── Voice-clone (ElevenLabs IVC) ──────────────────────────────────────
+function pickMimeType() {
+  const candidates = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4', 'audio/mpeg', 'audio/ogg'];
+  for (const c of candidates) {
+    if (typeof MediaRecorder !== 'undefined' && MediaRecorder.isTypeSupported(c)) return c;
+  }
+  return '';
+}
+
+async function toggleRecord() {
+  if (cloneRecorder && cloneRecorder.state === 'recording') {
+    cloneRecorder.stop();
+    return;
+  }
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+    });
+    const mime = pickMimeType();
+    cloneRecorder = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined);
+    cloneChunks = [];
+    cloneStartedAt = Date.now();
+    cloneRecorder.ondataavailable = (e) => { if (e.data && e.data.size) cloneChunks.push(e.data); };
+    cloneRecorder.onstop = () => {
+      stream.getTracks().forEach((t) => t.stop());
+      clearInterval(cloneTimerId); cloneTimerId = null;
+      els.recordBtn.textContent = '⏺ Mic aufnehmen';
+      const sec = ((Date.now() - cloneStartedAt) / 1000).toFixed(1);
+      const blob = new Blob(cloneChunks, { type: mime || 'audio/webm' });
+      els.recStatus.textContent = `Aufnahme fertig — ${sec}s, ${(blob.size / 1024).toFixed(0)} KB. Jetzt "Klonen + Agent" drücken.`;
+      els.cloneBtn.disabled = false;
+      window._cloneBlob = blob;
+    };
+    cloneRecorder.start();
+    els.recordBtn.textContent = '⏹ Stoppen';
+    els.recStatus.textContent = 'Aufnahme läuft … sprich 30-60s. Längere Samples = besserer Clone.';
+    cloneTimerId = setInterval(() => {
+      const s = ((Date.now() - cloneStartedAt) / 1000).toFixed(0);
+      els.recStatus.textContent = 'Aufnahme läuft … ' + s + 's (Ziel 30-60s).';
+    }, 500);
+  } catch (e) {
+    els.recStatus.textContent = 'Mic-Fehler: ' + e.message;
+    log('voice-clone mic error: ' + e.message, 'err');
+  }
+}
+
+async function cloneAndCreateAgent() {
+  const blob = window._cloneBlob;
+  if (!blob) { els.recStatus.textContent = 'Erst aufnehmen.'; return; }
+  els.cloneBtn.disabled = true;
+  els.recStatus.textContent = 'Upload + Clone + Agent-Create … (15-30s)';
+  log('uploading clone sample ' + (blob.size / 1024).toFixed(0) + 'KB to /ai/realtime/voice-clone', 'info');
+  try {
+    const fd = new FormData();
+    fd.append('audio', blob, 'clone.' + (blob.type.includes('mp4') ? 'm4a' : 'webm'));
+    fd.append('name', 'AlexClone-' + Date.now().toString().slice(-6));
+    fd.append('language', els.lang.value || 'de');
+    const r = await fetch('/ai/realtime/voice-clone', { method: 'POST', body: fd });
+    if (!r.ok) {
+      let err;
+      try { err = await r.json(); } catch { err = { raw: await r.text() }; }
+      throw new Error('clone ' + r.status + ': ' + JSON.stringify(err).slice(0, 400));
+    }
+    const data = await r.json();
+    clonedAgentId = data.agent_id;
+    els.recStatus.textContent = '✓ Stimme geklont. voice_id=' + data.voice_id.slice(0, 12) + '… agent_id=' + data.agent_id.slice(0, 14) + '… — Provider auf ElevenLabs gestellt. Start drücken!';
+    log('clone ok: voice_id=' + data.voice_id + ' agent_id=' + data.agent_id, 'ok');
+    els.provider.value = 'elevenlabs';
+    els.provider.dispatchEvent(new Event('change'));
+    els.resetCloneBtn.disabled = false;
+  } catch (e) {
+    els.recStatus.textContent = 'Clone fehlgeschlagen: ' + e.message;
+    log('clone error: ' + e.message, 'err');
+    els.cloneBtn.disabled = false;
+  }
+}
+
+function resetClonedAgent() {
+  clonedAgentId = null;
+  els.recStatus.textContent = 'Zurück auf Default-Agent (' + (els.provider.value === 'elevenlabs' ? 'env-konfiguriert' : 'OpenAI') + ').';
+  els.resetCloneBtn.disabled = true;
+  log('cloned agent reset — using default', 'info');
 }
 
 els.start.addEventListener('click', start);
 els.stop.addEventListener('click', stop);
+els.recordBtn.addEventListener('click', toggleRecord);
+els.cloneBtn.addEventListener('click', cloneAndCreateAgent);
+els.resetCloneBtn.addEventListener('click', resetClonedAgent);
 window.addEventListener('beforeunload', cleanup);
 </script>
 </body>
