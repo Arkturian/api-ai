@@ -28,6 +28,8 @@ between voice and text-only.
 """
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import json
 import logging
 import os
@@ -177,6 +179,40 @@ class OpenAIRealtimeCostTracker:
         }
         self._alerts_sent = set()
 
+    @contextlib.contextmanager
+    def _cross_process_lock(self):
+        """fcntl.flock-backed exclusive lock that serialises the dedup
+        critical section across uvicorn workers (and any other process
+        touching the same JSON). Uses a sidecar ``.lock`` file so we
+        never have to open the data file in a write-mode that would
+        truncate it.
+
+        Failure mode: if the lock file can't be opened (very weird,
+        permissions broken), we degrade to per-process locking with a
+        log warning rather than refusing to track at all. Cost-tracking
+        being best-effort under filesystem brokenness is the right
+        trade-off — Telegram-alerts on cap thresholds still fire.
+        """
+        lock_path = self.data_dir / ".openai_realtime_dedup.lock"
+        try:
+            self.data_dir.mkdir(parents=True, exist_ok=True)
+            f = open(lock_path, "a+")
+        except OSError as e:
+            logger.warning(
+                f"openai_realtime_cost_tracker: cross-process lock "
+                f"unavailable ({e}); falling back to per-worker lock"
+            )
+            yield
+            return
+        try:
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+        finally:
+            f.close()
+
     # ── Cost calculation ──────────────────────────────────────────────
 
     def _cost_for_session(
@@ -240,28 +276,31 @@ class OpenAIRealtimeCostTracker:
         # Idempotency check — only applies when both ids are present.
         if voice_session_id and usage_event_id:
             dedup_key = f"{voice_session_id}::{usage_event_id}"
-            # Reload from disk first so sibling-worker dedup state is
-            # visible — critical for the multi-worker uvicorn setup
-            # where successive retries can land on different workers.
-            self._maybe_reload_from_file()
-            with self._data_lock:
-                seen = set(self._usage_data.get("seen_event_ids", []))
-                if dedup_key in seen:
-                    logger.info(
-                        f"openai_realtime_cost_tracker: dedup hit for "
-                        f"{dedup_key[:80]} — skipping double-count"
-                    )
-                    return {"deduped": True, "accepted": False}
-                # Mark seen BEFORE the actual track so concurrent retries
-                # in two workers race on the lock + only one wins. Save
-                # immediately so a sibling worker sees the mark even on
-                # the master-forwarding path (where _track_local that
-                # would normally save is skipped).
-                seen.add(dedup_key)
-                self._usage_data["seen_event_ids"] = list(seen)[-5000:]
-                self._save_data()
-                # Keep the dedup-set bounded — 5000 keys is roughly
-                # 20-30 sessions of turn-records, plenty for a month.
+            # Cross-process critical section via fcntl.flock — covers
+            # multi-worker uvicorn AND any sidecar process touching the
+            # same JSON. threading.Lock alone is per-worker, so two
+            # workers racing on the same retry would BOTH see the
+            # not-yet-persisted seen-set (Codex production follow-up,
+            # Content-Post #1215).
+            with self._cross_process_lock():
+                self._maybe_reload_from_file()
+                with self._data_lock:
+                    seen = set(self._usage_data.get("seen_event_ids", []))
+                    if dedup_key in seen:
+                        logger.info(
+                            f"openai_realtime_cost_tracker: dedup hit for "
+                            f"{dedup_key[:80]} — skipping double-count"
+                        )
+                        return {"deduped": True, "accepted": False}
+                    # Mark seen BEFORE the actual track so concurrent
+                    # retries lose the race deterministically. Save
+                    # immediately so any sibling worker that comes in
+                    # while we're still on the master-forward sees it.
+                    seen.add(dedup_key)
+                    self._usage_data["seen_event_ids"] = list(seen)[-5000:]
+                    self._save_data()
+                    # Keep the dedup-set bounded — 5000 keys is roughly
+                    # 20-30 sessions of turn-records, plenty for a month.
         else:
             logger.warning(
                 "openai_realtime_cost_tracker: track_session called "
