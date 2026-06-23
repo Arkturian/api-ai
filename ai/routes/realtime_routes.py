@@ -80,6 +80,10 @@ SUPPORTED_REALTIME_VOICES = {
 }
 
 
+SUPPORTED_PROVIDERS = {"openai", "elevenlabs"}
+DEFAULT_PROVIDER = "openai"
+
+
 class RealtimeTokenRequest(BaseModel):
     """Body for ``POST /ai/realtime/token``.
 
@@ -89,6 +93,13 @@ class RealtimeTokenRequest(BaseModel):
     and for the usage callback.
     """
 
+    provider: Optional[str] = Field(
+        default=DEFAULT_PROVIDER,
+        description=(
+            "Realtime provider: 'openai' (gpt-realtime via WebRTC) or "
+            "'elevenlabs' (Conversational AI via WebSocket). Default 'openai'."
+        ),
+    )
     model: Optional[str] = Field(
         default=DEFAULT_REALTIME_MODEL,
         description=(
@@ -458,18 +469,112 @@ def get_api_key():  # placeholder, mirrors other routes
 # ── Endpoints ─────────────────────────────────────────────────────────
 
 
+async def _mint_elevenlabs_token(request: RealtimeTokenRequest) -> dict:
+    """Mint an ElevenLabs Conversational AI signed URL for the browser.
+
+    ElevenLabs' Conv. AI agents pre-bake the LLM + voice + prompt + tools
+    in their dashboard config. The browser opens a WebSocket directly to
+    the signed URL we hand back — no SDP exchange, no separate token.
+
+    Two env knobs:
+      * ``ELEVENLABS_API_KEY``       — required (same key as /ai/tts/narrate)
+      * ``ELEVENLABS_AGENT_ID``      — required; pre-created agent in the
+                                       ElevenLabs dashboard. We don't auto-
+                                       create one because the agent config
+                                       (prompt, voice, knowledge base) is
+                                       authored UI-side.
+    """
+    api_key_env = os.getenv("ELEVENLABS_API_KEY", "")
+    agent_id = os.getenv("ELEVENLABS_AGENT_ID", "")
+    if not api_key_env:
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "error": "elevenlabs_api_key_missing",
+                "hint": "ELEVENLABS_API_KEY not set on this api-ai host.",
+            },
+        )
+    if not agent_id:
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "error": "elevenlabs_agent_id_missing",
+                "hint": (
+                    "ELEVENLABS_AGENT_ID env var not set. Create a Conversational "
+                    "AI agent at https://elevenlabs.io/app/conversational-ai and "
+                    "set the resulting agent_id as ELEVENLABS_AGENT_ID."
+                ),
+            },
+        )
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        try:
+            r = await client.get(
+                "https://api.elevenlabs.io/v1/convai/conversation/get_signed_url",
+                params={"agent_id": agent_id},
+                headers={"xi-api-key": api_key_env},
+            )
+        except httpx.HTTPError as e:
+            raise HTTPException(
+                status_code=502,
+                detail={
+                    "error": "elevenlabs_upstream_unreachable",
+                    "exc": str(e)[:200],
+                },
+            )
+    if r.status_code >= 400:
+        try:
+            upstream = r.json()
+        except Exception:
+            upstream = {"raw": r.text[:500]}
+        raise HTTPException(
+            status_code=502 if r.status_code >= 500 else r.status_code,
+            detail={
+                "error": "elevenlabs_upstream_error",
+                "upstream_status": r.status_code,
+                "upstream_body": upstream,
+            },
+        )
+    body = r.json()
+    from ..services.openai_realtime_cost_tracker import openai_realtime_cost_tracker
+    openai_realtime_cost_tracker.track_session_start()
+    return {
+        "provider": "elevenlabs",
+        "signed_url": body.get("signed_url"),
+        "agent_id": agent_id,
+        "voice": None,
+        "model": "elevenlabs-convai",
+        "tools": [],
+        "session_id": request.session_id,
+        "raw": body,
+    }
+
+
 @router.post("/realtime/token")
 async def mint_realtime_token(
     request: RealtimeTokenRequest,
     api_key: str = Depends(get_api_key),
 ):
-    """Mint a short-lived OpenAI Realtime session token.
+    """Mint a short-lived Realtime session token.
 
-    Returns the raw OpenAI ephemeral token plus the resolved model and
-    tool list so the browser knows exactly what the session config
-    will look like.
+    Provider switch: 'openai' returns an OpenAI ephemeral ``client_secret``
+    plus the resolved model and tool list. 'elevenlabs' returns a signed
+    WebSocket URL pointing at a pre-created Conv. AI agent.
     """
     _check_realtime_billing_gate(request.confirm_api_billing)
+
+    provider = (request.provider or DEFAULT_PROVIDER).lower()
+    if provider not in SUPPORTED_PROVIDERS:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "unsupported_realtime_provider",
+                "provider": provider,
+                "supported": sorted(SUPPORTED_PROVIDERS),
+            },
+        )
+
+    if provider == "elevenlabs":
+        return await _mint_elevenlabs_token(request)
 
     model = request.model or DEFAULT_REALTIME_MODEL
     if model not in SUPPORTED_REALTIME_MODELS:
@@ -611,6 +716,7 @@ async def mint_realtime_token(
     openai_realtime_cost_tracker.track_session_start()
 
     return {
+        "provider": "openai",
         "client_secret": body.get("client_secret") or body.get("value") or body,
         "expires_at": body.get("expires_at"),
         "model": model,

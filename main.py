@@ -20,7 +20,9 @@ load_dotenv()  # Load environment variables from .env file
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 import logging
+import os
 
 # Import routes
 from ai.routes import text_ai_routes, image_ai_routes, audio_ai_routes, dialog_routes, video_ai_routes, narration_routes, image_generation_routes, translate_routes, internal_routes, dashboard_routes, music_ai_routes, realtime_routes
@@ -63,6 +65,16 @@ app.include_router(translate_routes.router, prefix="/ai", tags=["Translation"])
 app.include_router(realtime_routes.router, prefix="/ai", tags=["Realtime AI"])
 app.include_router(internal_routes.router, prefix="/internal", tags=["Internal"])
 app.include_router(dashboard_routes.router, prefix="/ai", tags=["Status Dashboard"])
+
+# Static Realtime Test-HP — talk-to-the-model demo for OpenAI gpt-realtime
+# and ElevenLabs Conv. AI. Served at /ai/realtime/test/.
+_STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
+if os.path.isdir(os.path.join(_STATIC_DIR, "realtime-test")):
+    app.mount(
+        "/ai/realtime/test",
+        StaticFiles(directory=os.path.join(_STATIC_DIR, "realtime-test"), html=True),
+        name="realtime-test",
+    )
 
 # Health check
 @app.get("/health")
