@@ -42,12 +42,13 @@ so the browser only ever decides routing, not whether a tool exists.
 from __future__ import annotations
 
 import logging
+import json
 import os
 import time
 from typing import Any, List, Optional
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, Header, Path
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Header, Path, UploadFile
 from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
@@ -148,6 +149,14 @@ class RealtimeTokenRequest(BaseModel):
         description=(
             "Federation virtual-bot persona to layer into the system prompt "
             "(same scheme as /ai/{claude,chatgpt,gemini}). Optional."
+        ),
+    )
+    agent_id: Optional[str] = Field(
+        default=None,
+        description=(
+            "ElevenLabs only — override the env-configured default agent. "
+            "Use this with the voice-clone-derived agent id so the test HP "
+            "can talk to a freshly cloned voice without redeploying env vars."
         ),
     )
 
@@ -484,8 +493,8 @@ async def _mint_elevenlabs_token(request: RealtimeTokenRequest) -> dict:
                                        (prompt, voice, knowledge base) is
                                        authored UI-side.
     """
-    api_key_env = os.getenv("ELEVENLABS_API_KEY", "")
-    agent_id = os.getenv("ELEVENLABS_AGENT_ID", "")
+    api_key_env = os.getenv("ELEVENLABS_API_KEY", "").strip('"').strip("'")
+    agent_id = request.agent_id or os.getenv("ELEVENLABS_AGENT_ID", "")
     if not api_key_env:
         raise HTTPException(
             status_code=500,
@@ -546,6 +555,132 @@ async def _mint_elevenlabs_token(request: RealtimeTokenRequest) -> dict:
         "tools": [],
         "session_id": request.session_id,
         "raw": body,
+    }
+
+
+@router.post("/realtime/voice-clone")
+async def voice_clone(
+    audio: UploadFile = File(..., description="Reference audio sample (webm / mp3 / wav). 30-60s recommended for IVC."),
+    name: str = Form("Cloned Voice"),
+    description: Optional[str] = Form(None),
+    language: str = Form("de"),
+    api_key: str = Depends(get_api_key),
+):
+    """Clone a voice from a user-uploaded audio sample, then create a
+    dedicated ElevenLabs Conversational AI agent that uses that voice.
+
+    Returns ``{voice_id, agent_id, voice_name}`` — the browser passes
+    ``agent_id`` back through ``/ai/realtime/token`` (``agent_id``
+    override field) to talk to a model whose TTS is the cloned voice.
+
+    Dialect note: ElevenLabs Instant Voice Clone (IVC) keeps timbre +
+    cadence well; dialect-specific phonemes degrade toward standard
+    pronunciation, especially with the flash TTS model. We default to
+    ``eleven_multilingual_v2`` here because it preserves accent the
+    best (slower latency tradeoff, but the dialect demo is the point).
+    """
+    eleven_key = os.getenv("ELEVENLABS_API_KEY", "").strip('"').strip("'")
+    if not eleven_key:
+        raise HTTPException(500, "ELEVENLABS_API_KEY missing")
+
+    audio_bytes = await audio.read()
+    if not audio_bytes:
+        raise HTTPException(400, "audio sample is empty")
+    if len(audio_bytes) < 50_000:
+        # ~3 seconds at the lowest realistic bitrate. Anything shorter
+        # produces useless clones — better to fail fast with a hint.
+        raise HTTPException(
+            400,
+            f"audio sample too short ({len(audio_bytes)} bytes) — record 30-60s for a usable IVC clone",
+        )
+
+    filename = audio.filename or "clone.webm"
+    content_type = audio.content_type or "audio/webm"
+    logger.info(
+        f"voice-clone: uploading {len(audio_bytes)} bytes ({content_type}) "
+        f"as '{name}' lang={language}"
+    )
+
+    async with httpx.AsyncClient(timeout=120.0) as client:
+        # Step 1: create the voice via IVC
+        try:
+            r = await client.post(
+                "https://api.elevenlabs.io/v1/voices/add",
+                headers={"xi-api-key": eleven_key},
+                files=[("files", (filename, audio_bytes, content_type))],
+                data={
+                    "name": name,
+                    "description": description or f"Cloned via AiApi realtime test HP ({language})",
+                    "labels": json.dumps({"language": language, "source": "aiapi-test-hp"}),
+                },
+            )
+        except httpx.HTTPError as e:
+            raise HTTPException(502, {"error": "elevenlabs_upload_failed", "exc": str(e)[:200]})
+        if r.status_code >= 400:
+            try: body = r.json()
+            except Exception: body = {"raw": r.text[:300]}
+            raise HTTPException(
+                502 if r.status_code >= 500 else r.status_code,
+                {"error": "elevenlabs_voice_add_failed", "status": r.status_code, "body": body},
+            )
+        voice = r.json()
+        voice_id = voice.get("voice_id")
+        if not voice_id:
+            raise HTTPException(502, {"error": "elevenlabs_no_voice_id", "body": voice})
+
+        # Step 2: spin up a Conv. AI agent that uses this voice. We use
+        # eleven_multilingual_v2 because it keeps accent characteristics
+        # noticeably better than the flash models (per ElevenLabs' own
+        # accent-retention benchmarks).
+        prompt = (
+            "Du bist ein freundlicher Gesprächspartner für einen Voice-Clone-Test. "
+            "Antworte kurz und natürlich auf die Sprache des Users (Default Deutsch). "
+            "Wenn der User in einem Dialekt spricht, antworte normal — der Witz an dem "
+            "Test ist nicht WAS du sagst, sondern dass du die geklonte Stimme verwendest."
+        )
+        first_message = (
+            "Hallo! Ich spreche jetzt mit deiner geklonten Stimme. Wie klingt sie für dich?"
+        )
+        try:
+            ar = await client.post(
+                "https://api.elevenlabs.io/v1/convai/agents/create",
+                headers={"xi-api-key": eleven_key, "Content-Type": "application/json"},
+                json={
+                    "name": f"AiApi Clone Agent — {name}",
+                    "conversation_config": {
+                        "agent": {
+                            "prompt": {"prompt": prompt},
+                            "first_message": first_message,
+                            "language": language,
+                        },
+                        "tts": {
+                            "voice_id": voice_id,
+                            "model_id": "eleven_multilingual_v2",
+                        },
+                    },
+                },
+            )
+        except httpx.HTTPError as e:
+            raise HTTPException(502, {"error": "elevenlabs_agent_create_failed", "exc": str(e)[:200]})
+        if ar.status_code >= 400:
+            try: body = ar.json()
+            except Exception: body = {"raw": ar.text[:300]}
+            raise HTTPException(
+                502 if ar.status_code >= 500 else ar.status_code,
+                {"error": "elevenlabs_agent_create_rejected", "status": ar.status_code, "body": body},
+            )
+        agent = ar.json()
+        agent_id = agent.get("agent_id")
+        if not agent_id:
+            raise HTTPException(502, {"error": "elevenlabs_no_agent_id", "body": agent})
+
+    logger.info(f"voice-clone: voice_id={voice_id} agent_id={agent_id}")
+    return {
+        "voice_id": voice_id,
+        "agent_id": agent_id,
+        "voice_name": name,
+        "model_id": "eleven_multilingual_v2",
+        "language": language,
     }
 
 
