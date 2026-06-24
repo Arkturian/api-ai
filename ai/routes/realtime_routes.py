@@ -1602,6 +1602,36 @@ async def mint_realtime_token(
     # flat ``voice`` / ``input_audio_format`` fields. The mint endpoint
     # surfaces "Unknown parameter: 'session.voice'" when you use the
     # old layout, so we ship the new layout from day one.
+    #
+    # turn_detection (CloudV2's first-smoke catch, Post #1215):
+    #
+    #   * narrator-only / agentos-narrator: read-only modes where the FE
+    #     drives ``response.create`` deliberately. Auto-VAD here means
+    #     room noise + silence + whisper hallucinations ("see you next
+    #     week!") trigger the model to respond on its own. Disable VAD
+    #     entirely; the FE controls every speak event.
+    #   * talkback-enabled: VAD must be on so the operator's spoken
+    #     commands reach the model, but with a stricter threshold + a
+    #     longer required silence so room ambience and the
+    #     whisper-on-silence hallucination don't feed the assistant
+    #     ghost prompts.
+    #   * default (Wanderlaut / legacy): the original 0.5/500 ms
+    #     server_vad knobs the live tours have been running with.
+    if companion_mode in ("agentos-narrator", "narrator-only"):
+        turn_detection = None  # FE-driven response.create only
+    elif companion_mode == "talkback-enabled":
+        turn_detection = {
+            "type": "server_vad",
+            "threshold": 0.7,
+            "prefix_padding_ms": 300,
+            "silence_duration_ms": 1000,
+        }
+    else:
+        turn_detection = {
+            "type": "server_vad",
+            "threshold": 0.5,
+            "silence_duration_ms": 500,
+        }
     session_config = {
         "type": "realtime",
         "model": model,
@@ -1611,11 +1641,7 @@ async def mint_realtime_token(
             "input": {
                 "format": {"type": "audio/pcm", "rate": 24000},
                 "transcription": {"model": "whisper-1"},
-                "turn_detection": {
-                    "type": "server_vad",
-                    "threshold": 0.5,
-                    "silence_duration_ms": 500,
-                },
+                "turn_detection": turn_detection,
             },
             "output": {
                 "format": {"type": "audio/pcm", "rate": 24000},
