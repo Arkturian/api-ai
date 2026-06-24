@@ -26,6 +26,11 @@ pydub>=0.25.1             # Audio processing and manipulation
 # Translation
 deep-translator>=1.11.4    # Google Translate (free, no API key)
 
+# Realtime grant verification (CloudV2 Voice-Companion, Post #1215)
+# RS256/JWKS for auth-api capability JWTs. cryptography backs the RSA verify path.
+PyJWT[crypto]>=2.8.0
+cryptography>=41.0.0
+
 # Utilities
 python-dotenv>=1.0.0
 requests>=2.31.0
