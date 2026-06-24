@@ -56,9 +56,20 @@ from zoneinfo import ZoneInfo
 logger = logging.getLogger(__name__)
 
 
-# Locale for the daily window. IANA so DST shifts are handled
+# Locale for the budget window. IANA so DST shifts are handled
 # automatically — no fixed UTC offset (Codex Final).
 LOCAL_TZ = ZoneInfo("Europe/Vienna")
+
+# Budget-window granularity. Default is daily (the original
+# Codex-frozen v1 semantic). Operators set
+# ``REALTIME_BUDGET_WINDOW=monthly`` once an owner clarifies that
+# their grant.limits.daily_budget_eur is actually intended as a
+# monthly cap (Content-Post #1215 follow-up, Alex' 30 EUR/month).
+# In monthly mode the state file groups by YYYY-MM and resets on
+# the first of the month local Europe/Vienna.
+BUDGET_WINDOW = os.environ.get("REALTIME_BUDGET_WINDOW", "daily").lower()
+if BUDGET_WINDOW not in {"daily", "monthly"}:
+    BUDGET_WINDOW = "daily"
 
 # Storage path. Lives next to the existing realtime cost tracker JSON.
 RESERVATIONS_PATH = Path("/var/lib/api-ai/realtime_reservations.json")
@@ -133,7 +144,14 @@ class Reservation:
 
 
 def _today_str() -> str:
-    """Local YYYY-MM-DD in Europe/Vienna — DST-aware."""
+    """Local window key in Europe/Vienna — DST-aware.
+
+    YYYY-MM-DD when REALTIME_BUDGET_WINDOW=daily, YYYY-MM when
+    monthly. The name kept as ``_today_str`` for compat; the value
+    is whatever the operator-configured budget window resets on.
+    """
+    if BUDGET_WINDOW == "monthly":
+        return _now_local().strftime("%Y-%m")
     return _now_local().strftime("%Y-%m-%d")
 
 
