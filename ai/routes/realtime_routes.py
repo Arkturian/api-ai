@@ -59,6 +59,11 @@ from ..services.realtime_grant_verifier import (
     host_profile_id,
     service_key_configured,
 )
+from ..services import realtime_budget_guard
+from ..services.realtime_budget_guard import (
+    BudgetGuardError,
+    Reservation,
+)
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -1463,14 +1468,6 @@ async def mint_realtime_token(
     user / missing limits all fail closed at the dependency.
     """
     _check_realtime_billing_gate(request.confirm_api_billing)
-    # Limits attached to the verified grant — daily_budget_eur and
-    # max_parallel_sessions are enforced by the cost-tracker refit
-    # (follow-up PR; this PR ships the grant + scope guard).
-    logger.info(
-        "realtime mint: profile=%s tenant=%s budget_eur=%.2f max_parallel=%d",
-        grant.profile_id, grant.tenant_id,
-        grant.daily_budget_eur, grant.max_parallel_sessions,
-    )
 
     provider = (request.provider or DEFAULT_PROVIDER).lower()
     if provider not in SUPPORTED_PROVIDERS:
@@ -1631,6 +1628,39 @@ async def mint_realtime_token(
     # stamp guide_session_id / track_id only in our own response, where
     # the browser already needs to read it to wire X-Session-ID headers.
 
+    # Atomic pre-mint reservation against the grant's per-profile
+    # daily_budget_eur and max_parallel_sessions caps (Codex Final,
+    # Post #1215). Placed AFTER all validation paths so a failed
+    # validation never leaks a reservation slot. Released on any
+    # OpenAI-side mint failure below.
+    voice_session_id = (
+        request.voice_session_id
+        or request.session_id
+        or f"vs_pending_{int(time.time()*1000)}"
+    )
+    try:
+        reservation = realtime_budget_guard.reserve_mint(
+            profile_id=grant.profile_id,
+            user_id=grant.sub,
+            voice_session_id=voice_session_id,
+            max_parallel_sessions=grant.max_parallel_sessions,
+            daily_budget_eur=grant.daily_budget_eur,
+        )
+    except BudgetGuardError as exc:
+        logger.warning(
+            "realtime mint deny code=%s detail=%s",
+            exc.error_code, exc.audit_detail,
+        )
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail={"error": exc.error_code},
+        ) from exc
+    logger.info(
+        "realtime mint: profile=%s tenant=%s vid=%s budget=%.2f max_parallel=%d",
+        grant.profile_id, grant.tenant_id, voice_session_id,
+        grant.daily_budget_eur, grant.max_parallel_sessions,
+    )
+
     # Token-mint upstream — OpenAI's /v1/realtime/client_secrets endpoint
     # returns an ephemeral client secret with the session_config baked in.
     #
@@ -1650,6 +1680,9 @@ async def mint_realtime_token(
                 },
             )
         except httpx.HTTPError as e:
+            # OpenAI unreachable — release the reservation so the slot
+            # doesn't burn for 60min until the orphan reaper catches it.
+            realtime_budget_guard.release_reservation(reservation)
             raise HTTPException(
                 status_code=502,
                 detail={
@@ -1659,6 +1692,8 @@ async def mint_realtime_token(
             )
 
     if r.status_code >= 400:
+        # OpenAI rejected the mint — release the reservation.
+        realtime_budget_guard.release_reservation(reservation)
         try:
             upstream = r.json()
         except Exception:
@@ -1786,6 +1821,34 @@ async def realtime_usage_report(
         voice_session_id=report.voice_session_id or report.session_id,
         usage_event_id=report.usage_event_id,
     )
+    # Charge the per-profile budget guard with the same usage. Skip if
+    # this report was a dedup-replay (already counted). The cost in EUR
+    # is taken from what the cost tracker just computed for this row.
+    if result and result.get("accepted") and not result.get("deduped"):
+        from ..services.openai_realtime_cost_tracker import openai_realtime_cost_tracker as _tracker
+        # The tracker doesn't expose the per-row cost directly, but for
+        # the budget guard we only need ``cost_eur`` of THIS turn. Re-
+        # compute it locally — same pricing table, deterministic.
+        per_row_eur = _tracker._cost_for_session(
+            model=report.model,
+            audio_input_tokens=report.audio_input_tokens,
+            audio_output_tokens=report.audio_output_tokens,
+            text_input_tokens=report.text_input_tokens,
+            text_output_tokens=report.text_output_tokens,
+        ).get("cost_eur", 0.0)
+        try:
+            realtime_budget_guard.confirm_usage_charge(
+                profile_id=grant.profile_id,
+                user_id=grant.sub,
+                voice_session_id=report.voice_session_id or report.session_id or "",
+                cost_eur=float(per_row_eur),
+            )
+        except Exception as exc:
+            # Charging the guard must NEVER tank the usage report —
+            # the cost tracker is the source of truth, the guard is
+            # the optimisation. Log and continue.
+            logger.warning("budget_guard charge failed: %s", exc)
+
     status = openai_realtime_cost_tracker.get_status()
     status["deduped"] = bool(result and result.get("deduped"))
     status["accepted"] = bool(result and result.get("accepted"))
