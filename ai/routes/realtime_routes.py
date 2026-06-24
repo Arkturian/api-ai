@@ -1855,6 +1855,50 @@ async def realtime_usage_report(
     return status
 
 
+class RealtimeSessionEndRequest(BaseModel):
+    """Body for ``POST /ai/realtime/session/end`` — CloudV2 explicit
+    end-of-session ping so the parallel-slot reservation frees up
+    immediately on device-switch (Content-Post #1215, the 60-min
+    orphan reaper would otherwise hold the slot).
+    """
+
+    voice_session_id: str = Field(
+        ...,
+        description=(
+            "The same id used as session_id / companion_run_id when "
+            "minting the token. Owner-scoped — only the user that "
+            "originally reserved the slot can release it."
+        ),
+    )
+
+
+@router.post("/realtime/session/end")
+async def realtime_session_end(
+    body: RealtimeSessionEndRequest,
+    grant: VerifiedGrant = Depends(require_realtime_grant("mint")),
+):
+    """Owner-scoped release of a pre-mint parallel-slot reservation.
+
+    Idempotent: returns ``{released: false}`` if the session wasn't in
+    the caller's active set (already released, never reserved, or
+    belongs to another user). Returns ``{released: true}`` on the
+    first successful release.
+
+    Scope: ``mint`` — the same scope that booked the slot can release
+    it. No separate ``release`` scope (Codex' v1 closed enum is
+    mint/usage/devlog only).
+    """
+    released = realtime_budget_guard.release_by_voice_session(
+        profile_id=grant.profile_id,
+        user_id=grant.sub,
+        voice_session_id=body.voice_session_id,
+    )
+    return {
+        "released": released,
+        "voice_session_id": body.voice_session_id,
+    }
+
+
 # ── Dev Narration-Log (CloudV2, Post #1215) ───────────────────────────
 
 
