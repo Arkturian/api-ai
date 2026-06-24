@@ -1872,6 +1872,35 @@ class RealtimeSessionEndRequest(BaseModel):
     )
 
 
+@router.post("/realtime/session/heartbeat")
+async def realtime_session_heartbeat(
+    body: RealtimeSessionEndRequest,
+    grant: VerifiedGrant = Depends(require_realtime_grant("mint")),
+):
+    """Owner-scoped heartbeat lease for an active reservation.
+
+    Refreshes the session's last-activity timestamp so the orphan
+    reaper does not prune the slot. The FE pings this on a ~30 s
+    interval; once ``REALTIME_REAP_SECONDS=90`` is configured on the
+    hosts, a crashed tab loses its slot in ~90 s instead of 60 min.
+
+    Returns ``{alive: false}`` if the voice_session_id is no longer
+    in the owner's active set — the FE should treat that as a hint
+    to stop the local audio + drop the WebRTC PC.
+
+    Scope: ``mint`` (same as reserve/release).
+    """
+    alive = realtime_budget_guard.refresh_lease(
+        profile_id=grant.profile_id,
+        user_id=grant.sub,
+        voice_session_id=body.voice_session_id,
+    )
+    return {
+        "alive": alive,
+        "voice_session_id": body.voice_session_id,
+    }
+
+
 @router.post("/realtime/session/end")
 async def realtime_session_end(
     body: RealtimeSessionEndRequest,

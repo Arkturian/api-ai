@@ -69,12 +69,18 @@ RESERVATIONS_PATH = Path("/var/lib/api-ai/realtime_reservations.json")
 # Real usage is metered via ``/realtime/usage`` posts.
 MIN_SESSION_RESERVE_EUR = 0.50
 
-# Sessions that haven't received a usage update within this window are
-# treated as orphaned (browser tab crashed, network died, user walked
-# away without an explicit stop) and reaped on the next reserve. The
-# 60 minutes here mirrors OpenAI's hard Realtime session cap — past
-# that, no real WebRTC connection can still be running anyway.
-SESSION_REAP_SEC = 60 * 60
+# Sessions whose last activity (mint, heartbeat, or usage charge) is
+# older than this window are treated as orphaned (browser tab crashed,
+# network died, user walked away without an explicit stop) and reaped
+# on the next reserve. The default 60 minutes mirrors OpenAI's hard
+# Realtime session cap — past that, no real WebRTC can still be
+# running anyway.
+#
+# Once CloudV2 ships the 30 s heartbeat lease (Content-Post #1215,
+# Alex' device-switch gap), operators should set
+# ``REALTIME_REAP_SECONDS=90`` so a phantom slot from a crashed tab
+# frees within ~90 s, not 60 min.
+SESSION_REAP_SEC = int(os.environ.get("REALTIME_REAP_SECONDS", str(60 * 60)))
 
 
 # ── Exceptions ────────────────────────────────────────────────────────
@@ -367,6 +373,40 @@ def session_ended(reservation: Reservation) -> None:
     ``release_reservation`` but semantically labelled — the session
     succeeded and we're closing it cleanly."""
     release_reservation(reservation)
+
+
+def refresh_lease(
+    profile_id: str,
+    user_id: str,
+    voice_session_id: str,
+) -> bool:
+    """Heartbeat: reset the session's last-activity timestamp to now.
+
+    Returns True if the voice_session_id is in the owner's active set
+    and was refreshed; False if it wasn't found (already reaped,
+    released, or belongs to another user). Idempotent and cheap; the
+    FE pings this every ~30 s so the orphan-reap window (typically
+    ~90 s once REALTIME_REAP_SECONDS=90 is set) catches a crashed tab
+    inside 1-2 heartbeat cycles.
+    """
+    now = time.time()
+    with _locked_state() as state:
+        pv = state.get("profiles", {}).get(profile_id)
+        if not pv:
+            return False
+        uv = pv.get("users", {}).get(user_id)
+        if not uv:
+            return False
+        active = uv.get("active_sessions") or []
+        if voice_session_id not in active:
+            return False
+        started = uv.setdefault("session_started", {})
+        started[voice_session_id] = now
+    logger.debug(
+        "realtime_heartbeat profile=%s user=%s vid=%s",
+        profile_id, user_id[:8], voice_session_id,
+    )
+    return True
 
 
 def release_by_voice_session(
