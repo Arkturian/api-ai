@@ -1634,8 +1634,8 @@ async def mint_realtime_token(
     # validation never leaks a reservation slot. Released on any
     # OpenAI-side mint failure below.
     voice_session_id = (
-        request.voice_session_id
-        or request.session_id
+        request.session_id
+        or request.companion_run_id
         or f"vs_pending_{int(time.time()*1000)}"
     )
     try:
