@@ -1829,14 +1829,15 @@ async def realtime_usage_report(
         # The tracker doesn't expose the per-row cost directly, but for
         # the budget guard we only need ``cost_eur`` of THIS turn. Re-
         # compute it locally — same pricing table, deterministic.
-        per_row_eur = _tracker._cost_for_session(
-            model=report.model,
-            audio_input_tokens=report.audio_input_tokens,
-            audio_output_tokens=report.audio_output_tokens,
-            text_input_tokens=report.text_input_tokens,
-            text_output_tokens=report.text_output_tokens,
-        ).get("cost_eur", 0.0)
+        # NB: _cost_for_session returns a (usd, eur) tuple, NOT a dict.
         try:
+            _cost_usd, per_row_eur = _tracker._cost_for_session(
+                model=report.model,
+                audio_input_tokens=report.audio_input_tokens,
+                audio_output_tokens=report.audio_output_tokens,
+                text_input_tokens=report.text_input_tokens,
+                text_output_tokens=report.text_output_tokens,
+            )
             realtime_budget_guard.confirm_usage_charge(
                 profile_id=grant.profile_id,
                 user_id=grant.sub,
