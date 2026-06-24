@@ -367,3 +367,40 @@ def session_ended(reservation: Reservation) -> None:
     ``release_reservation`` but semantically labelled — the session
     succeeded and we're closing it cleanly."""
     release_reservation(reservation)
+
+
+def release_by_voice_session(
+    profile_id: str,
+    user_id: str,
+    voice_session_id: str,
+) -> bool:
+    """Owner-scoped release by voice_session_id (CloudV2 explicit Stop).
+
+    Drops the session from the owner's active set so a parallel mint
+    from another device can proceed immediately, rather than waiting
+    for the 60-minute orphan reaper.
+
+    Returns True if the session was found and released, False if it
+    wasn't in the owner's active set (idempotent). Other users'
+    sessions are never touched — caller's grant.sub + profile_id pin
+    the scope structurally.
+    """
+    with _locked_state() as state:
+        pv = state.get("profiles", {}).get(profile_id)
+        if not pv:
+            return False
+        uv = pv.get("users", {}).get(user_id)
+        if not uv:
+            return False
+        active = uv.get("active_sessions") or []
+        if voice_session_id not in active:
+            return False
+        uv["active_sessions"] = [s for s in active if s != voice_session_id]
+        started = uv.get("session_started") or {}
+        started.pop(voice_session_id, None)
+        uv["session_started"] = started
+    logger.info(
+        "realtime_release_explicit profile=%s user=%s vid=%s",
+        profile_id, user_id[:8], voice_session_id,
+    )
+    return True
