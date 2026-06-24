@@ -52,8 +52,50 @@ import httpx
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Header, Path, UploadFile
 from pydantic import BaseModel, Field
 
+from ..services.realtime_grant_verifier import (
+    GrantError,
+    VerifiedGrant,
+    exchange_and_verify,
+    host_profile_id,
+    service_key_configured,
+)
+
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+
+def require_realtime_grant(scope: str):
+    """FastAPI dependency factory: turn ``Authorization: Bearer <user-JWT>``
+    into a ``VerifiedGrant`` carrying the right scope, or raise the
+    appropriate HTTPException with the closed-enum error code.
+
+    Usage on a route:
+        @router.post("/realtime/token")
+        async def mint(grant: VerifiedGrant = Depends(require_realtime_grant("mint"))):
+            ...
+    """
+
+    async def _dep(authorization: Optional[str] = Header(None)) -> VerifiedGrant:
+        if not authorization or not authorization.lower().startswith("bearer "):
+            raise HTTPException(
+                status_code=401,
+                detail={"error": "realtime_user_jwt_required"},
+            )
+        try:
+            grant = await exchange_and_verify(authorization, required_scope=scope)
+        except GrantError as exc:
+            # Public error code only — audit_detail goes to logger.
+            logger.warning(
+                "realtime_grant deny scope=%s code=%s detail=%s",
+                scope, exc.error_code, exc.audit_detail,
+            )
+            raise HTTPException(
+                status_code=exc.status_code,
+                detail={"error": exc.error_code},
+            ) from exc
+        return grant
+
+    return _dep
 
 
 # ── Models ────────────────────────────────────────────────────────────
@@ -1406,14 +1448,29 @@ async def voice_clone(
 async def mint_realtime_token(
     request: RealtimeTokenRequest,
     api_key: str = Depends(get_api_key),
+    grant: VerifiedGrant = Depends(require_realtime_grant("mint")),
 ):
     """Mint a short-lived Realtime session token.
 
     Provider switch: 'openai' returns an OpenAI ephemeral ``client_secret``
     plus the resolved model and tool list. 'elevenlabs' returns a signed
     WebSocket URL pointing at a pre-created Conv. AI agent.
+
+    Auth: the browser sends its User-JWT in ``Authorization: Bearer``.
+    api-ai performs the server-to-server grant exchange with auth-api
+    (Content-Post #1215 frozen v1 Auth-Contract) and verifies the
+    capability JWT locally before minting. Wrong profile / disabled
+    user / missing limits all fail closed at the dependency.
     """
     _check_realtime_billing_gate(request.confirm_api_billing)
+    # Limits attached to the verified grant — daily_budget_eur and
+    # max_parallel_sessions are enforced by the cost-tracker refit
+    # (follow-up PR; this PR ships the grant + scope guard).
+    logger.info(
+        "realtime mint: profile=%s tenant=%s budget_eur=%.2f max_parallel=%d",
+        grant.profile_id, grant.tenant_id,
+        grant.daily_budget_eur, grant.max_parallel_sessions,
+    )
 
     provider = (request.provider or DEFAULT_PROVIDER).lower()
     if provider not in SUPPORTED_PROVIDERS:
@@ -1691,7 +1748,10 @@ async def reset_realtime_hard_cap(api_key: str = Depends(get_api_key)):
 
 
 @router.post("/realtime/usage")
-async def realtime_usage_report(report: RealtimeUsageReport):
+async def realtime_usage_report(
+    report: RealtimeUsageReport,
+    grant: VerifiedGrant = Depends(require_realtime_grant("usage")),
+):
     """Browser-reported usage callback.
 
     OpenAI Realtime emits ``response.done`` events with a usage block:
@@ -1710,8 +1770,10 @@ async def realtime_usage_report(report: RealtimeUsageReport):
     Response carries ``deduped: bool`` so the client can mark the
     record acked in its pending queue.
 
-    No auth gate — the cost tracker is the source of truth, and
-    over-reporting only hurts the caller's own cap.
+    Auth: the user must hold a valid grant with the ``usage`` scope.
+    Post-revoke usage callbacks are rejected with 403 (Codex' v1
+    revocation contract: revoke-next-mint, and every protected
+    endpoint exchanges per request).
     """
     from ..services.openai_realtime_cost_tracker import openai_realtime_cost_tracker
     result = openai_realtime_cost_tracker.track_session(
@@ -1824,25 +1886,30 @@ def _check_dev_secret(header_secret: Optional[str]) -> None:
 @router.post("/realtime/devlog")
 async def realtime_devlog_upsert(
     body: DevlogUpsertRequest,
-    authorization: Optional[str] = Header(None),
+    grant: VerifiedGrant = Depends(require_realtime_grant("devlog")),
 ):
     """Upsert a narration log for a voice session (CloudV2 capture).
 
-    Auth: ``Authorization: Bearer <JWT>`` — the JWT's ``email`` or
-    ``sub`` claim is extracted (without signature verification) and
-    used as the owner key for storage bucketing. Missing/invalid JWT
-    is allowed (owner = anonymous), but per-operator analysis won't
-    work for those sessions.
+    Auth: ``Authorization: Bearer <user-JWT>`` exchanged via the
+    auth-api grant flow; the verified grant carries the stable
+    ``sub`` (user_id UUID) plus ``tenant_id`` and ``profile_id``.
+    Owner-bucket is derived from grant claims, NOT from a best-effort
+    JWT decode (the previous v0 behavior). Sessions owned by a user
+    whose grant has been revoked can no longer write.
 
     Behaviour: full-document overwrite keyed by ``voice_session_id``
     inside the owner's bucket. CloudV2 re-POSTs the growing transcript
     every ~2.5 s and on stop; the latest payload always wins.
     """
-    owner = _extract_owner_from_jwt(authorization)
-    path = _devlog_path(owner, body.voice_session_id)
+    # Stable-id owner bucket — Codex Punkt 5 (no email-as-primary-key).
+    owner_key = f"{grant.sub}:{grant.tenant_id}:{grant.profile_id}"
+    path = _devlog_path(owner_key, body.voice_session_id)
     record = {
         "voice_session_id": body.voice_session_id,
-        "owner": owner,
+        "owner": owner_key,
+        "owner_sub": grant.sub,
+        "owner_tenant": grant.tenant_id,
+        "owner_profile": grant.profile_id,
         "agent": body.agent,
         "started_at": body.started_at,
         "ended_at": body.ended_at,
@@ -1980,6 +2047,47 @@ async def realtime_devlog_delete(
             os.remove(candidate)
             return {"deleted": True, "voice_session_id": voice_session_id}
     raise HTTPException(status_code=404, detail={"error": "devlog_not_found"})
+
+
+# ── Config-Health (admin-gated, no key metadata) ──────────────────────
+
+
+@router.get("/realtime/config-health")
+async def realtime_config_health(
+    x_dev_secret: Optional[str] = Header(None),
+):
+    """Minimal admin-scoped readiness check for the per-host realtime
+    auth configuration. Codex' Test 8 (Post #1215) — proves the host
+    is bound to its billing profile and the grant-verifier chain is
+    wired without leaking any key metadata.
+
+    Auth: ``X-Dev-Secret`` — same admin-secret as the devlog read
+    endpoints. If unset on the host, all calls 503.
+
+    Returned shape (Codex-pinned minimum):
+      * profile_id              — this host's REALTIME_PROFILE_ID
+      * key_configured          — REALTIME_GRANT_SERVICE_KEY present
+      * grant_verifier_ready    — both pinned envs are set
+      * cost_tracker_namespace  — profile_id, mirrors the future
+                                  per-profile tracker file suffix
+      * secret_version          — opaque, set by ops; empty if not
+                                  rotated yet
+
+    NO key fingerprints, NO key prefixes, NO algorithmic identifiers
+    from the key bytes. The audit signal is binary.
+    """
+    _check_dev_secret(x_dev_secret)
+    profile = host_profile_id()
+    key_ok = service_key_configured()
+    return {
+        "profile_id": profile,
+        "key_configured": key_ok,
+        "grant_verifier_ready": bool(profile and key_ok),
+        "cost_tracker_namespace": profile or "",
+        "secret_version": os.environ.get(
+            "REALTIME_GRANT_SECRET_VERSION", ""
+        ),
+    }
 
 
 # ── Tool-routing proxy ────────────────────────────────────────────────
