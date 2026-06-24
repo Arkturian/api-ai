@@ -41,6 +41,7 @@ so the browser only ever decides routing, not whether a tool exists.
 """
 from __future__ import annotations
 
+import fcntl
 import logging
 import json
 import os
@@ -240,6 +241,60 @@ class RealtimeUsageReport(BaseModel):
             "server dedupes on (voice_session_id, usage_event_id), so "
             "retries + final flushes never double-count."
         ),
+    )
+
+
+class DevlogLine(BaseModel):
+    """One narration-log line. Schema mirrors what CloudV2's FE captures
+    per Realtime turn (Content-Post #1215, narration analysis fenster).
+
+    ``role`` is the lane the line came from on the client side:
+      * ``fed``   — feed item sent into the model
+      * ``voice`` — model output (Realtime audio/text)
+      * ``you``   — operator (whisper-transcribed utterance)
+    ``kind`` mirrors the context-segment context_kind enum.
+    """
+
+    ts: Optional[Any] = None  # ISO string or epoch ms — kept opaque
+    role: Optional[str] = None
+    kind: Optional[str] = None
+    agent: Optional[str] = None
+    epoch: Optional[int] = None
+    seg: Optional[int] = None
+    text: Optional[str] = None
+
+
+class DevlogUpsertRequest(BaseModel):
+    """Body for ``POST /ai/realtime/devlog`` — CloudV2 narration capture.
+
+    Per CloudV2 contract (Content-Post #1215): the client re-POSTs the
+    growing transcript every ~2.5 s (debounced) and on stop. The server
+    upserts by ``voice_session_id`` so the latest payload always wins.
+
+    Storage is dev-only, owner-scoped via the bearer-JWT email claim,
+    and purgeable via DELETE. The FE-toggle ships off-by-default; this
+    endpoint accepts whatever it gets without minting policy.
+    """
+
+    voice_session_id: str = Field(
+        ...,
+        description="Stable id for the whole WebRTC voice session.",
+    )
+    agent: Optional[str] = Field(
+        default=None,
+        description="Name of the agent the operator is focused on.",
+    )
+    started_at: Optional[Any] = Field(
+        default=None,
+        description="Epoch-ms or ISO when the capture started.",
+    )
+    ended_at: Optional[Any] = Field(
+        default=None,
+        description="Epoch-ms or ISO when the capture finished (null mid-run).",
+    )
+    lines: List[DevlogLine] = Field(
+        default_factory=list,
+        description="Captured lines so far. Whole-list overwrite.",
     )
 
 
@@ -1673,6 +1728,258 @@ async def realtime_usage_report(report: RealtimeUsageReport):
     status["deduped"] = bool(result and result.get("deduped"))
     status["accepted"] = bool(result and result.get("accepted"))
     return status
+
+
+# ── Dev Narration-Log (CloudV2, Post #1215) ───────────────────────────
+
+
+DEVLOG_ROOT = "/var/lib/api-ai/devlogs"
+DEVLOG_SECRET_ENV = "DEVLOG_DEV_SECRET"
+
+
+def _extract_owner_from_jwt(authorization: Optional[str]) -> Optional[str]:
+    """Best-effort owner extraction from a Bearer JWT.
+
+    We do NOT verify the signature — api-ai has no shared signing key
+    with CloudV2's auth system. The owner string is used purely to
+    bucket per-owner storage so a careless operator can't read another
+    operator's logs by guessing a voice_session_id. The dev-secret-
+    gated GET path is the actual authority for cross-owner reads.
+
+    Returns the ``email`` or ``sub`` claim from the JWT payload, or
+    None if no usable claim is present.
+    """
+    if not authorization:
+        return None
+    parts = authorization.split()
+    if len(parts) != 2 or parts[0].lower() != "bearer":
+        return None
+    token = parts[1]
+    try:
+        payload_b64 = token.split(".")[1]
+        # base64url decode (no padding needed by standard lib if we pad)
+        import base64
+        pad = "=" * (-len(payload_b64) % 4)
+        payload_json = base64.urlsafe_b64decode(payload_b64 + pad)
+        claims = json.loads(payload_json)
+    except Exception:
+        return None
+    return claims.get("email") or claims.get("sub")
+
+
+def _owner_bucket(owner: Optional[str]) -> str:
+    """Return a stable per-owner directory name.
+
+    We hash the owner identifier so the on-disk path doesn't contain
+    PII. The dev-secret read endpoints get the original owner back
+    inside each session's JSON payload.
+    """
+    import hashlib
+    src = (owner or "anonymous").encode("utf-8")
+    return hashlib.sha256(src).hexdigest()[:16]
+
+
+def _devlog_dir(owner: Optional[str]) -> str:
+    bucket = _owner_bucket(owner)
+    path = os.path.join(DEVLOG_ROOT, bucket)
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+def _devlog_path(owner: Optional[str], voice_session_id: str) -> str:
+    # Voice session ids are FE-generated and used as path component —
+    # constrain to a safe character class so a malformed id can't escape
+    # the per-owner bucket.
+    import re
+    safe = re.sub(r"[^A-Za-z0-9_.\-]", "_", voice_session_id)
+    return os.path.join(_devlog_dir(owner), f"{safe}.json")
+
+
+def _check_dev_secret(header_secret: Optional[str]) -> None:
+    """Gate the read/delete endpoints behind the configured dev secret.
+
+    The secret is read from env (``DEVLOG_DEV_SECRET``). If unset, the
+    endpoint refuses all requests — never accidentally world-readable.
+    """
+    expected = os.environ.get(DEVLOG_SECRET_ENV)
+    if not expected:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "error": "devlog_dev_secret_unset",
+                "hint": (
+                    "Set DEVLOG_DEV_SECRET in the api-ai environment to "
+                    "enable read/delete endpoints. Without it, dev logs "
+                    "are write-only — CloudV2 can post but no one can read."
+                ),
+            },
+        )
+    if not header_secret or header_secret != expected:
+        raise HTTPException(
+            status_code=403,
+            detail={"error": "devlog_invalid_dev_secret"},
+        )
+
+
+@router.post("/realtime/devlog")
+async def realtime_devlog_upsert(
+    body: DevlogUpsertRequest,
+    authorization: Optional[str] = Header(None),
+):
+    """Upsert a narration log for a voice session (CloudV2 capture).
+
+    Auth: ``Authorization: Bearer <JWT>`` — the JWT's ``email`` or
+    ``sub`` claim is extracted (without signature verification) and
+    used as the owner key for storage bucketing. Missing/invalid JWT
+    is allowed (owner = anonymous), but per-operator analysis won't
+    work for those sessions.
+
+    Behaviour: full-document overwrite keyed by ``voice_session_id``
+    inside the owner's bucket. CloudV2 re-POSTs the growing transcript
+    every ~2.5 s and on stop; the latest payload always wins.
+    """
+    owner = _extract_owner_from_jwt(authorization)
+    path = _devlog_path(owner, body.voice_session_id)
+    record = {
+        "voice_session_id": body.voice_session_id,
+        "owner": owner,
+        "agent": body.agent,
+        "started_at": body.started_at,
+        "ended_at": body.ended_at,
+        "line_count": len(body.lines),
+        "lines": [line.dict(exclude_none=True) for line in body.lines],
+        "received_at": time.time(),
+    }
+    tmp_path = path + ".tmp"
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+        try:
+            json.dump(record, f, ensure_ascii=False)
+        finally:
+            fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+    os.replace(tmp_path, path)
+    logger.info(
+        "Devlog upsert: voice_session_id=%s owner=%s lines=%d",
+        body.voice_session_id, owner or "anonymous", len(body.lines),
+    )
+    return {
+        "accepted": True,
+        "voice_session_id": body.voice_session_id,
+        "owner": owner,
+        "line_count": len(body.lines),
+    }
+
+
+@router.get("/realtime/devlogs")
+async def realtime_devlogs_list(
+    since: Optional[float] = None,
+    owner: Optional[str] = None,
+    x_dev_secret: Optional[str] = Header(None),
+):
+    """List captured dev logs (dev-secret-gated).
+
+    Returns one summary per session: ``voice_session_id``, ``owner``,
+    ``agent``, timestamps, ``line_count``, and the file ``mtime``.
+
+    Filter:
+      * ``since`` — epoch seconds; only logs whose ``received_at`` is
+        newer than this are returned.
+      * ``owner`` — restrict to a specific owner identifier.
+    """
+    _check_dev_secret(x_dev_secret)
+    if not os.path.isdir(DEVLOG_ROOT):
+        return {"sessions": [], "count": 0}
+    target_bucket = _owner_bucket(owner) if owner is not None else None
+    out: List[dict] = []
+    for bucket_name in os.listdir(DEVLOG_ROOT):
+        if target_bucket and bucket_name != target_bucket:
+            continue
+        bucket_path = os.path.join(DEVLOG_ROOT, bucket_name)
+        if not os.path.isdir(bucket_path):
+            continue
+        for fname in os.listdir(bucket_path):
+            if not fname.endswith(".json"):
+                continue
+            fpath = os.path.join(bucket_path, fname)
+            try:
+                with open(fpath, "r", encoding="utf-8") as f:
+                    rec = json.load(f)
+            except Exception:
+                continue
+            if since is not None and rec.get("received_at", 0) < since:
+                continue
+            out.append({
+                "voice_session_id": rec.get("voice_session_id"),
+                "owner": rec.get("owner"),
+                "agent": rec.get("agent"),
+                "started_at": rec.get("started_at"),
+                "ended_at": rec.get("ended_at"),
+                "line_count": rec.get("line_count", 0),
+                "received_at": rec.get("received_at"),
+            })
+    out.sort(key=lambda r: r.get("received_at") or 0, reverse=True)
+    return {"sessions": out, "count": len(out)}
+
+
+@router.get("/realtime/devlog/{voice_session_id}")
+async def realtime_devlog_get(
+    voice_session_id: str = Path(...),
+    owner: Optional[str] = None,
+    x_dev_secret: Optional[str] = Header(None),
+):
+    """Read the full transcript of a single voice session.
+
+    The dev secret is required. If ``owner`` is omitted, the endpoint
+    walks every owner bucket and returns the first match — convenient
+    for the dev-mode case but slow on large stores; pass ``owner`` when
+    you already know it.
+    """
+    _check_dev_secret(x_dev_secret)
+    if owner is not None:
+        path = _devlog_path(owner, voice_session_id)
+        if not os.path.isfile(path):
+            raise HTTPException(status_code=404, detail={"error": "devlog_not_found"})
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    # No owner hint — scan
+    import re
+    safe = re.sub(r"[^A-Za-z0-9_.\-]", "_", voice_session_id)
+    target_fname = f"{safe}.json"
+    if not os.path.isdir(DEVLOG_ROOT):
+        raise HTTPException(status_code=404, detail={"error": "devlog_not_found"})
+    for bucket_name in os.listdir(DEVLOG_ROOT):
+        candidate = os.path.join(DEVLOG_ROOT, bucket_name, target_fname)
+        if os.path.isfile(candidate):
+            with open(candidate, "r", encoding="utf-8") as f:
+                return json.load(f)
+    raise HTTPException(status_code=404, detail={"error": "devlog_not_found"})
+
+
+@router.delete("/realtime/devlog/{voice_session_id}")
+async def realtime_devlog_delete(
+    voice_session_id: str = Path(...),
+    owner: Optional[str] = None,
+    x_dev_secret: Optional[str] = Header(None),
+):
+    """Purge a single session's transcript (dev-secret-gated)."""
+    _check_dev_secret(x_dev_secret)
+    if owner is not None:
+        path = _devlog_path(owner, voice_session_id)
+        if os.path.isfile(path):
+            os.remove(path)
+            return {"deleted": True, "voice_session_id": voice_session_id}
+        raise HTTPException(status_code=404, detail={"error": "devlog_not_found"})
+    import re
+    safe = re.sub(r"[^A-Za-z0-9_.\-]", "_", voice_session_id)
+    target_fname = f"{safe}.json"
+    if not os.path.isdir(DEVLOG_ROOT):
+        raise HTTPException(status_code=404, detail={"error": "devlog_not_found"})
+    for bucket_name in os.listdir(DEVLOG_ROOT):
+        candidate = os.path.join(DEVLOG_ROOT, bucket_name, target_fname)
+        if os.path.isfile(candidate):
+            os.remove(candidate)
+            return {"deleted": True, "voice_session_id": voice_session_id}
+    raise HTTPException(status_code=404, detail={"error": "devlog_not_found"})
 
 
 # ── Tool-routing proxy ────────────────────────────────────────────────
