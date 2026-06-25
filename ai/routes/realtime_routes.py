@@ -215,6 +215,14 @@ class RealtimeTokenRequest(BaseModel):
             "turn_detection disabled so the FE drives every "
             "response.create after release. P1 ships with no tools; "
             "P2 swaps in the Guide knowledge tool. "
+            "'agent-transparent' = first-person transparent relay "
+            "(Content-Post #1235): the model speaks AS the focused "
+            "agent, not about it. Lightweight relay_to_agent tool "
+            "(text+session_id+pair_id), Cloud's /relays gate runs "
+            "focus + cap checks without a human confirm loop. Agent "
+            "responses come back via context_kind=agent_voice_response "
+            "and are voiced as the model's own voice via pair_id "
+            "threading. "
             "Null = legacy / generic realtime token."
         ),
     )
@@ -571,8 +579,9 @@ SUPPORTED_COMPANION_MODES = {
     "talkback-enabled",
     "agentos-narrator",
     "guide-ptt",
+    "agent-transparent",
 }
-SUPPORTED_DETAIL_LEVELS = {"brief", "balanced", "technical"}
+SUPPORTED_DETAIL_LEVELS = {"brief", "balanced", "technical", "flowing"}
 
 
 def _detail_level_addendum(detail_level: str) -> str:
@@ -603,6 +612,19 @@ def _detail_level_addendum(detail_level: str) -> str:
             "z.B. eine Funktion umbaut, sag 'Er ändert refresh_token in "
             "auth.py:fetch_credentials von blocking zu async'. Frequenz: "
             "1 Satz alle 3-8s ist OK, bei dichter Aktivität auch öfter."
+        )
+    if detail_level == "flowing":
+        return (
+            "\n\nDETAIL-LEVEL: flowing.\n"
+            "Konversationeller, anhaltender Erzählfluss. Sprich in "
+            "ganzen Sätzen mit weichen Übergängen, keine Stakkato-"
+            "Updates und keine isolierten Status-Marker. Verbinde "
+            "aufeinanderfolgende Beobachtungen mit Verbindungswörtern "
+            "('während', 'dann', 'gleichzeitig'), so dass es sich wie "
+            "ein durchgehender mündlicher Bericht anhört, nicht wie "
+            "Funkprotokoll. Tempo: alle 4-10 Sekunden ein Satz; bei "
+            "dichter Aktivität flüssig dranbleiben, bei Stille nicht "
+            "zwanghaft Lücken füllen — eine Pause ist Teil des Flows."
         )
     # balanced (default)
     return (
@@ -1162,6 +1184,150 @@ def _companion_talkback_tools() -> List[dict]:
     ]
 
 
+def _companion_relay_tools() -> List[dict]:
+    """Single relay_to_agent tool for the agent-transparent mode.
+
+    Content-Post #1235 contract (CloudV2 + Cloud + AiApi aligned):
+
+      * Smaller than ``propose_to_agent`` — no rationale, no
+        danger_class. The model is NOT proposing; it is relaying
+        what the operator just said.
+      * Server-side gate at Cloud's POST
+        /api/voice/realtime/relays — focus-bound access check +
+        cap check, no human confirm loop. The gate may still
+        deny on focus-mismatch or cap-exceed.
+      * The browser threads the eventual agent response back into
+        the model context as ``context_kind=agent_voice_response``
+        with the same ``pair_id`` (see the prompt below).
+    """
+    return [
+        {
+            "type": "function",
+            "name": "relay_to_agent",
+            "description": (
+                "Relay what the operator just said directly to the "
+                "focused agent, transparent first-person passthrough. "
+                "NOT a proposal — there is no operator confirm loop. "
+                "The server-side gate still runs (focus check + cap "
+                "check) and may return gate=denied; if it does, voice "
+                "the denial in first person, never silent-drop, never "
+                "retry. On gate=auto_ok the agent's response arrives "
+                "asynchronously over the narration feed as an "
+                "agent_voice_response with the same pair_id — speak "
+                "that response as your own voice when it lands."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "text": {
+                        "type": "string",
+                        "description": (
+                            "What the operator said, in the agent's "
+                            "expected language. Paraphrase only when "
+                            "needed for clarity; do not editorialise."
+                        ),
+                    },
+                    "session_id": {
+                        "type": "string",
+                        "description": (
+                            "The focused agent's session id (from "
+                            "session context at start). The gate will "
+                            "deny if this no longer matches the "
+                            "operator focus."
+                        ),
+                    },
+                    "pair_id": {
+                        "type": "string",
+                        "description": (
+                            "A short id you generate for this relay. "
+                            "The agent_voice_response that comes back "
+                            "will carry the same pair_id so you can "
+                            "thread it correctly even with multiple "
+                            "relays in flight."
+                        ),
+                    },
+                },
+                "required": ["text", "session_id", "pair_id"],
+            },
+        }
+    ]
+
+
+def _companion_agent_transparent_prompt(language: str = "de") -> str:
+    """Agent-transparent companion (Content-Post #1235).
+
+    The model speaks IN THE FIRST PERSON as if it were the focused
+    agent. It does not narrate ABOUT the agent in third person; it
+    speaks AS the agent. Operator speech is relayed verbatim via
+    relay_to_agent, and the agent's reply is voiced back as the
+    model's own voice via the agent_voice_response context kind.
+
+    Same VAD posture as talkback-enabled (server_vad strict) because
+    the operator drives most turns by speaking.
+    """
+    lang_name = {
+        "de": "German", "sl": "Slovenian",
+        "it": "Italian", "en": "English",
+    }.get(language, "German")
+    return (
+        "Du bist die transparente Stimme eines fokussierten "
+        "Federation-Agenten. Du sprichst in der ERSTEN PERSON als "
+        "wärst du dieser Agent — nicht als externer Beobachter, der "
+        "in dritter Person über ihn berichtet. Wenn der fokussierte "
+        "Agent 'Storage' heißt und Inhalt produziert, sagst du nicht "
+        "'Storage meldet, dass …', sondern 'ich habe gerade …'. Wenn "
+        "kein Inhalt da ist, schweig — erfinde keinen.\n\n"
+        f"Sprache: {lang_name} (Default). Mirror die Sprache des "
+        "Operators wenn er wechselt.\n\n"
+        "WIE EIN OPERATOR-TURN ABLÄUFT:\n"
+        "  1. Operator spricht. Du parsest die Intention.\n"
+        "  2. Du rufst relay_to_agent(text, session_id, pair_id) auf. "
+        "Generiere `pair_id` neu pro Relay (z.B. uuid4-Prefix). "
+        "Paraphrasiere `text` nur wenn der Agent es zum Verstehen "
+        "wirklich braucht; sonst wörtlich.\n"
+        "  3. Du wartest auf den function_call_output:\n"
+        "       * `{\"gate\":\"auto_ok\",\"pair_id\":\"...\"}` → "
+        "Relay ist durch. Sag knapp 'ok, weitergegeben' oder schweig "
+        "kurz, bis die Agent-Antwort kommt.\n"
+        "       * `{\"gate\":\"denied\",\"reason\":\"...\",\"pair_id\":\"...\"}` "
+        "→ **NIE silent-drop, NIE retry**. Sprich die Ablehnung in "
+        "1. Person aus, z.B. 'das darf ich gerade nicht weiterleiten "
+        "— mein Operator-Fokus liegt woanders' oder 'ich bin gerade "
+        "über meinem Cap'. Der Operator hat das Recht zu wissen "
+        "warum.\n"
+        "  4. Die Agent-Antwort kommt asynchron als "
+        "`context_kind=agent_voice_response` mit derselben `pair_id` "
+        "über den Narration-Feed rein. Sobald du sie siehst, sprich "
+        "den Payload als DEINE EIGENE STIMME aus — nicht 'Storage "
+        "sagt jetzt …', sondern direkt das, was Storage gesagt hat, "
+        "in 1. Person.\n\n"
+        "PAIR-ID-DISZIPLIN:\n"
+        "Mehrere Relays können gleichzeitig in flight sein. Der "
+        "Modell-Context kann mehrere `agent_voice_response`-Items "
+        "tragen. Match IMMER über `pair_id` — sprich nur das, dessen "
+        "`pair_id` zu deinem letzten relay_to_agent-Call gehört. "
+        "Wenn ein `pair_id` reinkommt das du nicht ausgelöst hast, "
+        "ignoriere es (das war ein anderer Relay-Pfad, vermutlich "
+        "stale).\n\n"
+        "WAS NICHT ZU TUN:\n"
+        "  * Nicht in 3. Person über den Agent sprechen. Du BIST "
+        "der Agent für den Operator, nicht über ihn.\n"
+        "  * Nicht selbst antworten ohne Relay. Wenn der Operator "
+        "etwas fragt das an den Agenten gerichtet ist, geht es "
+        "IMMER zuerst durch relay_to_agent. Du bist kein "
+        "autonomer Beantworter, du bist Pass-Through.\n"
+        "  * Nicht halluzinieren wenn `agent_voice_response` noch "
+        "nicht da ist. Lieber kurz schweigen oder 'einen Moment, "
+        "ich frage gerade'.\n"
+        "  * Nicht das `denied`-Result verstecken. Operator surfacing "
+        "ist Pflicht (siehe oben).\n\n"
+        "Stimme: ruhig, präsent, in der Rolle. Wie ein "
+        "Telefonassistent der den Anrufer mit dem richtigen "
+        "Ansprechpartner verbindet — nur dass DU die Verbindung "
+        "bist, nicht der Vermittler dazwischen."
+    )
+
+
 def _default_instructions(language: str = "de", track_id: Optional[int] = None) -> str:
     """System prompt that wires the model into the Federation tool set."""
     track_hint = (
@@ -1568,6 +1734,25 @@ async def mint_realtime_token(
             f"companion_run_id={request.companion_run_id or 'none'} "
             f"({len(instructions)} chars, 0 tools)"
         )
+    elif companion_mode == "agent-transparent":
+        # Content-Post #1235 — first-person transparent relay.
+        # Tool is the lightweight relay_to_agent (no rationale,
+        # no danger_class); the gate at Cloud's /api/voice/realtime/
+        # relays still runs (focus check + cap check, no human
+        # confirm loop). Agent responses come back as
+        # context_kind=agent_voice_response with the same pair_id.
+        instructions = _companion_agent_transparent_prompt(
+            request.language or "de"
+        )
+        instructions += _detail_level_addendum(detail_level)
+        companion_tools_override = _companion_relay_tools()
+        logger.info(
+            f"Realtime: companion_mode=agent-transparent "
+            f"detail_level={detail_level} "
+            f"companion_run_id={request.companion_run_id or 'none'} "
+            f"({len(instructions)} chars, "
+            f"{len(companion_tools_override)} tools)"
+        )
     elif companion_mode == "guide-ptt":
         # GuideDevBot's PTT-Hybrid mint (Content-Post #1233):
         # audio-in on PTT press, audio-out for the answer, on-demand,
@@ -1646,7 +1831,9 @@ async def mint_realtime_token(
     #     server_vad knobs the live tours have been running with.
     if companion_mode in ("agentos-narrator", "narrator-only", "guide-ptt"):
         turn_detection = None  # FE-driven response.create only
-    elif companion_mode == "talkback-enabled":
+    elif companion_mode in ("talkback-enabled", "agent-transparent"):
+        # Operator drives most turns by speaking — strict VAD so room
+        # ambience + whisper-on-silence don't ghost-trigger relays.
         turn_detection = {
             "type": "server_vad",
             "threshold": 0.7,
