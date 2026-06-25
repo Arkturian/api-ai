@@ -202,14 +202,20 @@ class RealtimeTokenRequest(BaseModel):
     companion_mode: Optional[str] = Field(
         default=None,
         description=(
-            "CloudV2 Voice-Companion preset (Content-Post #1215). "
+            "Voice-Companion preset. "
             "'narrator-only' = read-only narrator over the focused agent "
-            "stream, NO tools (the model literally cannot send anything "
-            "to the agent — architecture-level hardening). "
+            "stream, NO tools (Content-Post #1215). "
             "'talkback-enabled' = narrator + propose_to_agent tool with "
             "safety-by-confirm (browser must POST the proposal to Cloud's "
             "/api/voice/realtime/proposals gate). "
-            "Null = legacy / generic realtime token (e.g. Wanderlaut-Guide)."
+            "'agentos-narrator' = ambient AgentOS-Voice over multiple "
+            "agents (Continuous-Flow, Step 1.5). "
+            "'guide-ptt' = GuideDevBot PTT-Hybrid (Content-Post #1233): "
+            "audio-in/out on-demand for a Hold-to-Talk Q&A turn, "
+            "turn_detection disabled so the FE drives every "
+            "response.create after release. P1 ships with no tools; "
+            "P2 swaps in the Guide knowledge tool. "
+            "Null = legacy / generic realtime token."
         ),
     )
     detail_level: Optional[str] = Field(
@@ -564,6 +570,7 @@ SUPPORTED_COMPANION_MODES = {
     "narrator-only",
     "talkback-enabled",
     "agentos-narrator",
+    "guide-ptt",
 }
 SUPPORTED_DETAIL_LEVELS = {"brief", "balanced", "technical"}
 
@@ -1561,6 +1568,26 @@ async def mint_realtime_token(
             f"companion_run_id={request.companion_run_id or 'none'} "
             f"({len(instructions)} chars, 0 tools)"
         )
+    elif companion_mode == "guide-ptt":
+        # GuideDevBot's PTT-Hybrid mint (Content-Post #1233):
+        # audio-in on PTT press, audio-out for the answer, on-demand,
+        # billed against the 30 EUR/month cap. turn_detection is null
+        # below so the FE drives every response.create deliberately;
+        # combined with replaceTrack(null) on the mic sender, this
+        # eliminates the whisper-on-silence hallucinations CloudV2
+        # battle-tested on Step-1 narrator.
+        # P1 ships with no tools; P2 swaps in knowledge_collection_ask
+        # against the Guide knowledge graph.
+        instructions = request.instructions or _default_instructions(
+            language=request.language or "de",
+            track_id=request.track_id,
+        )
+        companion_tools_override = []
+        logger.info(
+            f"Realtime: companion_mode=guide-ptt "
+            f"voice={request.voice or DEFAULT_REALTIME_VOICE} "
+            f"({len(instructions)} chars, 0 tools)"
+        )
     else:
         instructions = request.instructions or _default_instructions(
             language=request.language or "de",
@@ -1617,7 +1644,7 @@ async def mint_realtime_token(
     #     ghost prompts.
     #   * default (Wanderlaut / legacy): the original 0.5/500 ms
     #     server_vad knobs the live tours have been running with.
-    if companion_mode in ("agentos-narrator", "narrator-only"):
+    if companion_mode in ("agentos-narrator", "narrator-only", "guide-ptt"):
         turn_detection = None  # FE-driven response.create only
     elif companion_mode == "talkback-enabled":
         turn_detection = {
