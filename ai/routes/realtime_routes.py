@@ -1327,7 +1327,20 @@ def _companion_agent_transparent_prompt(language: str = "de") -> str:
         "nicht da ist. Lieber kurz schweigen oder 'einen Moment, "
         "ich frage gerade'.\n"
         "  * Nicht das `denied`-Result verstecken. Operator surfacing "
-        "ist Pflicht (siehe oben).\n\n"
+        "ist Pflicht (siehe oben).\n"
+        "  * **ECHO-LOOP-DISZIPLIN (CloudV2-Live-Befund "
+        "vs_GuideDevBot2_95876):** Wenn der vermeintliche "
+        "Operator-Input verdächtig ähnlich klingt zu dem was DU "
+        "gerade gesagt hast (paraphrasiert die letzte Agent-Antwort, "
+        "echote deine letzte Narration, oder ist semantisch ein "
+        "Selbst-Bezug), feure KEIN relay_to_agent. Das ist mit "
+        "höchster Wahrscheinlichkeit Lautsprecher-zu-Mikrofon-"
+        "Rückkopplung, nicht der Operator. Antwort: schweig, oder "
+        "sag knapp 'ich glaube ich höre gerade mich selbst zurück'. "
+        "Niemals selbsterzeugten Output in einen Relay wandeln — "
+        "das ist die self-sustaining Schleife die CloudV2's PTT-"
+        "Gating verhindert; halte diese Disziplin auch dann, wenn "
+        "das Mic-Gating versagt.\n\n"
         "Stimme: ruhig, präsent, in der Rolle. Wie ein "
         "Telefonassistent der den Anrufer mit dem richtigen "
         "Ansprechpartner verbindet — nur dass DU die Verbindung "
@@ -1836,11 +1849,26 @@ async def mint_realtime_token(
     #     ghost prompts.
     #   * default (Wanderlaut / legacy): the original 0.5/500 ms
     #     server_vad knobs the live tours have been running with.
-    if companion_mode in ("agentos-narrator", "narrator-only", "guide-ptt"):
-        turn_detection = None  # FE-driven response.create only
-    elif companion_mode in ("talkback-enabled", "agent-transparent"):
-        # Operator drives most turns by speaking — strict VAD so room
-        # ambience + whisper-on-silence don't ghost-trigger relays.
+    if companion_mode in (
+        "agentos-narrator", "narrator-only",
+        "guide-ptt", "agent-transparent",
+    ):
+        # FE-driven response.create only. agent-transparent shipped
+        # with strict server_vad initially, but CloudV2 caught a
+        # speaker-to-mic feedback loop on the first live test
+        # (vs_GuideDevBot2_95876): the spoken narration leaked back
+        # into the mic, Whisper transcribed the model's own voice as
+        # operator input, the model relayed its own paraphrase, the
+        # relay response narrated again, and around it went. CloudV2's
+        # FE now gates the mic with Push-to-Talk; on the server we
+        # disable server_vad so the only path to response.create is
+        # an explicit FE event after the operator releases the talk
+        # button — no chance for an open mic + room reverb to start
+        # a self-sustaining loop.
+        turn_detection = None
+    elif companion_mode == "talkback-enabled":
+        # talkback still ships with strict VAD — its UX is
+        # conversational with confirm-chip, not PTT.
         turn_detection = {
             "type": "server_vad",
             "threshold": 0.7,
