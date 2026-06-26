@@ -1850,22 +1850,37 @@ async def mint_realtime_token(
     #   * default (Wanderlaut / legacy): the original 0.5/500 ms
     #     server_vad knobs the live tours have been running with.
     if companion_mode in (
-        "agentos-narrator", "narrator-only",
-        "guide-ptt", "agent-transparent",
+        "agentos-narrator", "narrator-only", "guide-ptt",
     ):
-        # FE-driven response.create only. agent-transparent shipped
-        # with strict server_vad initially, but CloudV2 caught a
-        # speaker-to-mic feedback loop on the first live test
-        # (vs_GuideDevBot2_95876): the spoken narration leaked back
-        # into the mic, Whisper transcribed the model's own voice as
-        # operator input, the model relayed its own paraphrase, the
-        # relay response narrated again, and around it went. CloudV2's
-        # FE now gates the mic with Push-to-Talk; on the server we
-        # disable server_vad so the only path to response.create is
-        # an explicit FE event after the operator releases the talk
-        # button — no chance for an open mic + room reverb to start
-        # a self-sustaining loop.
+        # FE-driven response.create only. These modes are explicitly
+        # PTT (guide-ptt) or read-only narration (agentos-narrator,
+        # narrator-only) where the FE controls every turn boundary.
         turn_detection = None
+    elif companion_mode == "agent-transparent":
+        # Originally PR #79 moved this into the `null` group on CloudV2's
+        # request after the first live feedback loop
+        # (vs_GuideDevBot2_95876): speaker → mic → Whisper → relay →
+        # narrate-again. But CloudV2's follow-up live test (Alex'
+        # Session, 2026-06-26) showed the FE never wired PTT for this
+        # mode — the mic stays open (162→314→466 packets streaming),
+        # and with server_vad off the model never sees a turn, never
+        # produces a `you`-transcript, never responds. Flip back to
+        # server_vad with the handy-mic-friendly threshold CloudV2
+        # asked for (0.5 instead of talkback's 0.7).
+        #
+        # Feedback-loop defense moves to defense-in-depth:
+        #   1. ECHO-LOOP-DISZIPLIN in the prompt (model refuses to
+        #      relay self-paraphrases — kept from PR #79).
+        #   2. CloudV2's FE Relay-Target-Guard (no halucinated
+        #      session_id leaves the FE).
+        #   3. Cloud's server-side target_focus_mismatch gate (409
+        #      catches anything that slips past 1+2).
+        turn_detection = {
+            "type": "server_vad",
+            "threshold": 0.5,
+            "prefix_padding_ms": 300,
+            "silence_duration_ms": 1000,
+        }
     elif companion_mode == "talkback-enabled":
         # talkback still ships with strict VAD — its UX is
         # conversational with confirm-chip, not PTT.
