@@ -42,15 +42,51 @@ from __future__ import annotations
 
 import logging
 import os
+import ssl
 import time
 from dataclasses import dataclass
 from typing import Any, List, Optional
 
+import certifi
 import httpx
 import jwt
 from jwt import PyJWKClient
 
 logger = logging.getLogger(__name__)
+
+
+# ── Shared SSL context ───────────────────────────────────────────────
+#
+# Build the TLS verify context ONCE at module import and reuse it for
+# every grant-exchange. Two reasons:
+#
+# 1. Deploy-race resilience. The verifier's hot path used to do
+#    ``httpx.AsyncClient(timeout=...)`` per call, which makes httpx
+#    rebuild an ``ssl.SSLContext`` and re-read certifi's cacert.pem
+#    from disk every time. A pip install during deploy briefly
+#    unlinks-and-replaces that file; any concurrent grant exchange
+#    in that ~hundreds-of-ms window hits ``FileNotFoundError`` ->
+#    unhandled 500. Observed live 2026-06-27 13:48:38 UTC+2, the
+#    exact second the deploy of PR #86 ran ``pip install`` (cacert.pem
+#    mtime 13:48:52 = unlink-then-rewrite, hit by GuideDevBot2's
+#    session_id 679). Loading the CA bundle into memory at module
+#    import means subsequent calls never touch disk for verification.
+#
+# 2. Tiny perf win. SSL context construction is non-trivial; one-time
+#    cost beats per-call.
+#
+# We try certifi first (matches httpx's default), fall back to the
+# system default if certifi is somehow unavailable. ``None`` means
+# httpx will fall back to its own context — which would re-introduce
+# the race; the fallback is just to never break, never to be reached
+# in a healthy deploy.
+try:
+    _SHARED_SSL_CONTEXT: Optional[ssl.SSLContext] = ssl.create_default_context(
+        cafile=certifi.where()
+    )
+except Exception as _exc:  # pragma: no cover — only if certifi is broken
+    logger.warning("realtime_grant: shared ssl context init failed: %s", _exc)
+    _SHARED_SSL_CONTEXT = None
 
 
 # ── Configuration ─────────────────────────────────────────────────────
@@ -221,8 +257,15 @@ async def _exchange_user_jwt_for_grant(authorization_header: str) -> dict:
         "Authorization": authorization_header,
         SERVICE_KEY_HEADER: service_key,
     }
+    # Reuse the module-level SSL context so a concurrent deploy
+    # rewriting certifi/cacert.pem can't unlink the verify file out
+    # from under us mid-request. See the _SHARED_SSL_CONTEXT comment.
+    verify: Any = _SHARED_SSL_CONTEXT if _SHARED_SSL_CONTEXT is not None else True
     try:
-        async with httpx.AsyncClient(timeout=GRANT_TIMEOUT_SEC) as client:
+        async with httpx.AsyncClient(
+            timeout=GRANT_TIMEOUT_SEC,
+            verify=verify,
+        ) as client:
             resp = await client.post(GRANT_URL, headers=headers)
     except (httpx.ConnectError, httpx.ReadTimeout, httpx.RemoteProtocolError) as exc:
         raise AuthDown(f"grant exchange transport: {type(exc).__name__}") from exc
