@@ -240,8 +240,25 @@ async def _exchange_user_jwt_for_grant(authorization_header: str) -> dict:
         except Exception:
             body_preview = ""
         key_suffix = service_key[-6:] if service_key else ""
+        # Auth's b288468 (2026-06-27, Wanderlaut/dev-mint expiry incident
+        # follow-up) distinguishes ``expired_token`` from the generic
+        # ``invalid_token`` in the 401 body. Map that distinction into
+        # our closed enum so clients can self-heal: a refresh+retry path
+        # for ``realtime_grant_expired_token`` vs a full re-auth flow for
+        # ``realtime_grant_unauthorized``. We parse the body defensively
+        # — if it doesn't decode, fall back to the generic code.
+        public_code = "realtime_grant_unauthorized"
+        try:
+            body_json = resp.json()
+            detail = body_json.get("detail")
+            if isinstance(detail, str) and detail == "expired_token":
+                public_code = "realtime_grant_expired_token"
+            elif isinstance(detail, dict) and detail.get("error") == "expired_token":
+                public_code = "realtime_grant_expired_token"
+        except Exception:
+            pass
         raise GrantDenied(
-            "realtime_grant_unauthorized",
+            public_code,
             f"auth-api 401 body={body_preview!r} jwt[{peek}] key_suffix=...{key_suffix}",
             status_code=401,
         )
