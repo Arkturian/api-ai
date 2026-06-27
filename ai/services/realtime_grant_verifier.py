@@ -174,6 +174,43 @@ def _jwks() -> PyJWKClient:
 # ── Server-to-server grant exchange ───────────────────────────────────
 
 
+def _unsafe_peek_jwt_claims(authorization_header: str) -> str:
+    """Decode-without-verify of the forwarded Bearer to extract diagnostic
+    claims (sub/kid/exp/iss) for redacted logging on deny paths.
+
+    NEVER trust these values for authorization. The whole purpose of the
+    server-to-server grant exchange is that auth-api is the only thing
+    that *verifies* the JWT. This helper exists only so a 401 from
+    auth-api carries enough fingerprint for cross-correlating with
+    auth-api's own audit log.
+
+    Returns a short, log-safe string like
+    ``sub=74e8e363 kid=auth-primary exp_in=84s iss=auth-api.arkturian.com``.
+    Returns an empty string on any decode failure — never raises.
+    """
+    try:
+        if not authorization_header or not authorization_header.lower().startswith("bearer "):
+            return ""
+        token = authorization_header.split(None, 1)[1].strip()
+        header = jwt.get_unverified_header(token)
+        claims = jwt.decode(token, options={"verify_signature": False})
+        sub = str(claims.get("sub") or "")
+        iss = str(claims.get("iss") or "")
+        kid = str(header.get("kid") or "")
+        exp = claims.get("exp")
+        now = int(time.time())
+        if isinstance(exp, (int, float)):
+            exp_in = int(exp) - now
+            exp_str = f"exp_in={exp_in}s"
+        else:
+            exp_str = "exp=?"
+        return (
+            f"sub={sub[:8]} kid={kid} {exp_str} iss={iss}"
+        ).strip()
+    except Exception:
+        return ""
+
+
 async def _exchange_user_jwt_for_grant(authorization_header: str) -> dict:
     """POST the user JWT (still as Bearer, never as body) to auth-api
     plus our shared service key. Return the JSON envelope verbatim."""
@@ -191,10 +228,21 @@ async def _exchange_user_jwt_for_grant(authorization_header: str) -> dict:
         raise AuthDown(f"grant exchange transport: {type(exc).__name__}") from exc
 
     if resp.status_code == 401:
-        # auth-api rejected service or user auth. Bubble out as deny.
+        # auth-api rejected service or user auth. Bubble out as deny —
+        # but log enough forensic detail (claim fingerprint + body) to
+        # cross-correlate with auth-api's own audit. Body is bounded to
+        # 200 chars to keep journalctl rotation cheap; the JWT itself
+        # is NEVER logged, only sub/kid/iss/exp from the (unverified)
+        # header — same level of detail Auth gets from their own decode.
+        peek = _unsafe_peek_jwt_claims(authorization_header)
+        try:
+            body_preview = (resp.text or "")[:200].replace("\n", " ")
+        except Exception:
+            body_preview = ""
+        key_suffix = service_key[-6:] if service_key else ""
         raise GrantDenied(
             "realtime_grant_unauthorized",
-            f"auth-api 401",
+            f"auth-api 401 body={body_preview!r} jwt[{peek}] key_suffix=...{key_suffix}",
             status_code=401,
         )
     if resp.status_code >= 500:
