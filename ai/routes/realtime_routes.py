@@ -2596,7 +2596,7 @@ async def realtime_config_health(
 # (the browser shorts them locally); we reject them so a bug there
 # surfaces fast instead of silently going to OpenAI's expensive
 # fail-mode of "model thinks it called the tool, never got an answer".
-READ_TOOL_NAMES = {"knowledge_query", "pois_near", "narration_near"}
+READ_TOOL_NAMES = {"knowledge_query", "pois_near", "narration_near", "osm_nearby"}
 
 
 @router.post("/realtime/tool/{tool_name}")
@@ -2650,6 +2650,8 @@ async def realtime_tool_call(
             result = await _tool_pois_near(args)
         elif tool_name == "narration_near":
             result = await _tool_narration_near(args)
+        elif tool_name == "osm_nearby":
+            result = await _tool_osm_nearby(args)
         else:
             # Defensive: should be caught by READ_TOOL_NAMES check above.
             raise HTTPException(status_code=400, detail="unknown tool")
@@ -2827,6 +2829,44 @@ async def _tool_pois_near(args: dict) -> dict:
             "knowledge_id": wp.get("knowledge_id"),
         })
     return {"items": items, "count": len(items)}
+
+
+async def _tool_osm_nearby(args: dict) -> dict:
+    """Wraps ArTrack-API's OSM compact-nearby lookup.
+
+    Unlike ``pois_near`` (track-bound, returns {count: 0} off-track),
+    OSM nearby works EVERYWHERE on Earth — Overpass-style lookups
+    against the global OSM corpus. Right tool when the Realtime guide
+    needs to talk about the user's actual surroundings instead of
+    track-curated POIs (GuideDevBot2 use case 2026-06-27).
+
+    We hit the ``/osm/nearby/compact`` variant — pre-formatted
+    ``Name (category, Xm) | …`` text, low token count, voice-friendly.
+    The model can paraphrase it directly without parsing a JSON list.
+
+    ArTrack-API uses ``lng`` (not ``lon``) for longitude — same
+    translation as _tool_pois_near.
+    """
+    lat = float(args["lat"])
+    lng = float(args.get("lng") or args.get("lon"))
+    # 500m is the typical talking-distance radius (user walks past,
+    # mentions what's around). The compact endpoint caps at 20 hits
+    # internally so a slightly larger radius doesn't blow up tokens.
+    radius_m = float(args.get("radius_m", 500))
+    params = {"lat": lat, "lng": lng, "radius_m": radius_m}
+    url = f"{_artrack_api_base()}/osm/nearby/compact"
+    async with httpx.AsyncClient(timeout=2.5) as client:
+        r = await client.get(url, params=params)
+        r.raise_for_status()
+        data = r.json()
+    # Compact endpoint returns {text, count, cached}. Pass it through
+    # mostly verbatim — the text is the voice-payload, the rest is
+    # diagnostic.
+    return {
+        "text": data.get("text") or "",
+        "count": int(data.get("count") or 0),
+        "cached": bool(data.get("cached") or False),
+    }
 
 
 async def _tool_narration_near(args: dict) -> dict:
