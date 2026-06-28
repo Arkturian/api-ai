@@ -320,11 +320,15 @@ async def _exchange_user_jwt_for_grant(authorization_header: str) -> dict:
 # ── Local JWKS verify of the capability JWT ───────────────────────────
 
 
-def _verify_grant_jwt(grant_token: str, host_profile_id: str) -> VerifiedGrant:
+def _verify_grant_jwt(grant_token: str, allowed_profile_ids: set) -> VerifiedGrant:
     """Verify signature/claims of the capability JWT against the JWKS.
 
-    Enforces: alg=RS256, iss exact, aud exact, kid present, exp/nbf/iat
-    standard window, and matches the host's REALTIME_PROFILE_ID.
+    Enforces: alg=RS256, iss exact, kid present, exp/nbf/iat standard
+    window. The grant's ``profile_id`` (and matching ``aud`` claim) must
+    be in this host's allowed set — a single host may serve multiple
+    profile_ids when ``REALTIME_PROFILE_ID`` is configured as a
+    comma-separated list (PR #91, AuthAPI's service-user pattern for
+    Tscheppaschlucht-HP, Section #1245).
     """
     try:
         signing_key = _jwks().get_signing_key_from_jwt(grant_token)
@@ -334,19 +338,19 @@ def _verify_grant_jwt(grant_token: str, host_profile_id: str) -> VerifiedGrant:
             f"{type(exc).__name__}",
         ) from exc
 
-    expected_aud = f"{AUD_PREFIX}{host_profile_id}"
+    # Audience verification is done manually below against our allowed
+    # set — pyjwt can only verify against a single expected aud.
     try:
         claims = jwt.decode(
             grant_token,
             signing_key.key,
             algorithms=list(ALG_ALLOWLIST),
-            audience=expected_aud,
             issuer=AUTH_ISSUER,
-            options={"require": ["iss", "aud", "sub", "exp", "iat"]},
+            options={
+                "require": ["iss", "aud", "sub", "exp", "iat"],
+                "verify_aud": False,
+            },
         )
-    except jwt.InvalidAudienceError as exc:
-        # aud mismatch is structurally the same as wrong-profile here.
-        raise GrantWrongProfile() from exc
     except jwt.ExpiredSignatureError as exc:
         raise GrantUnverifiable("realtime_grant_expired", "exp passed") from exc
     except jwt.InvalidTokenError as exc:
@@ -355,13 +359,21 @@ def _verify_grant_jwt(grant_token: str, host_profile_id: str) -> VerifiedGrant:
             f"{type(exc).__name__}",
         ) from exc
 
-    # Belt-and-suspenders: aud might pass via list, but we expect exact.
+    # Manual audience check against the allowed-profile set. Grant's aud
+    # may be a single string or a list — normalize both to a set.
     aud_claim = claims.get("aud")
-    if aud_claim != expected_aud and aud_claim != [expected_aud]:
+    if isinstance(aud_claim, str):
+        aud_set = {aud_claim}
+    elif isinstance(aud_claim, list):
+        aud_set = {str(a) for a in aud_claim}
+    else:
+        raise GrantWrongProfile()
+    expected_auds = {f"{AUD_PREFIX}{pid}" for pid in allowed_profile_ids}
+    if not (aud_set & expected_auds):
         raise GrantWrongProfile()
 
     grant_profile = claims.get("profile_id")
-    if grant_profile != host_profile_id:
+    if grant_profile not in allowed_profile_ids:
         raise GrantWrongProfile()
 
     scopes = tuple(claims.get("scopes") or [])
@@ -403,8 +415,8 @@ async def exchange_and_verify(
     The audit logger gets a single redacted line per call so a flapping
     auth-api or a bad client is visible without leaking PII.
     """
-    host_profile = os.environ.get(REALTIME_PROFILE_ID_ENV)
-    if not host_profile:
+    allowed_profile_ids = host_profile_ids()
+    if not allowed_profile_ids:
         raise ProfileMisconfigured()
 
     envelope = await _exchange_user_jwt_for_grant(authorization_header)
@@ -418,7 +430,7 @@ async def exchange_and_verify(
     if not token:
         raise AuthDown("approved envelope without grant_token")
 
-    grant = _verify_grant_jwt(token, host_profile)
+    grant = _verify_grant_jwt(token, allowed_profile_ids)
 
     if not grant.has_scope(required_scope):
         raise GrantScopeMissing(
@@ -427,11 +439,14 @@ async def exchange_and_verify(
         )
 
     # Standard redacted audit line — no PII, no raw token, no key bytes.
+    # ``profile`` logs the grant's actual profile_id (one of the host's
+    # allowed set), not the env var raw value — easier to correlate when
+    # multiple profiles share a host.
     logger.info(
         "realtime_grant ok scope=%s profile=%s tenant=%s jti=%s "
         "exp_in=%ds limits=%d/%.2f",
         required_scope,
-        host_profile,
+        grant.profile_id,
         grant.tenant_id,
         grant.jti[:8],
         max(0, grant.exp - int(time.time())),
@@ -441,9 +456,29 @@ async def exchange_and_verify(
     return grant
 
 
+def host_profile_ids() -> set:
+    """Return the host's pinned REALTIME_PROFILE_ID set.
+
+    Parses comma-separated values so a single api-ai host can serve
+    multiple profiles (PR #91, AuthAPI's tscheppaschlucht-public-dev
+    service-user pattern, Section #1245). Whitespace tolerant. Empty
+    env var or env unset → empty set; ``ProfileMisconfigured`` is
+    raised upstream in that case.
+    """
+    raw = os.environ.get(REALTIME_PROFILE_ID_ENV, "")
+    return {p.strip() for p in raw.split(",") if p.strip()}
+
+
 def host_profile_id() -> Optional[str]:
-    """Return the host's pinned REALTIME_PROFILE_ID or None."""
-    return os.environ.get(REALTIME_PROFILE_ID_ENV)
+    """Return one of the host's pinned profile_ids (back-compat helper).
+
+    Prefer ``host_profile_ids()`` for new callers; this helper exists for
+    older code paths that assume a single profile. Returns ``None`` if
+    no profile is configured.
+    """
+    ids = host_profile_ids()
+    # Sorted so the choice is deterministic across processes / restarts.
+    return sorted(ids)[0] if ids else None
 
 
 def service_key_configured() -> bool:

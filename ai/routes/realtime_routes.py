@@ -57,6 +57,7 @@ from ..services.realtime_grant_verifier import (
     VerifiedGrant,
     exchange_and_verify,
     host_profile_id,
+    host_profile_ids,
     service_key_configured,
 )
 from ..services import realtime_budget_guard
@@ -2594,9 +2595,11 @@ async def realtime_config_health(
     """
     _check_dev_secret(x_dev_secret)
     profile = host_profile_id()
+    profile_ids = sorted(host_profile_ids())
     key_ok = service_key_configured()
     return {
         "profile_id": profile,
+        "profile_ids": profile_ids,
         "key_configured": key_ok,
         "grant_verifier_ready": bool(profile and key_ok),
         "cost_tracker_namespace": profile or "",
