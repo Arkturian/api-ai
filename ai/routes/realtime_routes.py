@@ -2873,10 +2873,28 @@ async def _tool_osm_nearby(args: dict) -> dict:
     radius_m = float(args.get("radius_m", 500))
     params = {"lat": lat, "lng": lng, "radius_m": radius_m}
     url = f"{_artrack_api_base()}/osm/nearby/compact"
-    async with httpx.AsyncClient(timeout=2.5) as client:
+    # Timeout posture: 5.0s (PR #90, 2026-06-28). Cold Overpass queries
+    # after the 1h ArTrack cache TTL can briefly exceed 2.5s
+    # (GuideDevBot2 observed 2530ms at 46.62/14.31). Tightening to 2.5s
+    # caused the route to raise -> ok:false -> the model silently fell
+    # back to LLM general knowledge — sounds smooth but the
+    # 'real-surroundings' value is lost. Five seconds occasionally
+    # produces a hearable hang for the user, but cached queries return
+    # in ~17ms so the worst-case is rare per user-area. Honest hang
+    # with real data beats smooth fallback to hallucinated knowledge.
+    t_start = time.monotonic()
+    async with httpx.AsyncClient(timeout=5.0) as client:
         r = await client.get(url, params=params)
         r.raise_for_status()
         data = r.json()
+    osm_elapsed_ms = int((time.monotonic() - t_start) * 1000)
+    if osm_elapsed_ms > 2500:
+        logger.warning(
+            "osm_nearby slow cold-Overpass: %dms at lat=%.5f lng=%.5f "
+            "radius_m=%.0f cached=%s — consider ArTrack cache-prewarm "
+            "or longer TTL for popular grids",
+            osm_elapsed_ms, lat, lng, radius_m, data.get("cached"),
+        )
     # Compact endpoint returns {text, count, cached}. Pass it through
     # mostly verbatim — the text is the voice-payload, the rest is
     # diagnostic.
