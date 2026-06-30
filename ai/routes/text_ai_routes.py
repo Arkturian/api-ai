@@ -1251,16 +1251,14 @@ async def gemini_endpoint(
 
         logger.info(f"Calling gemini CLI with prompt length: {len(prompt_text)} chars")
 
-        # Build CLI command
-        # --no-sandbox + --yolo give the CLI full network + filesystem
-        # access without per-tool-call confirmations. Required so the
-        # CLI can actually WebFetch URLs in the prompt (image judging,
-        # documentation lookup, ...) — without these flags the model
-        # falls back to filename-only heuristics.
-        # --skip-trust bypasses the "trusted directory" prompt that
-        # otherwise blocks the CLI in headless/service contexts.
-        cmd = ["gemini", "--output-format", "json",
-               "--no-sandbox", "--yolo", "--skip-trust"]
+        # Build CLI command — agy (Google Antigravity CLI) replaces the
+        # deprecated `gemini` CLI as of 2026-06-30. agy's flag set is
+        # smaller: a single --dangerously-skip-permissions auto-approves
+        # all tool calls (replaces --no-sandbox + --yolo + --skip-trust
+        # together). --output-format json is supported and returns a
+        # cleaner flat schema than gemini (see usage parsing below).
+        cmd = ["agy", "--output-format", "json",
+               "--dangerously-skip-permissions"]
         if model:
             cmd.extend(["--model", model])
         # Gemini CLI does not expose `thinking_budget` (verified May 2026 —
@@ -1279,8 +1277,11 @@ async def gemini_endpoint(
         for _u, _p in _imgs:
             prompt_text = prompt_text.replace(_u, "@" + _p)
         if _imgs:
-            logger.info("gemini: localized %d storage image(s) to /tmp -> @path" % len(_imgs))
-        cmd.append(prompt_text)
+            logger.info("agy: localized %d storage image(s) -> @path" % len(_imgs))
+        # agy requires an explicit -p/--print flag for non-interactive mode;
+        # without it the CLI tries to open a TTY (bubbletea) and aborts in
+        # the service context with "could not open TTY: /dev/tty".
+        cmd.extend(["-p", prompt_text])
 
         # Call gemini in subprocess
         def run_gemini_cli():
@@ -1345,39 +1346,41 @@ async def gemini_endpoint(
                 raise HTTPException(status_code=500, detail=f"Gemini CLI error: {error_msg}")
             raise HTTPException(status_code=500, detail="Gemini CLI returned empty response")
 
-        # Parse JSON output
-        # Format: {"response": "...", "stats": {"models": {"gemini-2.5-flash-lite": {"tokens": {...}}}}}
+        # Parse JSON output — agy schema (flat):
+        # {"conversation_id": "...", "status": "SUCCESS",
+        #  "response": "...", "duration_seconds": <float>,
+        #  "num_turns": <int>,
+        #  "usage": {"input_tokens": ..., "output_tokens": ...,
+        #            "thinking_tokens": ..., "total_tokens": ...}}
         try:
             cli_response = json_module.loads(raw_output)
         except json_module.JSONDecodeError as e:
-            logger.error(f"Failed to parse Gemini CLI JSON: {e}")
+            logger.error(f"Failed to parse agy CLI JSON: {e}")
             logger.error(f"Raw output: {raw_output[:500]}")
             # Return raw output as response if JSON parsing fails
             return AIResponse(
                 response=raw_output,
-                model="gemini-cli",
+                model="agy-cli",
                 tokens_used=None,
                 finish_reason="stop"
             )
 
-        # Extract response text
-        response_text = cli_response.get("response", "")
+        # Extract response text + strip trailing newline agy appends
+        response_text = (cli_response.get("response") or "").rstrip("\n")
 
-        # Extract token info from stats
-        input_tokens = 0
-        output_tokens = 0
-        model_name = "gemini-cli"
-
-        stats = cli_response.get("stats", {})
-        models = stats.get("models", {})
-
-        # Get the first model from stats (usually gemini-2.5-flash-lite)
-        for m_name, m_data in models.items():
-            model_name = m_name
-            tokens = m_data.get("tokens", {})
-            input_tokens = tokens.get("prompt", 0)
-            output_tokens = tokens.get("candidates", 0)
-            break
+        # Extract token info from flat usage block.
+        # thinking_tokens are upfront compute (planning) — pack them into
+        # input_tokens for the cost-tracker so they're billed at the same
+        # rate as prompt tokens. The cost-tracker schema only has
+        # input/output buckets, no thinking-specific entry.
+        usage = cli_response.get("usage") or {}
+        input_tokens = int(usage.get("input_tokens", 0))
+        output_tokens = int(usage.get("output_tokens", 0))
+        thinking_tokens = int(usage.get("thinking_tokens", 0))
+        input_tokens += thinking_tokens
+        # agy doesn't echo the model name in the JSON response; fall back
+        # to the requested model or a generic identifier.
+        model_name = (model or "agy-cli")
 
         # Track usage
         gemini_cli_cost_tracker.track_usage({
@@ -1404,7 +1407,7 @@ async def gemini_endpoint(
         logger.error("Gemini CLI timeout after 300 seconds")
         raise HTTPException(status_code=504, detail="Gemini CLI timeout - prompt may be too long")
     except FileNotFoundError:
-        logger.error("Gemini CLI not found - is 'gemini' installed?")
+        logger.error("agy CLI not found - is 'agy' installed and on PATH?")
         raise HTTPException(status_code=500, detail="Gemini CLI not installed on server")
     except HTTPException:
         raise
