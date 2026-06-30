@@ -1259,20 +1259,43 @@ async def gemini_endpoint(
         # cleaner flat schema than gemini (see usage parsing below).
         cmd = ["agy", "--output-format", "json",
                "--dangerously-skip-permissions"]
-        if model:
+        # agy expects --model as a display-name STRING (e.g. "Gemini 3.5
+        # Flash (High)"), not a slug like "gemini-3.5-flash". Frontends
+        # send the slug + an `effort` knob; we compose the display name
+        # here from a small lookup. Unknown slug → pass model through
+        # verbatim so already-display-name callers keep working.
+        AGY_BASE_NAMES = {
+            "gemini-3.5-flash": "Gemini 3.5 Flash",
+            "gemini-3.1-pro":   "Gemini 3.1 Pro",
+        }
+        AGY_EFFORTS_PER_MODEL = {
+            "gemini-3.5-flash": {"low", "medium", "high"},
+            "gemini-3.1-pro":   {"low", "high"},          # no medium
+        }
+        AGY_EFFORT_DEFAULT = {
+            "gemini-3.5-flash": "medium",
+            "gemini-3.1-pro":   "high",                   # Pro's better-quality tier
+        }
+        if model and model in AGY_BASE_NAMES:
+            base = AGY_BASE_NAMES[model]
+            avail = AGY_EFFORTS_PER_MODEL[model]
+            requested = (prompt.effort or AGY_EFFORT_DEFAULT[model]).lower()
+            effort = requested if requested in avail else AGY_EFFORT_DEFAULT[model]
+            if requested != effort:
+                logger.info(
+                    f"effort={requested!r} not supported by {model!r} "
+                    f"(available: {sorted(avail)}); falling back to "
+                    f"{effort!r}"
+                )
+            cmd.extend(["--model", f"{base} ({effort.capitalize()})"])
+        elif model:
+            # Back-compat: caller already sent a full display-name string.
             cmd.extend(["--model", model])
-        # Gemini CLI does not expose `thinking_budget` (verified May 2026 —
-        # only --model/--raw-output/--no-sandbox/--yolo/--skip-trust). The
-        # API knob exists but only via direct SDK call. We log + ignore so
-        # callers using a generic /ai/<provider>?effort= contract don't
-        # break — the frontend should ground-truth supported_via=='none'
-        # from /ai/models providers_meta.gemini.efforts and disable the
-        # dropdown there.
-        if prompt.effort:
-            logger.info(
-                f"effort={prompt.effort!r} requested but Gemini CLI does "
-                f"not support thinking_budget; ignoring."
-            )
+            if prompt.effort:
+                logger.info(
+                    f"effort={prompt.effort!r} ignored — caller sent "
+                    f"display-name model {model!r}; effort already baked in."
+                )
         _imgs = _download_storage_images(prompt_text)
         for _u, _p in _imgs:
             prompt_text = prompt_text.replace(_u, "@" + _p)
@@ -1787,9 +1810,13 @@ async def list_text_models(
         {"id": "opus",   "provider": "claude", "endpoint": "/ai/claude"},
         {"id": "haiku",  "provider": "claude", "endpoint": "/ai/claude"},
         {"id": "codex-default", "provider": "codex",  "endpoint": "/ai/chatgpt", "is_default": True},
-        {"id": "gemini-2.5-flash",      "provider": "gemini", "endpoint": "/ai/gemini", "is_default": True},
-        {"id": "gemini-2.5-flash-lite", "provider": "gemini", "endpoint": "/ai/gemini"},
-        {"id": "gemini-2.5-pro",        "provider": "gemini", "endpoint": "/ai/gemini"},
+        # agy (Antigravity CLI) exposes Gemini 3.5/3.1 with reasoning-effort
+        # tiers; the slugs below are the FE-visible IDs, agy maps them to
+        # display-name strings ("Gemini 3.5 Flash (High)") inside the
+        # subprocess call. See AGY_BASE_NAMES / AGY_EFFORTS_PER_MODEL in
+        # gemini_endpoint().
+        {"id": "gemini-3.5-flash", "provider": "gemini", "endpoint": "/ai/gemini", "is_default": True},
+        {"id": "gemini-3.1-pro",   "provider": "gemini", "endpoint": "/ai/gemini"},
     ]
     if provider:
         p = provider.lower().strip()
