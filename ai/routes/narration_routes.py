@@ -47,8 +47,67 @@ async def narrate(req: NarrationRequest, api_key: str = Depends(get_api_key)):
     try:
         result = await service.generate(req)
         return result
+    except HTTPException:
+        raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Narration failed: {str(e)}")
+        # Surface ElevenLabs' own error taxonomy so upstream sees the real
+        # cause instead of a generic 500 (ArTrack IACP 2026-07-01: the
+        # opaque "Narration failed: ..." string cost hours of wrong-lead
+        # debugging on what was really a plain 401 from ElevenLabs).
+        try:
+            from elevenlabs import (
+                APIError as _ELApiError,
+                AuthorizationError as _ELAuthError,
+                RateLimitError as _ELRateError,
+            )
+        except Exception:
+            _ELApiError = _ELAuthError = _ELRateError = ()
+        if isinstance(e, _ELAuthError):
+            raise HTTPException(
+                status_code=401,
+                detail={
+                    "error": "elevenlabs_auth_failed",
+                    "elevenlabs_message": str(e),
+                    "hint": (
+                        "ElevenLabs returned 401. Common causes: "
+                        "ELEVENLABS_API_KEY missing/expired/revoked, or "
+                        "the key doesn't have permission for this voice_id. "
+                        "Check the ElevenLabs dashboard."
+                    ),
+                },
+            )
+        if isinstance(e, _ELRateError):
+            raise HTTPException(
+                status_code=429,
+                detail={
+                    "error": "elevenlabs_rate_or_quota_exceeded",
+                    "elevenlabs_message": str(e),
+                    "hint": (
+                        "ElevenLabs returned 429. Either the per-minute "
+                        "rate-limit or the monthly character quota is "
+                        "exceeded. Back off + retry, or top up the plan."
+                    ),
+                },
+            )
+        if isinstance(e, _ELApiError):
+            raise HTTPException(
+                status_code=502,
+                detail={
+                    "error": "elevenlabs_api_error",
+                    "elevenlabs_message": str(e),
+                    "hint": "ElevenLabs returned a non-2xx that isn't auth or rate-limit.",
+                },
+            )
+        # Unknown exception — keep the generic 500 path but log richly.
+        logger.exception(f"Narration failed with unclassified exception: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "error": "narration_failed",
+                "exception_type": type(e).__name__,
+                "message": str(e),
+            },
+        )
 
 
 @router.post("/tts/narrate/preview")
