@@ -72,20 +72,58 @@ async def narrate(req: NarrationRequest, api_key: str = Depends(get_api_key)):
             return getattr(err, "body", None) or None
 
         if isinstance(e, _ELAuthError):
+            # ArTrack IACP 2026-07-01: ElevenLabs returns HTTP 401 for
+            # BOTH true auth failures AND character-quota exhaustion.
+            # Their body.detail.code disambiguates:
+            #   needs_authorization    — no/bad key (env-loading bug etc.)
+            #   quota_exceeded         — monthly character credits used up
+            #   missing_permissions    — scoped API key missing a scope
+            # We re-map quota_exceeded to a 429 so it doesn't get lost in
+            # the "401 = auth" mental model, and we surface the code +
+            # hint distinctly.
+            body = _elevenlabs_body(e) or {}
+            code = ""
+            try:
+                code = (body.get("detail") or {}).get("code") or ""
+            except (AttributeError, TypeError):
+                code = ""
+            if code == "quota_exceeded":
+                raise HTTPException(
+                    status_code=429,
+                    detail={
+                        "error": "elevenlabs_quota_exceeded",
+                        "elevenlabs_code": code,
+                        "elevenlabs_message": str(e)[:200],
+                        "elevenlabs_body": body or None,
+                        "hint": (
+                            "ElevenLabs returned 401 (yes, 401 — not 429 or "
+                            "402) with body.detail.code=quota_exceeded. The "
+                            "monthly character quota is used up. Top up the "
+                            "plan or wait for the next billing cycle. "
+                            "Check body.detail.message for exact remaining "
+                            "credits."
+                        ),
+                    },
+                )
             raise HTTPException(
                 status_code=401,
                 detail={
                     "error": "elevenlabs_auth_failed",
+                    "elevenlabs_code": code,
                     "elevenlabs_message": str(e)[:200],
-                    "elevenlabs_body": _elevenlabs_body(e),
+                    "elevenlabs_body": body or None,
                     "hint": (
-                        "ElevenLabs returned 401. Common causes: "
-                        "ELEVENLABS_API_KEY missing/expired/revoked, "
-                        "the key doesn't have permission for this voice_id, "
-                        "OR the api-ai service isn't loading .env (check "
-                        "'systemctl show api-ai -p EnvironmentFiles' on the "
-                        "target host). Look at elevenlabs_body.detail.message "
-                        "for the exact ElevenLabs classification."
+                        "ElevenLabs returned 401. **A 401 from ElevenLabs "
+                        "does NOT always mean auth** — inspect "
+                        "elevenlabs_body.detail.code to disambiguate: "
+                        "'needs_authorization' = env-loading / bad key / "
+                        "missing xi-api-key header (check "
+                        "'systemctl show api-ai -p EnvironmentFiles'); "
+                        "'quota_exceeded' = character quota is up (handled "
+                        "separately as 429 above); "
+                        "'missing_permissions' = scoped API key missing a "
+                        "scope. The message field carries the exact "
+                        "classification."
                     ),
                 },
             )
