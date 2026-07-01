@@ -62,17 +62,30 @@ async def narrate(req: NarrationRequest, api_key: str = Depends(get_api_key)):
             )
         except Exception:
             _ELApiError = _ELAuthError = _ELRateError = ()
+        # The ElevenLabs SDK's ApiError exposes .status_code + .body + .headers
+        # as attributes; str(e) is basically 'headers: {...}' — useless. Pull
+        # the real JSON body out. (ArTrack IACP 2026-07-01: PR #96 v1 gave
+        # ArTrack 'headers: {...}' with no body context, hiding the actual
+        # 'needs_authorization' / 'missing permission models_read' payload
+        # that would have pointed straight at the env-loading bug.)
+        def _elevenlabs_body(err):
+            return getattr(err, "body", None) or None
+
         if isinstance(e, _ELAuthError):
             raise HTTPException(
                 status_code=401,
                 detail={
                     "error": "elevenlabs_auth_failed",
-                    "elevenlabs_message": str(e),
+                    "elevenlabs_message": str(e)[:200],
+                    "elevenlabs_body": _elevenlabs_body(e),
                     "hint": (
                         "ElevenLabs returned 401. Common causes: "
-                        "ELEVENLABS_API_KEY missing/expired/revoked, or "
-                        "the key doesn't have permission for this voice_id. "
-                        "Check the ElevenLabs dashboard."
+                        "ELEVENLABS_API_KEY missing/expired/revoked, "
+                        "the key doesn't have permission for this voice_id, "
+                        "OR the api-ai service isn't loading .env (check "
+                        "'systemctl show api-ai -p EnvironmentFiles' on the "
+                        "target host). Look at elevenlabs_body.detail.message "
+                        "for the exact ElevenLabs classification."
                     ),
                 },
             )
@@ -81,7 +94,8 @@ async def narrate(req: NarrationRequest, api_key: str = Depends(get_api_key)):
                 status_code=429,
                 detail={
                     "error": "elevenlabs_rate_or_quota_exceeded",
-                    "elevenlabs_message": str(e),
+                    "elevenlabs_message": str(e)[:200],
+                    "elevenlabs_body": _elevenlabs_body(e),
                     "hint": (
                         "ElevenLabs returned 429. Either the per-minute "
                         "rate-limit or the monthly character quota is "
@@ -94,7 +108,9 @@ async def narrate(req: NarrationRequest, api_key: str = Depends(get_api_key)):
                 status_code=502,
                 detail={
                     "error": "elevenlabs_api_error",
-                    "elevenlabs_message": str(e),
+                    "elevenlabs_status": getattr(e, "status_code", None),
+                    "elevenlabs_message": str(e)[:200],
+                    "elevenlabs_body": _elevenlabs_body(e),
                     "hint": "ElevenLabs returned a non-2xx that isn't auth or rate-limit.",
                 },
             )
