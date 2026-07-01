@@ -809,6 +809,34 @@ def _companion_narrator_prompt(language: str = "de") -> str:
     )
 
 
+_TOOL_TEXT_FIDELITY_DISCIPLINE = (
+    "\n\nTEXT-ARG TREUE-DISZIPLIN (Alex-Anforderung, Issue #203):\n"
+    "Für die Erzeugung des `text`-Arguments an den Ziel-Agenten "
+    "(relay_to_agent / propose_to_agent) gilt:\n"
+    "  1. **Treu 1:1 übernehmen.** Übernimm das Gesagte so "
+    "wortgetreu wie möglich. Jedes Wort ist wertvoll — Alex' "
+    "Energie, Ton und „wer er ist\" müssen erhalten bleiben. "
+    "KEINE Zusammenfassung, KEINE Kürzung, KEIN Paraphrasieren. "
+    "Glätte NUR offensichtliche Transkriptions-/Übersetzungsfehler.\n"
+    "  2. **Domänen-Kontext zur Fehlerkorrektur.** Nutze das "
+    "AgentOS-/Tech-Domänen-Vokabular (Agent-Roster + Domänen) "
+    "und — falls bekannt — den Ziel-Agenten und seine Domäne, "
+    "um Verhörer korrekt aufzulösen. Beispiel: ein als "
+    "„Futter/Nahrung\" transkribiertes Wort ist im Frontend/UI/"
+    "Icon-Kontext eindeutig ein Fach-Verhörer für „Footer\" und "
+    "entsprechend zu korrigieren. Steht der Ziel-Agent zum "
+    "Transkriptionszeitpunkt noch nicht fest, nutze zumindest den "
+    "allgemeinen AgentOS-/Tech-Domänen-Kontext.\n"
+    "  3. **Optionale, klar abgesetzte Anmerkungen.** Der "
+    "Assistent DARF eigene Ergänzungen anhängen, klar markiert "
+    "(z.B. „— Ergänzung des Assistenten: …\"), um Unklares zu "
+    "vervollständigen. Aber NIE den Original-Inhalt ersetzen oder "
+    "kürzen.\n\n"
+    "Kurz: treu übernehmen + kontext-gestützt Fehler korrigieren "
+    "+ optional annotieren, statt reduzieren."
+)
+
+
 def _companion_talkback_prompt(language: str = "de") -> str:
     """Narrator + propose_to_agent tool with safety-by-confirm.
 
@@ -889,6 +917,7 @@ def _companion_talkback_prompt(language: str = "de") -> str:
         "NICHT). Ein Befehl während Roam geht an den OPERATOR-Fokus, "
         "nicht an den ambient beobachteten Agenten — auch wenn die "
         "Stimme gerade über letzteren spricht."
+        + _TOOL_TEXT_FIDELITY_DISCIPLINE
     )
 
 
@@ -1309,8 +1338,10 @@ def _companion_agent_transparent_prompt(language: str = "de") -> str:
         "nicht geantwortet hat — der `agent_voice_response` mit "
         "deiner `pair_id` ist noch nicht eingetroffen. Bis dahin: "
         "kein inhaltlicher Output. Generiere `pair_id` neu pro Relay "
-        "(z.B. uuid4-Prefix). Paraphrasiere `text` nur wenn der "
-        "Agent es zum Verstehen wirklich braucht; sonst wörtlich.\n"
+        "(z.B. uuid4-Prefix). Für das `text`-Argument gilt die "
+        "TEXT-ARG TREUE-DISZIPLIN weiter unten (verbatim übernehmen, "
+        "Verhörer domänen-gestützt korrigieren, optional annotieren "
+        "— NIE kürzen/zusammenfassen).\n"
         "  3. **EIN MINIMALES BACKCHANNEL-GERÄUSCH erlaubt — sonst "
         "Stille (Alex-Live-Update PR #84).** Direkt nach dem "
         "Operator-Satz darfst (musst nicht) du EIN kurzes "
@@ -1435,6 +1466,7 @@ def _companion_agent_transparent_prompt(language: str = "de") -> str:
         "Telefonassistent der den Anrufer mit dem richtigen "
         "Ansprechpartner verbindet — nur dass DU die Verbindung "
         "bist, nicht der Vermittler dazwischen."
+        + _TOOL_TEXT_FIDELITY_DISCIPLINE
     )
 
 
