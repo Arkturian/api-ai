@@ -1388,6 +1388,40 @@ async def gemini_endpoint(
                 finish_reason="stop"
             )
 
+        # Surface agy's own error envelope (SWFME bug 2026-07-01, IACP
+        # 097195c3): agy on auth-failure/timeout returns valid JSON with
+        # {"status": "ERROR", "error": "authentication failed or timed out",
+        #  "response": ""}. Previously the wrapper parsed this cleanly,
+        # extracted the empty response, and returned an AIResponse with
+        # response="" and tokens_used=0 — a silent degradation that
+        # blocked SWFME's automation-api email classifier for hours before
+        # anyone noticed. Fail loud instead: raise 502 with the agy error
+        # verbatim so the caller sees "agy_error: authentication failed"
+        # and can escalate.
+        status = cli_response.get("status")
+        if status and status != "SUCCESS":
+            agy_error = cli_response.get("error") or ""
+            logger.error(
+                f"agy CLI returned status={status!r} error={agy_error!r} "
+                f"(returncode={result.returncode})"
+            )
+            raise HTTPException(
+                status_code=502,
+                detail={
+                    "error": "agy_error",
+                    "agy_status": status,
+                    "agy_message": agy_error,
+                    "hint": (
+                        "agy CLI returned an error envelope. Common causes: "
+                        "OAuth token missing/expired at HOME/.gemini/"
+                        "antigravity-cli/ (run `agy login` as the service "
+                        "user or symlink to a valid token dir), agy binary "
+                        "version drift, or upstream Google Antigravity "
+                        "service outage."
+                    ),
+                },
+            )
+
         # Extract response text + strip trailing newline agy appends
         response_text = (cli_response.get("response") or "").rstrip("\n")
 
