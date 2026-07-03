@@ -375,3 +375,123 @@ async def tts_voice_clone(
         "ref_audio_bytes": len(data),
         "hint": f"Use voice_id='{voice_id}' in subsequent /ai/tts/minimax calls",
     }
+
+
+# ── MiniMax Voice Design (PR #99) ─────────────────────────────────────
+#
+# Design a NEW voice from a free-text description — no reference audio
+# needed (that's /tts/clone's job). MiniMax's /v1/voice_design takes
+# {prompt, preview_text} and returns a persistent voice_id plus a
+# hex-encoded trial audio speaking the preview_text with the freshly
+# designed voice. The voice_id is immediately usable in /tts/minimax.
+#
+# Use case (Alex, 2026-07-03): character voices for the Tscheppaschlucht
+# audio guides — "Eule Tschauko" + "Tschauko" run on MiniMax-designed
+# voices; only Dr. Peter Tschauko stays on ElevenLabs.
+#
+# Verified live against api.minimax.io before writing this endpoint:
+#   POST /v1/voice_design {"prompt": "...", "preview_text": "..."}
+#   → {"voice_id": "ttv-voice-...", "trial_audio": "<hex>",
+#      "base_resp": {"status_code": 0}}
+
+class MinimaxVoiceDesignRequest(BaseModel):
+    prompt: str = Field(
+        ...,
+        description=(
+            "Free-text voice description — character, age, tone, accent, "
+            "speaking style. English prompts work best, the designed "
+            "voice speaks whatever language preview_text/TTS text is in."
+        ),
+    )
+    preview_text: str = Field(
+        ...,
+        description="Text the trial audio will speak (in the target language).",
+    )
+    voice_name: Optional[str] = Field(
+        default=None,
+        description="Display name stored alongside the trial audio in Storage.",
+    )
+    confirm_api_billing: bool = Field(
+        default=False,
+        description="Must be true — pay-as-you-go billed per design call.",
+    )
+
+
+@router.post("/tts/design")
+async def tts_voice_design(
+    req: MinimaxVoiceDesignRequest, api_key: str = Depends(get_api_key)
+):
+    """MiniMax voice design: free-text description → persistent voice_id.
+
+    Returns the new ``voice_id`` (reusable in ``/ai/tts/minimax``) plus
+    the trial audio saved to Storage so the caller can listen before
+    committing to the voice.
+    """
+    from ai.clients.minimax_client import post_json, base_resp_failed
+    from ai.clients.storage_client import save_file_and_record
+    from ai.services.minimax_cost_tracker import minimax_cost_tracker
+    from ai.routes.text_ai_routes import _check_minimax_billing_gate
+
+    _check_minimax_billing_gate(req.confirm_api_billing, endpoint="minimax-voice-design")
+
+    logger.info(
+        f"MiniMax voice design: name='{req.voice_name or 'unnamed'}', "
+        f"prompt={len(req.prompt)} chars, preview={len(req.preview_text)} chars"
+    )
+
+    body = await post_json(
+        "voice_design",
+        {"prompt": req.prompt, "preview_text": req.preview_text},
+        timeout=120.0,
+    )
+    err = base_resp_failed(body)
+    if err:
+        raise HTTPException(
+            status_code=502,
+            detail={"error": "minimax_voice_design_failed", "upstream_msg": err},
+        )
+
+    voice_id = body.get("voice_id") or ""
+    trial_hex = body.get("trial_audio") or ""
+    if not voice_id:
+        raise HTTPException(
+            status_code=502,
+            detail={"error": "minimax_no_voice_id_returned", "upstream_keys": list(body.keys())},
+        )
+
+    # Persist the trial audio so the operator can listen via a plain URL.
+    audio_url = None
+    storage_id = None
+    if trial_hex:
+        try:
+            audio_bytes = bytes.fromhex(trial_hex)
+            safe_name = (req.voice_name or "voice_design").replace(" ", "_")[:40]
+            obj = await save_file_and_record(
+                data=audio_bytes,
+                original_filename=f"voice_design_{safe_name}_{voice_id[-8:]}.mp3",
+                context=f"MiniMax voice design trial: {req.voice_name or voice_id}",
+                is_public=True,
+            )
+            storage_id = obj.id
+            audio_url = obj.file_url
+        except Exception as e:
+            # Trial-audio persistence is a nicety — the voice_id is the
+            # actual product. Don't fail the request over a storage hiccup.
+            logger.warning(f"voice design trial-audio save failed: {e}")
+
+    # Cost posture: MiniMax bills voice design per call in the same
+    # PAYG lane as cloning; reuse the clone counter until the tracker
+    # grows a dedicated bucket.
+    minimax_cost_tracker.track_voice_clone(model="minimax-voice-design")
+
+    return {
+        "voice_id": voice_id,
+        "voice_name": req.voice_name,
+        "trial_audio_storage_id": storage_id,
+        "trial_audio_url": audio_url,
+        "hint": (
+            f"Use voice_id='{voice_id}' in subsequent /ai/tts/minimax calls. "
+            "Listen to trial_audio_url first — if the voice isn't right, "
+            "call /tts/design again with a refined prompt."
+        ),
+    }
