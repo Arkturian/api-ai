@@ -1,10 +1,12 @@
 """
 Narration / TTS Routes
 
-POST /ai/tts/narrate           — Full pipeline: text → AI dramatic preprocessing → ElevenLabs TTS → audio
-POST /ai/tts/narrate/preview   — Preview only: returns the dramatic script without generating audio
-POST /ai/tts/minimax           — Direct MiniMax Speech-02 TTS (no dramatic preprocessing) — pay-as-you-go
-POST /ai/tts/clone             — MiniMax voice-cloning: ref-audio + name → voice_id — pay-as-you-go
+POST /ai/tts/narrate                 — Full pipeline: text → AI dramatic preprocessing → ElevenLabs TTS → audio
+POST /ai/tts/narrate/preview         — Preview only: returns the dramatic script without generating audio
+POST /ai/tts/minimax                 — Direct MiniMax Speech-02 TTS (no dramatic preprocessing) — pay-as-you-go
+POST /ai/tts/clone                   — MiniMax voice-cloning: ref-audio + name → voice_id — pay-as-you-go
+POST /ai/tts/design                  — MiniMax voice design: text description → voice_id — pay-as-you-go
+GET  /ai/tts/elevenlabs/subscription — quota/tier proxy so batch scripts can pre-flight without the key
 """
 import logging
 from typing import Optional
@@ -27,6 +29,64 @@ def get_api_key():
     """Dependency placeholder — matches existing auth pattern."""
     import os
     return os.getenv("AI_API_KEY", "")
+
+
+@router.get("/tts/elevenlabs/subscription")
+async def elevenlabs_subscription(api_key: str = Depends(get_api_key)):
+    """Proxy for ElevenLabs ``GET /v1/user/subscription``.
+
+    Lets batch scripts (ArTrack's pre-flight quota check, IACP
+    2026-07-03) compare remaining character credits against the
+    estimated batch size WITHOUT holding the ELEVENLABS_API_KEY
+    themselves — the key stays server-side.
+
+    Returns a trimmed view: tier, character_count, character_limit,
+    remaining, next_reset_unix. Full upstream body under ``raw``.
+    """
+    import os
+    import httpx
+
+    key = os.getenv("ELEVENLABS_API_KEY", "").strip('"').strip("'")
+    if not key:
+        raise HTTPException(
+            status_code=503,
+            detail={"error": "elevenlabs_api_key_missing"},
+        )
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            r = await client.get(
+                "https://api.elevenlabs.io/v1/user/subscription",
+                headers={"xi-api-key": key},
+            )
+    except httpx.HTTPError as e:
+        raise HTTPException(
+            status_code=502,
+            detail={"error": "elevenlabs_unreachable", "exc": str(e)[:200]},
+        )
+    if r.status_code != 200:
+        try:
+            body = r.json()
+        except Exception:
+            body = {"raw": r.text[:300]}
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "error": "elevenlabs_subscription_error",
+                "upstream_status": r.status_code,
+                "upstream_body": body,
+            },
+        )
+    data = r.json()
+    count = int(data.get("character_count") or 0)
+    limit = int(data.get("character_limit") or 0)
+    return {
+        "tier": data.get("tier"),
+        "character_count": count,
+        "character_limit": limit,
+        "remaining": max(0, limit - count),
+        "next_reset_unix": data.get("next_character_count_reset_unix"),
+        "raw": data,
+    }
 
 
 @router.post("/tts/narrate", response_model=NarrationResponse)
