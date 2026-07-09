@@ -898,6 +898,17 @@ async def chatgpt_endpoint(
         # Only add model if explicitly specified by user
         # (ChatGPT subscription has limited model access, let Codex use its default)
         selected_model = model  # None if not specified
+        # `codex-default` is our OWN internal tracking label for "no model
+        # specified" (see model_name assignment below) — and it's listed as
+        # an id in /ai/models. A caller that echoes it back as ?model=
+        # (Storage's VISION_BACKEND=codex path did exactly this) would make us
+        # pass `--model codex-default` to the codex CLI, which rejects it with
+        # "does not support model selection". Treat these known pseudo-aliases
+        # as "use the subscription default" → don't pass --model at all.
+        if selected_model and selected_model.strip().lower() in (
+            "codex-default", "default", "auto", "codex",
+        ):
+            selected_model = None
         if selected_model:
             cmd.extend(["--model", selected_model])
 
