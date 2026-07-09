@@ -1112,93 +1112,6 @@ async def chatgpt_cost_status():
     return codex_cost_tracker.get_status()
 
 
-async def _gemini_vision_with_paths(
-    prompt_text: str,
-    image_paths: List[str],
-    model: Optional[str] = None,
-    system_prompt: Optional[str] = None
-) -> AIResponse:
-    """
-    Helper: Use Google Generative AI API for vision analysis with local files.
-
-    Args:
-        prompt_text: The text prompt
-        image_paths: List of local file paths to images
-        model: Optional model override (default: gemini-2.0-flash)
-        system_prompt: Optional system prompt to prepend
-    """
-    import os
-    import google.generativeai as genai
-
-    # Configure API
-    google_api_key = os.getenv("GOOGLE_API_KEY", "")
-    if not google_api_key:
-        raise HTTPException(status_code=500, detail="GOOGLE_API_KEY not configured for vision")
-
-    genai.configure(api_key=google_api_key)
-
-    # Prepend system prompt if provided
-    if system_prompt:
-        prompt_text = f"{system_prompt}\n\n{prompt_text}"
-
-    # Build content parts
-    content_parts = []
-
-    # Add images from file paths
-    for img_path in image_paths:
-        try:
-            with open(img_path, "rb") as f:
-                image_data = f.read()
-
-            # Detect mime type from extension
-            ext = os.path.splitext(img_path)[1].lower()
-            mime_map = {
-                ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
-                ".png": "image/png", ".gif": "image/gif",
-                ".webp": "image/webp", ".heic": "image/heic"
-            }
-            mime_type = mime_map.get(ext, "image/jpeg")
-
-            content_parts.append({
-                "mime_type": mime_type,
-                "data": image_data
-            })
-            logger.info(f"Loaded image for Gemini Vision: {img_path} ({len(image_data)} bytes)")
-        except Exception as e:
-            logger.warning(f"Failed to load image {img_path}: {e}")
-
-    if not content_parts:
-        raise HTTPException(status_code=400, detail="No valid images could be loaded")
-
-    # Add text prompt
-    content_parts.append(prompt_text)
-
-    # Generate response
-    model_name = model or "gemini-2.0-flash"
-    gemini_model = genai.GenerativeModel(model_name)
-
-    try:
-        response = gemini_model.generate_content(content_parts)
-        response_text = response.text if hasattr(response, 'text') else str(response)
-
-        # Extract token count if available
-        tokens_used = None
-        if hasattr(response, 'usage_metadata'):
-            tokens_used = getattr(response.usage_metadata, 'total_token_count', None)
-
-        logger.info(f"Gemini Vision API response: {len(response_text)} chars")
-
-        return AIResponse(
-            response=response_text,
-            model=model_name,
-            tokens_used=tokens_used,
-            finish_reason="stop"
-        )
-    except Exception as e:
-        logger.error(f"Gemini Vision API error: {e}")
-        raise HTTPException(status_code=500, detail=f"Gemini Vision error: {str(e)}")
-
-
 @router.post("/gemini", response_model=AIResponse)
 async def gemini_endpoint(
     prompt: Prompt,
@@ -1206,18 +1119,20 @@ async def gemini_endpoint(
     api_key: str = Depends(get_api_key),
 ):
     """
-    Gemini endpoint — currently DISABLED at the handler entry.
+    Gemini endpoint — runs the `agy` (Google Antigravity) CLI headless over
+    Alex' OAuth subscription. No API key, no per-token billing.
 
-    Background (2026-05-30 cost incident, 209.56 EUR / Mai):
-    The gemini-CLI was running in API-billing mode because GOOGLE_API_KEY
-    was loaded via dotenv and forwarded to the subprocess as GEMINI_API_KEY.
-    The "subscription" claim never held — no OAuth flow was ever set up for
-    Alex' Google account on these hosts.
+    Text AND vision share this one path: `image_paths` (local files or https
+    storage URLs) are folded into the prompt, and the CLI reads/WebFetches the
+    images natively. There is no separate paid Gemini Vision API path anymore —
+    the old `_gemini_vision_with_paths` (GOOGLE_API_KEY, API-billed) was removed
+    on the CLI-only cutover; `/ai/gemini/vision` is now just a base64→storage-URL
+    bridge that delegates straight back here.
 
-    Until a proper `gemini /authorize` flow is run per host (Login broker
-    follow-up), the text path is intentionally 503. Image-bearing requests
-    are routed to `_gemini_vision_with_paths`, which is API-billed and gated
-    behind the `confirm_api_billing` body-flag + monthly cap.
+    History: before the agy migration (2026-06-30) the deprecated `gemini` CLI
+    silently ran in API-billing mode whenever GOOGLE_API_KEY leaked in via dotenv
+    (2026-05-30 cost incident, 209.56 EUR). That whole failure mode is gone with
+    the key-free CLI subscription path.
     """
     import subprocess
     import asyncio
@@ -1244,8 +1159,6 @@ async def gemini_endpoint(
         paths_text = "\n".join(image_paths)
         prompt_text = f"{prompt_text}\n\nAnalysiere folgende Bilder:\n{paths_text}"
         logger.info(f"Folding {len(image_paths)} image ref(s) into gemini CLI prompt (subscription path)")
-
-    # --- dead code below (kept for the OAuth re-enable path) -------------------
 
     try:
         # Gemini CLI has no --system-prompt, so prepend system prompt to user prompt
@@ -1510,15 +1423,16 @@ async def gemini_vision_endpoint(
     api_key: str = Depends(get_api_key)
 ):
     """
-    Gemini Vision endpoint via Google Generative AI API.
+    Gemini Vision — thin base64 bridge, NOT a separate backend.
 
-    Features:
-    - Supports multimodal input (text + images)
-    - Uses Gemini 2.0 Flash for vision tasks
-    - Base64 encoded images in prompt.images array
-    - Perfect for image analysis, safety checks, content moderation
+    There is no dedicated vision model here: this endpoint stashes each base64
+    image in storage with a short TTL, then delegates to `/ai/gemini`, where the
+    `agy` CLI reads the resulting URLs natively over Alex' OAuth subscription.
+    So vision routes through agy, key-free, exactly like plain `/ai/gemini`.
 
-    Note: Uses GOOGLE_API_KEY from environment.
+    Kept only for back-compat with callers that already send base64
+    (storage / review / knowledge). New callers should prefer `/ai/gemini`
+    with `image_paths` directly.
     """
     import os
     import base64
