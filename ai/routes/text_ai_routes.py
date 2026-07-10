@@ -190,20 +190,43 @@ def _download_storage_images(prompt_text):
         os.makedirs(img_dir, exist_ok=True)
     except OSError:
         img_dir = "/tmp"
+    # Cap vision-image downloads. A real (down-scaled) image is tens of KB;
+    # anything huge is a mis-registered non-image — e.g. a multi-GB ZIP bundle
+    # stored as image/jpg — that would balloon RSS and OOM the process the
+    # moment r.content pulls the whole body into memory. Guard BOTH the
+    # declared Content-Length AND the actually-streamed bytes, so an absent or
+    # lying header can't sneak a 12 GB body past us. (2026-07-10 incident:
+    # 15 ZIP archives up to 19 GB registered as images in the O'Neal set.)
+    max_bytes = 50 * 1024 * 1024
     for url in dict.fromkeys(urls):
+        p = None
         try:
             with httpx.Client(timeout=30.0, follow_redirects=True) as c:
-                r = c.get(url, headers={"X-API-KEY": os.getenv("STORAGE_API_KEY", "Inetpass1")})
-                r.raise_for_status()
-            ct = r.headers.get('content-type', '')
-            ext = 'png' if 'png' in ct else ('webp' if 'webp' in ct else 'jpg')
-            p = os.path.join(img_dir, 'aiimg_' + uuid.uuid4().hex[:10] + '.' + ext)
-            with open(p, 'wb') as fh:
-                fh.write(r.content)
+                with c.stream("GET", url, headers={"X-API-KEY": os.getenv("STORAGE_API_KEY", "Inetpass1")}) as r:
+                    r.raise_for_status()
+                    clen = r.headers.get('content-length')
+                    if clen and int(clen) > max_bytes:
+                        logger.warning('localize: skip oversized ref %s (%s bytes > cap)' % (url, clen))
+                        continue
+                    ct = r.headers.get('content-type', '')
+                    ext = 'png' if 'png' in ct else ('webp' if 'webp' in ct else 'jpg')
+                    p = os.path.join(img_dir, 'aiimg_' + uuid.uuid4().hex[:10] + '.' + ext)
+                    total = 0
+                    with open(p, 'wb') as fh:
+                        for chunk in r.iter_bytes(65536):
+                            total += len(chunk)
+                            if total > max_bytes:
+                                raise ValueError('stream exceeded %d-byte cap' % max_bytes)
+                            fh.write(chunk)
             out.append((url, p))
             logger.info('localized storage image -> ' + p)
         except Exception as e:
-            logger.warning('localize: download failed for ' + url + ': ' + str(e))
+            if p:  # drop any partial file so the CLI never reads a truncated/oversized image
+                try:
+                    os.remove(p)
+                except OSError:
+                    pass
+            logger.warning('localize: download failed/skipped for ' + url + ': ' + str(e))
     return out
 
 
