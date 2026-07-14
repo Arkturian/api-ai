@@ -932,6 +932,13 @@ async def chatgpt_endpoint(
             "codex-default", "default", "auto", "codex",
         ):
             selected_model = None
+        # Vision default: image-bearing calls want a fast multimodal model, not
+        # the top reasoning model. Default to gpt-5.4-mini (env CODEX_VISION_MODEL)
+        # unless the caller pinned a model — verified 2026-07-14 with Automation
+        # as the sweet spot for KG image description (fast, multimodal, Pro-incl.,
+        # matches Alex' "not the top model"). Non-image calls keep the default.
+        if image_paths and not selected_model:
+            selected_model = os.getenv("CODEX_VISION_MODEL", "gpt-5.4-mini")
         if selected_model:
             cmd.extend(["--model", selected_model])
 
@@ -949,24 +956,36 @@ async def chatgpt_endpoint(
             for _u, _p in _imgs:
                 prompt_text = prompt_text.replace(_u, "(siehe angehaengtes Bild)")
             image_paths = list(image_paths) + [_p for _u, _p in _imgs]
-            logger.info("codex: localized %d storage image(s) to /tmp -> -i" % len(_imgs))
 
-        # Image inputs: simple-append pattern (same as claude_endpoint:518-524).
-        # The CLI reads paths/URLs out of the prompt text natively — no `-i`
-        # flag dance needed. Local paths, https URLs, mixed list — all fine.
-        # The earlier `-i` injection + later 400-with-hint defense were both
-        # over-engineered; Alex confirmed (2026-06-13) the canonical
-        # convention is "just tell the model where the image is in the
-        # prompt and the CLI fetches it".
+        # Attach images NATIVELY via `-i` (codex multimodal input) instead of
+        # folding paths into the prompt text. The old append-pattern made codex
+        # agentically fetch/read each file — ~100s & ~50k tokens per image. Native
+        # `-i` is ~3s & ~11k tokens (verified 2026-07-14 with Automation + a
+        # gpt-5.4-mini smoke test on oneal: ~30x faster, ~5x fewer tokens, same
+        # accuracy). `-i` needs a LOCAL file — storage URLs are localized above;
+        # any remaining non-local ref falls back to the prompt-append so nothing
+        # is silently dropped.
         if image_paths:
-            paths_text = "\n".join(image_paths)
-            prompt_text = (
-                f"{prompt_text}\n\nBild-Pfade (lokal oder URL):\n{paths_text}"
-            )
-            logger.info(
-                f"Added {len(image_paths)} image ref(s) to prompt for codex-CLI "
-                f"(append-pattern, no -i flag)"
-            )
+            local_imgs, remote_refs = [], []
+            for _p in image_paths:
+                _ps = str(_p)
+                if _ps and not _ps.startswith(("http://", "https://")) and os.path.exists(_ps):
+                    local_imgs.append(_ps)
+                else:
+                    remote_refs.append(_ps)
+            for _p in local_imgs:
+                cmd.extend(["-i", _p])
+            if local_imgs:
+                logger.info("codex: attached %d image(s) natively via -i" % len(local_imgs))
+            if remote_refs:
+                prompt_text = (
+                    f"{prompt_text}\n\nBild-Pfade (lokal oder URL):\n"
+                    + "\n".join(remote_refs)
+                )
+                logger.info(
+                    "codex: %d non-local image ref(s) folded into prompt (fallback)"
+                    % len(remote_refs)
+                )
 
         # Add prompt as argument
         cmd.append(prompt_text)
