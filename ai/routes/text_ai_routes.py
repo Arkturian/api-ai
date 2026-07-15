@@ -987,7 +987,15 @@ async def chatgpt_endpoint(
                     % len(remote_refs)
                 )
 
-        # Add prompt as argument
+        # Add prompt as argument. `codex exec -i <FILE>...` is VARIADIC — without
+        # a terminator it swallows the positional prompt that follows the last
+        # `-i <path>`, so codex gets no prompt, waits on stdin, and 500s with
+        # "No prompt provided via stdin". Insert `--` to end option parsing so
+        # the prompt is always the positional arg. Regression from #104, repro'd
+        # + fix-verified on oneal 2026-07-15 (endpoint-order -i-last → stdin-500;
+        # `-- <prompt>` → clean).
+        if "-i" in cmd:
+            cmd.append("--")
         cmd.append(prompt_text)
 
         # Call codex exec in subprocess
