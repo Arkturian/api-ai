@@ -42,6 +42,7 @@ _CLI_MAX = {
     "gemini": int(os.getenv("API_AI_CLI_MAX_GEMINI", "2")),
     "claude": int(os.getenv("API_AI_CLI_MAX_CLAUDE", "1")),
     "codex":  int(os.getenv("API_AI_CLI_MAX_CODEX",  "1")),
+    "grok":   int(os.getenv("API_AI_CLI_MAX_GROK",   "2")),
 }
 _CLI_SEM: dict[str, asyncio.Semaphore] = {}
 _ACQUIRE_TIMEOUT = float(os.getenv("API_AI_CLI_ACQUIRE_TIMEOUT", "60"))
@@ -1160,6 +1161,208 @@ async def chatgpt_cost_status():
     """
     from ..services.codex_cost_tracker import codex_cost_tracker
     return codex_cost_tracker.get_status()
+
+
+@router.post("/grok", response_model=AIResponse)
+async def grok_endpoint(
+    prompt: Prompt,
+    model: Optional[str] = None,
+    api_key: str = Depends(get_api_key),
+):
+    """
+    Grok endpoint — runs the xAI `grok` CLI (0.2.x) headless over Alex'
+    xAI subscription (OAuth via `grok login --device-code`, or
+    XAI_API_KEY). Same shape as /ai/gemini (agy) and /ai/chatgpt (codex).
+
+    - model: passed through as `-m`; omitted -> CLI default (`grok-build`).
+      Pseudo-aliases ("grok-default"/"default"/"auto"/"grok") are treated
+      as "no model" so catalog echoes can't break the CLI (lesson from the
+      codex-default incident, PR #101).
+    - effort: `--reasoning-effort <low|medium|high>` (grok default: high).
+    - Vision: NOT supported yet — grok CLI has no `-i` flag; the
+      `--prompt-json` content-blocks path is unverified. Image-bearing
+      requests are rejected with 400 instead of silently hallucinating
+      from a path string (lesson from the gemini-sandbox incident).
+    - No dedicated cost tracker yet (subscription path, $0); token usage
+      is logged when the CLI reports it.
+    """
+    import subprocess
+    import json as json_module
+
+    try:
+        if isinstance(prompt.prompt, str):
+            prompt_text = prompt.prompt
+            image_paths = prompt.image_paths or []
+        else:
+            prompt_text = prompt.prompt.text
+            image_paths = prompt.prompt.image_paths or prompt.image_paths or []
+
+        if image_paths or (not isinstance(prompt.prompt, str) and prompt.prompt.images):
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": "grok_vision_unsupported",
+                    "hint": (
+                        "/ai/grok does not support images yet: the grok CLI "
+                        "has no -i flag and the --prompt-json vision path is "
+                        "unverified. Use /ai/chatgpt or /ai/gemini for "
+                        "image analysis."
+                    ),
+                },
+            )
+
+        if prompt.system:
+            prompt_text = f"{prompt.system}\n\n{prompt_text}"
+            logger.info(f"Prepended system prompt ({len(prompt.system)} chars) to user prompt")
+
+        persona = (await get_persona_bundle("grok", prompt.persona_variant))["rendered"]
+        if persona:
+            prompt_text = f"{persona}\n\n{prompt_text}"
+            logger.info(f"Injected persona api-ai-grok-{prompt.persona_variant} ({len(persona)} chars)")
+
+        cmd = ["grok", "-p", prompt_text, "--output-format", "json"]
+
+        selected_model = model
+        if selected_model and selected_model.strip().lower() in (
+            "grok-default", "default", "auto", "grok",
+        ):
+            selected_model = None
+        if selected_model:
+            cmd.extend(["-m", selected_model])
+        if prompt.effort:
+            cmd.extend(["--reasoning-effort", prompt.effort])
+
+        logger.info(f"Calling grok CLI with prompt length: {len(prompt_text)} chars")
+
+        def run_grok_cli():
+            import os
+            import pwd
+            env = os.environ.copy()
+            env["NO_COLOR"] = "1"
+            cli_home = os.getenv("CLI_HOME") or pwd.getpwuid(os.getuid()).pw_dir
+            env["HOME"] = cli_home
+            # cwd isolation like the other CLIs: run from a scratch dir under
+            # HOME so any context-file discovery (GROK.md etc.) can't pick up
+            # host-level Vorwissen from / or the service WorkingDir.
+            neutral_cwd = os.path.join(cli_home, ".aiapi-neutral")
+            try:
+                os.makedirs(neutral_cwd, exist_ok=True)
+            except OSError:
+                neutral_cwd = "/"
+            return _run_cli_with_pgid(cmd, env=env, timeout=300, cwd=neutral_cwd)
+
+        sem = await _acquire_cli_slot("grok")
+        try:
+            result = await asyncio.to_thread(run_grok_cli)
+        finally:
+            sem.release()
+
+        logger.info(f"Grok CLI returncode: {result.returncode}")
+        logger.info(f"Grok CLI stdout length: {len(result.stdout) if result.stdout else 0}")
+        if result.stderr:
+            logger.info(f"Grok CLI stderr: {result.stderr[:200]}")
+
+        raw_output = result.stdout.strip() if result.stdout else ""
+        if not raw_output:
+            error_msg = result.stderr or "Unknown error from grok CLI (empty response)"
+            logger.error(f"Grok CLI error (empty stdout): {error_msg}")
+            raise HTTPException(status_code=502, detail=f"Grok CLI error: {error_msg}")
+
+        # Output parsing — TOLERANT by design: the success schema could not be
+        # verified pre-auth (only the error envelope {"type":"error",
+        # "message": ...} is confirmed). Strategy: parse the whole output (or,
+        # failing that, the last JSONL line) and pull the first plausible text
+        # field; fall back to raw text rather than erroring. Fail LOUD on the
+        # confirmed error envelope (502) — no silent empty responses (lesson
+        # from the agy/SWFME silent-degradation incident).
+        def _first_text(d: dict):
+            for k in ("response", "message", "text", "content", "result"):
+                v = d.get(k)
+                if isinstance(v, str) and v.strip():
+                    return v
+            return None
+
+        cli_response = None
+        try:
+            cli_response = json_module.loads(raw_output)
+        except json_module.JSONDecodeError:
+            for line in reversed(raw_output.splitlines()):
+                line = line.strip()
+                if not line.startswith("{"):
+                    continue
+                try:
+                    obj = json_module.loads(line)
+                except json_module.JSONDecodeError:
+                    continue
+                if isinstance(obj, dict) and (
+                    _first_text(obj) or obj.get("type") == "error" or obj.get("usage")
+                ):
+                    cli_response = obj
+                    break
+
+        if not isinstance(cli_response, dict):
+            logger.warning("Grok CLI output not parseable as JSON; returning raw text")
+            return AIResponse(
+                response=raw_output,
+                model=selected_model or "grok-cli",
+                tokens_used=None,
+                finish_reason="stop",
+            )
+
+        status = cli_response.get("status") or cli_response.get("type")
+        if (status and str(status).lower() in ("error", "failed")) or (
+            result.returncode != 0 and not _first_text(cli_response)
+        ):
+            grok_error = (
+                cli_response.get("message") or cli_response.get("error") or raw_output[:300]
+            )
+            logger.error(f"grok CLI returned error: {grok_error!r} (returncode={result.returncode})")
+            raise HTTPException(
+                status_code=502,
+                detail={
+                    "error": "grok_error",
+                    "grok_message": grok_error,
+                    "hint": (
+                        "grok CLI returned an error envelope. Common causes: "
+                        "not signed in (run `grok login --device-code` as the "
+                        "service user, or set XAI_API_KEY), CLI version "
+                        "drift, or upstream xAI outage."
+                    ),
+                },
+            )
+
+        response_text = (_first_text(cli_response) or "").rstrip("\n")
+        usage = cli_response.get("usage") or {}
+        input_tokens = int(usage.get("input_tokens", 0) or 0)
+        output_tokens = int(usage.get("output_tokens", 0) or 0)
+        tokens_used = (input_tokens + output_tokens) or None
+        model_name = cli_response.get("model") or selected_model or "grok-default"
+
+        logger.info(
+            f"Grok CLI response: {len(response_text)} chars, "
+            f"{tokens_used} tokens ({input_tokens}in/{output_tokens}out)"
+        )
+        return AIResponse(
+            response=response_text,
+            model=model_name,
+            tokens_used=tokens_used,
+            finish_reason="stop",
+        )
+
+    except subprocess.TimeoutExpired:
+        logger.error("Grok CLI timeout after 300 seconds")
+        raise HTTPException(status_code=504, detail="Grok CLI timeout - prompt may be too long")
+    except FileNotFoundError:
+        logger.error("grok CLI not found - is 'grok' installed and on PATH?")
+        raise HTTPException(status_code=500, detail="Grok CLI not installed on server")
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        error_msg = f"{type(e).__name__}: {str(e)}"
+        logger.error(f"Grok CLI error: {error_msg}")
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=error_msg)
 
 
 @router.post("/gemini", response_model=AIResponse)
