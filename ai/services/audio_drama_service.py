@@ -218,6 +218,38 @@ class AudioDramaGenerator(SpeechGenerator):
             except Exception:
                 pass
 
+            # Fail fast on a degenerate plan: the planning LLM occasionally
+            # returns a syntactically valid plan with ZERO dialog cues
+            # (observed with short single-paragraph inputs, Knowledge species
+            # batch 2026-07-17). Without this guard the pipeline runs all the
+            # way to the mixer and dies with the cryptic "Cannot mix audio
+            # without dialog chunks" — or worse, with add_music=true it can
+            # deliver a music-only file with no voice. Reject retryable
+            # instead: the same input usually passes on a re-run.
+            _dialog_cue_count = sum(
+                1 for c in (result.get('production_cues') or [])
+                if (c.get('type') or '').lower() == 'dialog'
+            )
+            if _dialog_cue_count == 0:
+                try:
+                    from ai.routes.dialog_routes import set_dialog_status
+                    set_dialog_status(self.request.id, phase="analyze", subphase="no_dialog_cues", error="production plan contained no dialog cues")
+                except Exception:
+                    pass
+                raise HTTPException(
+                    status_code=502,
+                    detail={
+                        "error": "no_dialog_cues",
+                        "hint": (
+                            "The AI production plan parsed cleanly but contained "
+                            "no dialog cues (planning-LLM caprice, more likely "
+                            "with very short inputs). Retry the request; for "
+                            "single-narrator TTS without music prefer "
+                            "/ai/tts/narrate which has no planning step."
+                        ),
+                    },
+                )
+
             # If manual music is selected, add it to the analysis result for UI display
             manual_music_id = getattr(self.request.config, 'manual_music_storage_id', None)
             if manual_music_id:
