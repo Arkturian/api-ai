@@ -8,7 +8,7 @@ Endpoints for audio generation:
 - Music Generation
 """
 
-from fastapi import APIRouter, Depends, HTTPException, File, Form, UploadFile
+from fastapi import APIRouter, Depends, HTTPException, File, Form, Query, UploadFile
 from fastapi.responses import JSONResponse
 from fastapi.encoders import jsonable_encoder
 from pydantic import BaseModel
@@ -256,9 +256,64 @@ async def generate_sfx_endpoint(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+async def _fetch_audio_from_url(url: str) -> UploadFile:
+    """Download an audio file from a URL and wrap it as an UploadFile.
+
+    Issue #314: URL-based callers (frontend proxies passing storage media
+    URLs) previously had to download + re-upload as multipart. Streams with
+    a size cap (same defense as the vision image path — a mislabeled huge
+    ref must not balloon RSS), sends X-API-KEY for storage-media URLs
+    (quarantine bypass), and derives a filename from the URL path so the
+    downstream ffprobe/extension logic keeps working.
+    """
+    import httpx
+    from urllib.parse import urlparse, parse_qs
+
+    max_bytes = int(os.getenv("TRANSCRIBE_URL_MAX_MB", "100")) * 1024 * 1024
+    headers = {}
+    if "/storage/media/" in url:
+        headers["X-API-KEY"] = os.getenv("STORAGE_API_KEY", "Inetpass1")
+    buf = io.BytesIO()
+    total = 0
+    try:
+        async with httpx.AsyncClient(timeout=60.0, follow_redirects=True) as client:
+            async with client.stream("GET", url, headers=headers) as r:
+                r.raise_for_status()
+                clen = r.headers.get("content-length")
+                if clen and int(clen) > max_bytes:
+                    raise HTTPException(
+                        status_code=413,
+                        detail=f"file_url content-length {clen} exceeds {max_bytes}-byte cap",
+                    )
+                async for chunk in r.aiter_bytes(65536):
+                    total += len(chunk)
+                    if total > max_bytes:
+                        raise HTTPException(
+                            status_code=413,
+                            detail=f"file_url stream exceeded {max_bytes}-byte cap",
+                        )
+                    buf.write(chunk)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Failed to fetch file_url: {e}")
+    if total == 0:
+        raise HTTPException(status_code=502, detail="file_url returned an empty body")
+    buf.seek(0)
+    path_name = os.path.basename(urlparse(url).path) or "audio"
+    # storage media URLs end in a bare id; honor an explicit format= hint
+    if "." not in path_name:
+        fmt = (parse_qs(urlparse(url).query).get("format") or ["mp3"])[0]
+        path_name = f"{path_name}.{fmt}"
+    logger.info(f"transcribe: fetched {total} bytes from file_url -> {path_name}")
+    return UploadFile(file=buf, filename=path_name)
+
+
 @router.post("/transcribe")
 async def transcribe_audio(
-    file: UploadFile = File(...),
+    file: Optional[UploadFile] = File(None),
+    file_url: Optional[str] = Form(None),
+    file_url_q: Optional[str] = Query(None, alias="file_url"),
     model: str = Form("whisper-1"),
     prompt: Optional[str] = Form(None),
     language: Optional[str] = Form(None),
@@ -289,8 +344,26 @@ async def transcribe_audio(
       response_format=diarized_json.
 
     Supports typical audio MIME types (mp3, m4a, wav, webm, etc.).
+
+    Input (one of, checked in this order):
+    - `file`: multipart upload (classic path)
+    - `file_url`: URL to fetch server-side — as form field or query param
+      (?file_url=...). Streams with a size cap; storage-media URLs get the
+      X-API-KEY quarantine bypass. (Issue #314)
     """
     try:
+        if file is None:
+            url = file_url or file_url_q
+            if not url:
+                raise HTTPException(
+                    status_code=422,
+                    detail=(
+                        "Provide either a multipart 'file' field or a "
+                        "'file_url' (form field or ?file_url= query param)."
+                    ),
+                )
+            file = await _fetch_audio_from_url(url)
+
         if model.startswith("gemini"):
             # GCP-cost-incident hardening: require explicit opt-in + cap check.
             from .text_ai_routes import _check_api_billing_gate
