@@ -41,6 +41,10 @@ class ImageGenRequest(BaseModel):
     # "high" if you explicitly want OpenAI's quality tier (high consistently
     # >180s for 2048², 4K may exceed the 300s upstream timeout).
     quality: Optional[str] = Field(default=None, description="OpenAI gpt-image-* quality: low/medium/high/auto. Null = server picks 'auto'.")
+    # OpenAI gpt-image-* background control. "transparent" yields a PNG with a
+    # real alpha channel (output_format is already png on this path); only the
+    # gpt-image family accepts it — ignored for other providers.
+    background: Optional[str] = Field(default=None, description="OpenAI gpt-image-*: transparent | opaque | auto (default auto). transparent = PNG with alpha.")
     # Reference images for style-transfer / image-to-image. Currently only
     # supported by the OpenAI gpt-image-* family (routed via /v1/images/edits
     # multipart). HTTP(S) URLs allowed; storage-api URLs are fetched with
@@ -197,6 +201,7 @@ async def generate_with_openai_image(
     aspect_ratio: Optional[str] = None,
     quality: Optional[str] = None,
     reference_image_urls: Optional[List[str]] = None,
+    background: Optional[str] = None,
 ) -> dict:
     """Generate image via OpenAI Images API (gpt-image-2 / gpt-image-1 / dall-e-3).
 
@@ -309,7 +314,7 @@ async def generate_with_openai_image(
         }
         if model.startswith("gpt-image-"):
             form["output_format"] = "png"
-            form["background"] = "auto"
+            form["background"] = background or "auto"
         # OpenAI /v1/images/edits accepts the `image` field as either a
         # SINGLE upload (field name `image`) or an ARRAY (field name
         # `image[]` repeated). Sending `image` more than once gets you
@@ -348,9 +353,12 @@ async def generate_with_openai_image(
             "output_format": "png",
             "quality": requested_quality,
         }
-        # gpt-image-1.5 and gpt-image-2 accept "background", dall-e-3 does not.
+        # background: gpt-image-1 + gpt-image-1.5 support "transparent" (real
+        # alpha, empirically verified 2026-07-21); gpt-image-2 REJECTS it with
+        # 400 "Transparent background is not supported for this model" — only
+        # auto/opaque there. dall-e-3 takes no background param at all.
         if model.startswith("gpt-image-"):
-            payload["background"] = "auto"
+            payload["background"] = background or "auto"
 
         logger.info(
             f"OpenAI image gen: model={model}, size={size}, quality={payload['quality']}"
@@ -895,6 +903,7 @@ async def generate_image_endpoint(
                 aspect_ratio=request.aspect_ratio,
                 quality=request.quality,
                 reference_image_urls=request.reference_image_urls,
+                background=request.background,
             )
 
         elif model_name == "dall-e-3":
@@ -992,7 +1001,8 @@ async def list_image_models():
                 "provider": "OpenAI",
                 "description": (
                     "Older gpt-image-1 — cheaper (~$0.05/image medium). "
-                    "Supports native transparent alpha (gpt-image-2 does not). "
+                    "Supports native transparent alpha via background=transparent "
+                    "(so does gpt-image-1.5; gpt-image-2 does NOT). "
                     "Requires confirm_api_billing=true."
                 ),
                 "billing": "payg"
