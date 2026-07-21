@@ -25,7 +25,7 @@ import logging
 import os
 
 # Import routes
-from ai.routes import text_ai_routes, image_ai_routes, audio_ai_routes, dialog_routes, video_ai_routes, narration_routes, image_generation_routes, translate_routes, internal_routes, dashboard_routes, music_ai_routes, realtime_routes
+from ai.routes import text_ai_routes, image_ai_routes, audio_ai_routes, dialog_routes, video_ai_routes, narration_routes, image_generation_routes, translate_routes, internal_routes, dashboard_routes, music_ai_routes, realtime_routes, hunyuan3d_routes
 
 # Setup logging
 logging.basicConfig(
@@ -61,6 +61,7 @@ app.include_router(dialog_routes.router, prefix="/ai/dialog", tags=["Dialog Syst
 app.include_router(image_generation_routes.router, prefix="/ai/scene", tags=["Scene Images"])
 app.include_router(narration_routes.router, prefix="/ai", tags=["Narration TTS"])
 app.include_router(music_ai_routes.router, prefix="/ai", tags=["Music AI"])
+app.include_router(hunyuan3d_routes.router, prefix="/ai", tags=["Hunyuan 3D"])
 app.include_router(translate_routes.router, prefix="/ai", tags=["Translation"])
 app.include_router(realtime_routes.router, prefix="/ai", tags=["Realtime AI"])
 app.include_router(internal_routes.router, prefix="/internal", tags=["Internal"])
