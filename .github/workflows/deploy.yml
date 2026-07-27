@@ -117,9 +117,9 @@ jobs:
             echo "🎯 Deploy to: $DEPLOY_PATH"
 
             if [ -d "$DEPLOY_PATH" ]; then
-              echo "💾 Creating backup..."
-              mkdir -p "$BACKUP_DIR"
-              cp -r "$DEPLOY_PATH" "$BACKUP_PATH"
+              echo "💾 Creating backup (code only — venv excluded, it is rebuilt on demand)..."
+              mkdir -p "$BACKUP_PATH"
+              rsync -a --exclude venv --exclude __pycache__ "$DEPLOY_PATH/" "$BACKUP_PATH/"
               echo "✅ Backup created: $BACKUP_PATH"
             fi
 
@@ -147,15 +147,26 @@ jobs:
             echo "📦 Installing Python dependencies..."
             cd "$DEPLOY_PATH"
 
-            # Use pyenv Python if available
+            # Use pyenv Python if available — REUSE the venv (tar overlay keeps
+            # it intact); a full rebuild on every deploy took the job to multi-
+            # minute/hour territory for pure code changes.
             if [ -f ~/.pyenv/versions/3.11.9/bin/python3.11 ]; then
-              rm -rf venv
-              ~/.pyenv/versions/3.11.9/bin/python3.11 -m venv venv
+              if [ ! -x venv/bin/python ]; then
+                ~/.pyenv/versions/3.11.9/bin/python3.11 -m venv venv
+              fi
               source venv/bin/activate
             fi
 
-            pip install --upgrade pip
-            pip install -r requirements.txt
+            # pip install only when requirements.txt actually changed
+            STAMP_FILE=".deps-stamp"; [ -d venv ] && STAMP_FILE="venv/.deps-stamp"
+            REQ_HASH=$(sha256sum requirements.txt | cut -d' ' -f1)
+            if [ "$(cat "$STAMP_FILE" 2>/dev/null || true)" != "$REQ_HASH" ]; then
+              pip install --upgrade pip
+              pip install -r requirements.txt
+              echo "$REQ_HASH" > "$STAMP_FILE"
+            else
+              echo "Dependencies unchanged — skipping pip install"
+            fi
 
             echo "🔄 Restarting API service..."
             systemctl restart api-ai || echo "⚠️  Service restart may need manual intervention"
