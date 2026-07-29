@@ -1451,41 +1451,32 @@ async def gemini_endpoint(
         # reproduced twice => the slug + effort suffix DOES take effect.
         # The older display-name form ("Gemini 3.5 Flash (High)") still
         # works and is passed through untouched for back-compat.
-        AGY_EFFORTS_PER_MODEL = {
-            "gemini-3.6-flash": {"low", "medium", "high"},   # agy's current default family
-            "gemini-3.5-flash": {"low", "medium", "high"},
-            "gemini-3.1-pro":   {"low", "high"},             # no medium
-        }
-        AGY_EFFORT_DEFAULT = {
-            "gemini-3.6-flash": "medium",
-            "gemini-3.5-flash": "medium",
-            "gemini-3.1-pro":   "high",                      # Pro's better-quality tier
-        }
+        # agy has a NATIVE `--effort` flag and validates the model/effort
+        # pair itself, failing loud with the valid set:
+        #   --model gemini-3.1-pro --effort medium
+        #   -> 'gemini-3.1-pro has no "medium" effort (available: low, high)'
+        # So we deliberately keep NO hardcoded per-model effort table here.
+        # The previous table silently rewrote an unsupported effort to a
+        # default, and — worse — was itself drift-prone: it did not know
+        # gemini-3.6-flash and dropped the effort knob for it entirely.
+        # Letting agy be the source of truth removes that whole bug class
+        # (Post #4383, 2026-07-29). Our existing error envelope surfaces
+        # agy's message verbatim as a 502, so callers see the valid values.
         _AGY_EFFORT_SUFFIXES = ("-low", "-medium", "-high")
         if model:
             _m = model.strip()
-            if _m in AGY_EFFORTS_PER_MODEL:
-                # Bare base slug + separate effort knob -> compose the slug.
-                avail = AGY_EFFORTS_PER_MODEL[_m]
-                requested = (prompt.effort or AGY_EFFORT_DEFAULT[_m]).lower()
-                effort = requested if requested in avail else AGY_EFFORT_DEFAULT[_m]
-                if requested != effort:
-                    logger.info(
-                        f"effort={requested!r} not supported by {_m!r} "
-                        f"(available: {sorted(avail)}); falling back to {effort!r}"
-                    )
-                cmd.extend(["--model", f"{_m}-{effort}"])
-            else:
-                # Already fully qualified (slug with effort suffix, display
-                # name, or a non-gemini model like claude-sonnet-4-6) — pass
-                # through verbatim so new `agy models` entries work without
-                # a code change here.
-                cmd.extend(["--model", _m])
-                if prompt.effort and _m.endswith(_AGY_EFFORT_SUFFIXES):
-                    logger.info(
-                        f"effort={prompt.effort!r} ignored — model {_m!r} "
-                        f"already carries an effort suffix."
-                    )
+            cmd.extend(["--model", _m])
+            # Only pass --effort when the model string does not already
+            # carry it (slug suffix like "...-high" or a display name like
+            # "Gemini 3.5 Flash (High)"), otherwise agy sees a conflict.
+            _preset = _m.endswith(_AGY_EFFORT_SUFFIXES) or "(" in _m
+            if prompt.effort and not _preset:
+                cmd.extend(["--effort", prompt.effort.strip().lower()])
+            elif prompt.effort:
+                logger.info(
+                    f"effort={prompt.effort!r} ignored — model {_m!r} "
+                    f"already carries an effort."
+                )
         logger.info("agy cmd model-arg: %r", cmd[cmd.index("--model")+1] if "--model" in cmd else None)
         _imgs = _download_storage_images(prompt_text)
         for _u, _p in _imgs:
