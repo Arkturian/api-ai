@@ -26,8 +26,17 @@ class ImageGenRequest(BaseModel):
     aspect_ratio: Optional[str] = Field(default="1:1", description="Aspect ratio (1:1, 16:9, 9:16, 1:4, 4:1, 1:8, 8:1)")
     image_size: Optional[str] = Field(default=None, description="Resolution: 1K, 2K, 4K (Nano Banana 2 only)")
     model: Optional[str] = Field(
-        default="nano-banana-2",
-        description="Model: nano-banana-2 (default), nano-banana-pro, imagen-4, higgsfield, higgsfield-reve, minimax-image-01"
+        default="gpt-image-2",
+        description=(
+            "Model. WORKING (OpenAI key set, pay-as-you-go -> needs "
+            "confirm_api_billing=true): gpt-image-2 (default), gpt-image-1.5, "
+            "gpt-image-1 (only one with background=transparent), "
+            "gpt-image-1-mini, dall-e-3. "
+            "MiniMax (payg): minimax-image-01. "
+            "DISABLED (Google key removed 2026-05-30 after the GCP cost "
+            "incident, calls fail fast with 503): nano-banana-2, "
+            "nano-banana-pro, imagen-4."
+        )
     )
     collection_id: Optional[str] = Field(default="ai-generated-images", description="Storage collection")
     link_id: Optional[str] = Field(default=None, description="Link ID for related objects")
@@ -687,8 +696,32 @@ async def generate_with_gemini(
 
     logger.info(f"Gemini image gen: model={model}, aspect_ratio={aspect_ratio}, image_size={image_size}")
 
+    # Preflight: the Google image path is intentionally keyless since the
+    # 2026-05-30 GCP cost incident. Without this check the SDK raises a
+    # bare "No API key was provided" 500 that reads like a config accident
+    # (Issue #490 — cost CloudV2 a blocked task while the OpenAI path was
+    # live all along). Fail fast, explain why, and name the alternative.
+    _g_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+    if not _g_key:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "error": "google_image_path_disabled",
+                "model": model,
+                "reason": (
+                    "The Google image models (nano-banana*, imagen-*) are "
+                    "disabled on this host: no Gemini API key is configured, "
+                    "deliberately, since the 2026-05-30 GCP cost incident."
+                ),
+                "use_instead": (
+                    "model='gpt-image-2' (or gpt-image-1.5 / gpt-image-1 for "
+                    "background='transparent') with confirm_api_billing=true"
+                ),
+            },
+        )
+
     # Use Google GenAI SDK
-    client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+    client = genai.Client(api_key=_g_key)
 
     # Build image config for Nano Banana 2 features
     image_config = None
