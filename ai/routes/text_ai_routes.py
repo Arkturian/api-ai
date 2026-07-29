@@ -1441,38 +1441,52 @@ async def gemini_endpoint(
         # send the slug + an `effort` knob; we compose the display name
         # here from a small lookup. Unknown slug → pass model through
         # verbatim so already-display-name callers keep working.
-        AGY_BASE_NAMES = {
-            "gemini-3.5-flash": "Gemini 3.5 Flash",
-            "gemini-3.1-pro":   "Gemini 3.1 Pro",
-        }
+        # SLUG form, matching what `agy models` publishes today
+        # (e.g. "gemini-3.6-flash-high" — effort baked into the slug).
+        # Verified empirically 2026-07-29 via thinking-token fingerprint,
+        # NOT via the model's self-report (which is unreliable — agy claims
+        # "I am Gemini 3.6 Flash" regardless of --model):
+        #   gemini-3.6-flash-low  -> thinking_tokens=0,   input ~19k
+        #   gemini-3.6-flash-high -> thinking_tokens=361, input ~6.8k
+        # reproduced twice => the slug + effort suffix DOES take effect.
+        # The older display-name form ("Gemini 3.5 Flash (High)") still
+        # works and is passed through untouched for back-compat.
         AGY_EFFORTS_PER_MODEL = {
+            "gemini-3.6-flash": {"low", "medium", "high"},   # agy's current default family
             "gemini-3.5-flash": {"low", "medium", "high"},
-            "gemini-3.1-pro":   {"low", "high"},          # no medium
+            "gemini-3.1-pro":   {"low", "high"},             # no medium
         }
         AGY_EFFORT_DEFAULT = {
+            "gemini-3.6-flash": "medium",
             "gemini-3.5-flash": "medium",
-            "gemini-3.1-pro":   "high",                   # Pro's better-quality tier
+            "gemini-3.1-pro":   "high",                      # Pro's better-quality tier
         }
-        if model and model in AGY_BASE_NAMES:
-            base = AGY_BASE_NAMES[model]
-            avail = AGY_EFFORTS_PER_MODEL[model]
-            requested = (prompt.effort or AGY_EFFORT_DEFAULT[model]).lower()
-            effort = requested if requested in avail else AGY_EFFORT_DEFAULT[model]
-            if requested != effort:
-                logger.info(
-                    f"effort={requested!r} not supported by {model!r} "
-                    f"(available: {sorted(avail)}); falling back to "
-                    f"{effort!r}"
-                )
-            cmd.extend(["--model", f"{base} ({effort.capitalize()})"])
-        elif model:
-            # Back-compat: caller already sent a full display-name string.
-            cmd.extend(["--model", model])
-            if prompt.effort:
-                logger.info(
-                    f"effort={prompt.effort!r} ignored — caller sent "
-                    f"display-name model {model!r}; effort already baked in."
-                )
+        _AGY_EFFORT_SUFFIXES = ("-low", "-medium", "-high")
+        if model:
+            _m = model.strip()
+            if _m in AGY_EFFORTS_PER_MODEL:
+                # Bare base slug + separate effort knob -> compose the slug.
+                avail = AGY_EFFORTS_PER_MODEL[_m]
+                requested = (prompt.effort or AGY_EFFORT_DEFAULT[_m]).lower()
+                effort = requested if requested in avail else AGY_EFFORT_DEFAULT[_m]
+                if requested != effort:
+                    logger.info(
+                        f"effort={requested!r} not supported by {_m!r} "
+                        f"(available: {sorted(avail)}); falling back to {effort!r}"
+                    )
+                cmd.extend(["--model", f"{_m}-{effort}"])
+            else:
+                # Already fully qualified (slug with effort suffix, display
+                # name, or a non-gemini model like claude-sonnet-4-6) — pass
+                # through verbatim so new `agy models` entries work without
+                # a code change here.
+                cmd.extend(["--model", _m])
+                if prompt.effort and _m.endswith(_AGY_EFFORT_SUFFIXES):
+                    logger.info(
+                        f"effort={prompt.effort!r} ignored — model {_m!r} "
+                        f"already carries an effort suffix."
+                    )
+        logger.info("agy cmd model-arg: %r", cmd[cmd.index("--model")+1] if "--model" in cmd else None)
         _imgs = _download_storage_images(prompt_text)
         for _u, _p in _imgs:
             prompt_text = prompt_text.replace(_u, "@" + _p)
