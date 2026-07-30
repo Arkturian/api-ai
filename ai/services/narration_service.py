@@ -24,6 +24,7 @@ from typing import Optional
 from pydantic import BaseModel, Field
 
 import google.generativeai as genai
+from ai.clients.storage_client import storage_api_key
 
 logger = logging.getLogger(__name__)
 
@@ -223,7 +224,7 @@ class NarrationService:
         import httpx
 
         storage_url = os.getenv("STORAGE_API_URL", "https://api-storage.arkturian.com")
-        storage_key = os.getenv("STORAGE_API_KEY", "Inetpass1")
+        storage_key = storage_api_key()
 
         boundary = "----NarrationUpload"
         filename = f"narration_{request.character.name}_{int(time.time())}.mp3"

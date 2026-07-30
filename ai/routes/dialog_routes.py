@@ -44,7 +44,7 @@ os.makedirs(STATUS_DIR, exist_ok=True)
 
 
 def get_api_key():
-    return "Inetpass1"
+    return "placeholder"  # not verified anywhere; see #514 / auth decision
 
 
 def register_temp_dialog_chunks(req_id: str, items: List[Dict[str, Any]]):

@@ -16,6 +16,7 @@ import logging
 import os
 import time
 from pathlib import Path
+from ai.clients.storage_client import storage_api_key
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -203,7 +204,7 @@ def _download_storage_images(prompt_text):
         p = None
         try:
             with httpx.Client(timeout=30.0, follow_redirects=True) as c:
-                with c.stream("GET", url, headers={"X-API-KEY": os.getenv("STORAGE_API_KEY", "Inetpass1")}) as r:
+                with c.stream("GET", url, headers={"X-API-KEY": storage_api_key()}) as r:
                     r.raise_for_status()
                     clen = r.headers.get('content-length')
                     if clen and int(clen) > max_bytes:
@@ -1714,7 +1715,7 @@ async def gemini_vision_endpoint(
                 images_b64 = prompt.prompt.images
 
         storage_url = os.getenv("STORAGE_API_URL", "https://api-storage.arkturian.com")
-        storage_key = os.getenv("STORAGE_API_KEY", "Inetpass1")
+        storage_key = storage_api_key()
 
         image_urls = []
         if images_b64:

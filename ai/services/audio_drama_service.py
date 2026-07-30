@@ -14,6 +14,7 @@ from ai.services.tts_models import SpeechRequest
 
 from fastapi.encoders import jsonable_encoder
 import asyncio
+from ai.clients.storage_client import storage_api_key
 
 class AudioDramaGenerator(SpeechGenerator):
     def __init__(self, request: SpeechRequest, api_key: str, image_gen_func, db_session=None):
@@ -418,7 +419,7 @@ class AudioDramaGenerator(SpeechGenerator):
 
                     # Fetch storage objects via HTTP Storage API
                     STORAGE_API_URL = _os.getenv("STORAGE_API_URL", "https://api-storage.arkturian.com")
-                    STORAGE_API_KEY = _os.getenv("STORAGE_API_KEY", "Inetpass1")
+                    STORAGE_API_KEY = storage_api_key()
 
                     async with httpx.AsyncClient() as client:
                         for idx, mid in enumerate(id_list):
