@@ -434,7 +434,10 @@ async def generate_with_openai_image(
     # ``created`` is a unix timestamp from the OpenAI response — use it as
     # a stable suffix so re-runs don't clash but we don't fabricate dates
     # ourselves.
-    request_id = str(body.get("created") or "openai")
+    # ``created`` is second-granular — two parallel generations can share it,
+    # so add a uuid suffix to keep filenames unique (Issue #512).
+    import uuid as _uuid
+    request_id = f"{body.get('created') or 'openai'}_{_uuid.uuid4().hex[:8]}"
     filename = f"img_openai_{request_id}.{ext}"
 
     saved_obj = await save_file_and_record(
