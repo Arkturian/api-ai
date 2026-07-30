@@ -110,116 +110,97 @@ async def narrate(req: NarrationRequest, api_key: str = Depends(get_api_key)):
     except HTTPException:
         raise
     except Exception as e:
-        # Surface ElevenLabs' own error taxonomy so upstream sees the real
-        # cause instead of a generic 500 (ArTrack IACP 2026-07-01: the
-        # opaque "Narration failed: ..." string cost hours of wrong-lead
-        # debugging on what was really a plain 401 from ElevenLabs).
-        try:
-            from elevenlabs import (
-                APIError as _ELApiError,
-                AuthorizationError as _ELAuthError,
-                RateLimitError as _ELRateError,
-            )
-        except Exception:
-            _ELApiError = _ELAuthError = _ELRateError = ()
-        # The ElevenLabs SDK's ApiError exposes .status_code + .body + .headers
-        # as attributes; str(e) is basically 'headers: {...}' — useless. Pull
-        # the real JSON body out. (ArTrack IACP 2026-07-01: PR #96 v1 gave
-        # ArTrack 'headers: {...}' with no body context, hiding the actual
-        # 'needs_authorization' / 'missing permission models_read' payload
-        # that would have pointed straight at the env-loading bug.)
-        def _elevenlabs_body(err):
-            return getattr(err, "body", None) or None
+        # Classify ElevenLabs failures on the exception's ATTRIBUTES
+        # (.status_code / .body), not on its class.
+        #
+        # Why: the previous version imported APIError / AuthorizationError /
+        # RateLimitError from `elevenlabs` and matched with isinstance().
+        # None of those names exist in the installed SDK — it raises
+        # `elevenlabs.core.api_error.ApiError`. The import therefore threw,
+        # the bare `except` fell back to empty tuples, every isinstance()
+        # was False, and every ElevenLabs error fell through to the generic
+        # 500. The mapping was dead from the day it was written (#527), and
+        # the silent import fallback is exactly what hid it. Duck-typing on
+        # the attributes survives SDK renames; no import, nothing to break.
+        status = getattr(e, "status_code", None)
+        body = getattr(e, "body", None)
+        code = ""
+        if isinstance(body, dict):
+            _d = body.get("detail")
+            if isinstance(_d, dict):
+                code = _d.get("code") or _d.get("status") or ""
+            elif isinstance(_d, str):
+                code = _d
 
-        if isinstance(e, _ELAuthError):
-            # ArTrack IACP 2026-07-01: ElevenLabs returns HTTP 401 for
-            # BOTH true auth failures AND character-quota exhaustion.
-            # Their body.detail.code disambiguates:
-            #   needs_authorization    — no/bad key (env-loading bug etc.)
-            #   quota_exceeded         — monthly character credits used up
-            #   missing_permissions    — scoped API key missing a scope
-            # We re-map quota_exceeded to a 429 so it doesn't get lost in
-            # the "401 = auth" mental model, and we surface the code +
-            # hint distinctly.
-            body = _elevenlabs_body(e) or {}
-            code = ""
-            try:
-                code = (body.get("detail") or {}).get("code") or ""
-            except (AttributeError, TypeError):
-                code = ""
-            if code == "quota_exceeded":
-                raise HTTPException(
-                    status_code=429,
-                    detail={
-                        "error": "elevenlabs_quota_exceeded",
-                        "elevenlabs_code": code,
-                        "elevenlabs_message": str(e)[:200],
-                        "elevenlabs_body": body or None,
-                        "hint": (
-                            "ElevenLabs returned 401 (yes, 401 — not 429 or "
-                            "402) with body.detail.code=quota_exceeded. The "
-                            "monthly character quota is used up. Top up the "
-                            "plan or wait for the next billing cycle. "
-                            "Check body.detail.message for exact remaining "
-                            "credits."
-                        ),
-                    },
-                )
+        # Quota first: ElevenLabs reports an exhausted character quota as
+        # HTTP 401 (not 402/429) with body.detail.code=quota_exceeded, so a
+        # plain status check would misfile it as an auth failure.
+        if code == "quota_exceeded" or code == "quota_exceeded_free_tier":
+            raise HTTPException(
+                status_code=429,
+                detail={
+                    "error": "elevenlabs_quota_exceeded",
+                    "elevenlabs_status": status,
+                    "elevenlabs_code": code,
+                    "elevenlabs_body": body,
+                    "hint": (
+                        "ElevenLabs character quota is exhausted. It reports "
+                        "this as HTTP 401 with body.detail.code="
+                        "quota_exceeded; we re-map it to 429 so callers can "
+                        "distinguish 'out of credits' (retry after top-up or "
+                        "next billing cycle) from a real auth failure. "
+                        "body.detail.message carries the exact credit counts."
+                    ),
+                },
+            )
+        if status == 429:
+            raise HTTPException(
+                status_code=429,
+                detail={
+                    "error": "elevenlabs_rate_limited",
+                    "elevenlabs_status": status,
+                    "elevenlabs_code": code,
+                    "elevenlabs_body": body,
+                    "hint": "ElevenLabs per-minute rate limit hit. Back off and retry.",
+                },
+            )
+        if status in (401, 403):
             raise HTTPException(
                 status_code=401,
                 detail={
                     "error": "elevenlabs_auth_failed",
+                    "elevenlabs_status": status,
                     "elevenlabs_code": code,
-                    "elevenlabs_message": str(e)[:200],
-                    "elevenlabs_body": body or None,
+                    "elevenlabs_body": body,
                     "hint": (
-                        "ElevenLabs returned 401. **A 401 from ElevenLabs "
-                        "does NOT always mean auth** — inspect "
-                        "elevenlabs_body.detail.code to disambiguate: "
-                        "'needs_authorization' = env-loading / bad key / "
-                        "missing xi-api-key header (check "
-                        "'systemctl show api-ai -p EnvironmentFiles'); "
-                        "'quota_exceeded' = character quota is up (handled "
-                        "separately as 429 above); "
-                        "'missing_permissions' = scoped API key missing a "
-                        "scope. The message field carries the exact "
-                        "classification."
+                        "ElevenLabs returned 401/403. A 401 does NOT always "
+                        "mean auth — inspect elevenlabs_code: "
+                        "'needs_authorization' = missing/bad key (check "
+                        "`systemctl show api-ai -p EnvironmentFiles`); "
+                        "'missing_permissions' = scoped key lacks a scope; "
+                        "'quota_exceeded' is handled as 429 above."
                     ),
                 },
             )
-        if isinstance(e, _ELRateError):
-            raise HTTPException(
-                status_code=429,
-                detail={
-                    "error": "elevenlabs_rate_or_quota_exceeded",
-                    "elevenlabs_message": str(e)[:200],
-                    "elevenlabs_body": _elevenlabs_body(e),
-                    "hint": (
-                        "ElevenLabs returned 429. Either the per-minute "
-                        "rate-limit or the monthly character quota is "
-                        "exceeded. Back off + retry, or top up the plan."
-                    ),
-                },
-            )
-        if isinstance(e, _ELApiError):
+        if status is not None:
             raise HTTPException(
                 status_code=502,
                 detail={
                     "error": "elevenlabs_api_error",
-                    "elevenlabs_status": getattr(e, "status_code", None),
-                    "elevenlabs_message": str(e)[:200],
-                    "elevenlabs_body": _elevenlabs_body(e),
-                    "hint": "ElevenLabs returned a non-2xx that isn't auth or rate-limit.",
+                    "elevenlabs_status": status,
+                    "elevenlabs_code": code,
+                    "elevenlabs_body": body,
+                    "hint": "ElevenLabs returned a non-2xx that is not auth, rate-limit or quota.",
                 },
             )
-        # Unknown exception — keep the generic 500 path but log richly.
+        # No status_code attribute -> not an ElevenLabs API error at all.
         logger.exception(f"Narration failed with unclassified exception: {e}")
         raise HTTPException(
             status_code=500,
             detail={
                 "error": "narration_failed",
                 "exception_type": type(e).__name__,
-                "message": str(e),
+                "message": str(e)[:500],
             },
         )
 
