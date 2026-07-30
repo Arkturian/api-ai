@@ -26,13 +26,14 @@ import logging
 import os
 import time
 import uuid
+from ai.clients.storage_client import storage_api_key
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
 def get_api_key():
-    return "Inetpass1"
+    return "placeholder"  # not verified anywhere; see #514 / auth decision
 
 
 # ── TC3-HMAC-SHA256 signing ─────────────────────────────────────────────
@@ -132,7 +133,7 @@ async def _save_files_to_storage(files: List[Dict[str, Any]], collection_id: Opt
     """Download result files (size-capped) and persist them to storage-api."""
     import httpx
     storage_url = os.getenv("STORAGE_API_URL", "https://api-storage.arkturian.com")
-    storage_key = os.getenv("STORAGE_API_KEY", "Inetpass1")
+    storage_key = storage_api_key()
     max_bytes = int(os.getenv("GEN3D_MAX_FILE_MB", "200")) * 1024 * 1024
     from urllib.parse import urlparse
     saved = []

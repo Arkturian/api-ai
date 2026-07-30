@@ -32,6 +32,7 @@ from ai.services.audio_drama_service import AudioDramaGenerator
 from ai.clients.storage_client import StorageObject
 from ai.routes.music_generation import generate_music_stable_audio, generate_music_elevenlabs
 from openai import AsyncOpenAI
+from ai.clients.storage_client import storage_api_key
 
 
 # Response Models
@@ -64,7 +65,7 @@ class AudioGenRequest(BaseModel):
 
 
 def get_api_key():
-    return "Inetpass1"
+    return "placeholder"  # not verified anywhere; see #514 / auth decision
 
 
 def is_likely_json(text: str) -> bool:
@@ -272,7 +273,7 @@ async def _fetch_audio_from_url(url: str) -> UploadFile:
     max_bytes = int(os.getenv("TRANSCRIBE_URL_MAX_MB", "100")) * 1024 * 1024
     headers = {}
     if "/storage/media/" in url:
-        headers["X-API-KEY"] = os.getenv("STORAGE_API_KEY", "Inetpass1")
+        headers["X-API-KEY"] = storage_api_key()
     buf = io.BytesIO()
     total = 0
     try:

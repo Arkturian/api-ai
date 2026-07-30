@@ -12,6 +12,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from typing import List, Optional
 import logging
+from ai.clients.storage_client import storage_api_key
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -166,7 +167,7 @@ async def _download_reference_images(urls: List[str]) -> List[tuple]:
     import uuid
 
     out = []
-    storage_key = os.getenv("STORAGE_API_KEY", "Inetpass1")
+    storage_key = storage_api_key()
     async with httpx.AsyncClient(timeout=60.0, follow_redirects=True) as client:
         for i, url in enumerate(urls):
             headers = {}

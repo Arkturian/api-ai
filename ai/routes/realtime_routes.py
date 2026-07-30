@@ -60,6 +60,7 @@ from ..services.realtime_grant_verifier import (
     host_profile_ids,
     service_key_configured,
 )
+from ai.clients.storage_client import storage_api_key
 from ..services import realtime_budget_guard
 from ..services.realtime_budget_guard import (
     BudgetGuardError,
@@ -2781,9 +2782,7 @@ def _guide_api_service_auth() -> tuple[dict, dict]:
     it to attribute the corpus write to a known relaxed-trust caller.
     """
     headers = {
-        "X-API-KEY": os.getenv("GUIDE_API_KEY") or os.getenv(
-            "STORAGE_API_KEY", "Inetpass1"
-        ),
+        "X-API-KEY": os.getenv("GUIDE_API_KEY") or storage_api_key(),
     }
     params = {"user_id": os.getenv("GUIDE_API_SERVICE_USER", "agent:AiApi")}
     return headers, params
