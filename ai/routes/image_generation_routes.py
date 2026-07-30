@@ -16,6 +16,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 from typing import Optional, List
 import logging
+import os
 import httpx
 import asyncio
 import math
@@ -151,7 +152,7 @@ async def generate_scene_images(req: ImageGenerationRequest):
             resp = await client.post(
                 "http://localhost:8000/ai/claude",
                 json={"prompt": prompt, "system": "Return ONLY a JSON array of strings. No commentary.", "max_tokens": 2000, "model": "opus"},
-                params={"api_key": "Inetpass1"}
+                headers={"X-API-Key": os.getenv("API_KEY", "")},
             )
             resp.raise_for_status()
             data = resp.json()
