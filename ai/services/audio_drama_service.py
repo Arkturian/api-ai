@@ -1,4 +1,5 @@
 import json
+import os
 import subprocess
 from pathlib import Path
 import uuid
@@ -155,7 +156,7 @@ class AudioDramaGenerator(SpeechGenerator):
                         "max_tokens": 8000,
                         "model": "opus"
                     },
-                    params={"api_key": "Inetpass1"}
+                    headers={"X-API-Key": os.getenv("API_KEY", "")},
                 )
                 resp.raise_for_status()
                 data = resp.json()
