@@ -20,7 +20,10 @@ import os
 import logging
 import time
 import asyncio
+from io import BytesIO
 from typing import Optional
+
+from pydub import AudioSegment
 from pydantic import BaseModel, Field
 
 import google.generativeai as genai
@@ -143,6 +146,10 @@ class NarrationService:
 
         # Step 2: Generate TTS via ElevenLabs
         audio_bytes = await self._generate_tts(dramatic_script, request)
+        duration_seconds = self._measure_audio_duration(
+            audio_bytes,
+            request.config.output_format,
+        )
         logger.info(f"[Narration] TTS done ({len(audio_bytes)} bytes, {int((time.time()-t_start)*1000)}ms)")
 
         # Step 3: Optional save to Storage API
@@ -155,10 +162,24 @@ class NarrationService:
         return NarrationResponse(
             audio_id=audio_id,
             audio_url=audio_url,
+            duration_seconds=duration_seconds,
             dramatic_script=dramatic_script,
             original_text=request.text,
             preprocessing_model="gemini" if request.config.preprocessing else None,
         )
+
+    @staticmethod
+    def _measure_audio_duration(audio_bytes: bytes, output_format: str) -> Optional[float]:
+        """Measure generated audio so callers can persist a complete cue contract."""
+        try:
+            audio = AudioSegment.from_file(
+                BytesIO(audio_bytes),
+                format=output_format,
+            )
+            return len(audio) / 1000.0
+        except Exception:
+            logger.exception("[Narration] Failed to measure generated audio duration")
+            return None
 
     async def preprocess_only(self, request: NarrationRequest) -> str:
         """Only run the dramatic preprocessing, return enriched text."""
