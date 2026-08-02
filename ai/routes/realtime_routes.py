@@ -228,6 +228,27 @@ class RealtimeTokenRequest(BaseModel):
             "Null = legacy / generic realtime token."
         ),
     )
+    affect_projection: Optional[str] = Field(
+        default=None,
+        description=(
+            "Opt into the AgentOS avatar affect contract (#767). Only "
+            "supported value: 'agentos.avatar-runtime.v1'. Adds a "
+            "server-defined `report_affect` tool that the model calls once "
+            "per turn with enum values (neutral|pleased|concerned plus "
+            "null|low|high), so frontends can drive the happy/joyful/sad "
+            "avatar roles WITHOUT keyword or transcript heuristics. "
+            "Deliberately independent of companion_mode — the contract is "
+            "character- and language-agnostic. The tool has no server "
+            "side: answer the function_call locally with an empty result, "
+            "do NOT proxy it to /ai/realtime/tool/{name}. No call in a "
+            "turn means neutral, i.e. no affect clip. "
+            "IMPORTANT: do not rely on the model volunteering the call — "
+            "measured 12/18, with the misses on the 'concerned' path. "
+            "After the audio output has drained, send the ready-made "
+            "`affect_followup` payload from this endpoint's response; it "
+            "forces the call (6/6). Null = off."
+        ),
+    )
     detail_level: Optional[str] = Field(
         default="balanced",
         description=(
@@ -585,6 +606,172 @@ SUPPORTED_COMPANION_MODES = {
     "arcturian",
 }
 SUPPORTED_DETAIL_LEVELS = {"brief", "balanced", "technical", "flowing"}
+
+# Affect projection for the AgentOS avatar runtime (#767, contract
+# `agentos.avatar-runtime.v1`, approved product p-5c38e01f9cb6 in #4436).
+#
+# WHY A TOOL AND NOT A SERVER-PUSHED FIELD: after /realtime/token mints the
+# ephemeral client_secret, the browser talks SDP directly to OpenAI. We are
+# not in the turn path and have no channel to emit a per-turn projection.
+# A server-defined, enum-bound tool is therefore the only way to get an
+# authoritative signal onto the wire — and it is stricter than text would
+# be, because the values come from an enum instead of from vocabulary.
+#
+# Deliberately versioned: the frontends must be able to tell a session that
+# speaks this contract from one that does not, without probing.
+SUPPORTED_AFFECT_PROJECTIONS = {"agentos.avatar-runtime.v1"}
+AFFECT_VALUES = ["neutral", "pleased", "concerned"]
+AFFECT_INTENSITY_VALUES = ["low", "high"]
+
+
+def _affect_projection_tools() -> List[dict]:
+    """The single `report_affect` tool for `agentos.avatar-runtime.v1`.
+
+    Contract invariants that live here rather than in the prompt:
+
+      * The values are an ENUM. The contract (§Emotion) forbids guessing
+        affect from German or character-specific vocabulary, so the model
+        never writes free text on this axis.
+      * NO turn_id / session_id / sequence parameters. IDs are adapter
+        metadata; the client correlates the call via the `response.id` of
+        the turn that emitted it. A model inventing an id would break
+        correlation silently — same reasoning as create_task_proposal
+        (#751).
+      * `affect_intensity` accepts null so `neutral` can carry the null the
+        contract mandates. JSON Schema cannot express "neutral implies
+        null", so that coupling is stated in the prompt AND must be
+        re-normalised client-side; see the description below.
+      * This tool has NO server side. It is a signal, not an action — the
+        client answers the function_call locally with an empty result and
+        must NOT proxy it through /ai/realtime/tool/{name}. Every
+        function_call still needs a function_call_output or the Realtime
+        session stalls.
+    """
+    return [
+        {
+            "type": "function",
+            "name": "report_affect",
+            "description": (
+                "Report the emotional colour of the answer you just spoke. "
+                "Call this exactly ONCE per turn, immediately after you "
+                "finish speaking, for every turn without exception — the "
+                "avatar cannot show an emotion you do not report, and a "
+                "missing call is read as neutral. This changes nothing in "
+                "the conversation and reaches nobody; it only drives which "
+                "short avatar clip plays after your answer. Judge the "
+                "content of what you said, not the words used: "
+                "'pleased' = you delivered good news, a success, or "
+                "something the user is glad to hear. "
+                "'concerned' = you delivered bad news, a failure, a "
+                "warning, or something regrettable. "
+                "'neutral' = everything else, including plain factual "
+                "answers — this is the correct and expected default."
+            ),
+            "parameters": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["affect", "affect_intensity"],
+                "properties": {
+                    "affect": {
+                        "type": "string",
+                        "enum": AFFECT_VALUES,
+                        "description": (
+                            "Emotional direction of the turn you just "
+                            "spoke. Default to 'neutral' when unsure."
+                        ),
+                    },
+                    "affect_intensity": {
+                        "type": ["string", "null"],
+                        "enum": AFFECT_INTENSITY_VALUES + [None],
+                        "description": (
+                            "Strength of the affect. MUST be null when "
+                            "affect is 'neutral'. For 'pleased': 'low' = "
+                            "quietly glad, 'high' = genuinely delighted. "
+                            "For 'concerned' the intensity is currently "
+                            "not distinguished by the runtime; send 'low'."
+                        ),
+                    },
+                },
+            },
+        }
+    ]
+
+
+def _affect_followup_payload() -> dict:
+    """The exact `response.create` the client must send after audio ends.
+
+    Measured on gpt-realtime, 2026-08-02, with turn 1 deliberately given no
+    tools so that no call could be spontaneous:
+
+        tool_choice "required"                      -> 6/6 calls
+        tool_choice {"type":"function","name":...}  -> 0/6 calls
+
+    The named-function form is accepted and then SILENTLY IGNORED — the
+    response comes back as a plain message. It looks correct in code and
+    in the vendor docs, which is exactly why this payload is served from
+    here instead of being left to each client to assemble.
+
+    Why "required" is safe even in a session that has other tools (e.g.
+    arcturian's create_task_proposal): the override carries its own
+    single-element `tools` list, so "required" can only pick
+    report_affect. It cannot be coerced into calling a mode's real tool.
+
+    Why a second turn at all: relying on the model to call the tool on its
+    own reached only 12/18 overall and 4/9 on `concerned` — the misses
+    clustered exactly where the answer turned actionable (warning,
+    follow-up question, offer to help), i.e. precisely where `sad` is
+    needed. See issue #767.
+    """
+    return {
+        "type": "response.create",
+        "response": {
+            "output_modalities": ["text"],
+            "tools": _affect_projection_tools(),
+            "tool_choice": "required",
+        },
+    }
+
+
+def _affect_projection_addendum(language: str = "de") -> str:
+    """Prompt paragraph that goes with `report_affect`.
+
+    Kept deliberately language-neutral in substance: it names no German
+    words and no character traits, because the contract requires the same
+    projection for every character and every language. The `language` hint
+    only tells the model which language the conversation runs in.
+    """
+    # The wording below is empirical, not stylistic. Measured against
+    # gpt-realtime on 2026-08-02 with a softer version of this text, the
+    # tool fired reliably for good news and neutral answers but only 2 of
+    # 6 times for bad news — and the misses shared a shape: the answer
+    # turned actionable (a warning, an offer to help, a follow-up
+    # question) and the model dropped the call while attending to it.
+    # Hence the explicit "also when you warn / ask back / offer help",
+    # and hence the call is framed as PART OF the turn rather than as
+    # something that follows it.
+    return (
+        "\n\nAVATAR-AFFEKT (verpflichtender Teil JEDER Antwort):\n"
+        "Eine Antwort ist erst vollstaendig, wenn du report_affect "
+        "aufgerufen hast. Genau einmal, zu jedem einzelnen Turn, ohne "
+        "Ausnahme.\n"
+        "  * AUCH DANN, wenn du warnst, nachfragst, Hilfe anbietest, "
+        "Schritte vorschlaegst oder schlechte Nachrichten ueberbringst. "
+        "Gerade dort wird der Aufruf am leichtesten vergessen — genau "
+        "dort braucht das Gesicht ihn am dringendsten.\n"
+        "  * Der Aufruf erreicht niemanden und aendert nichts am "
+        "Gespraech. Er steuert nur einen kurzen Avatar-Clip.\n"
+        "  * Beurteile den INHALT deiner Antwort, nicht einzelne "
+        "Woerter: gute Nachricht -> 'pleased', schlechte Nachricht, "
+        "Fehler oder Warnung -> 'concerned', alles andere -> "
+        "'neutral'.\n"
+        "  * Bei 'neutral' ist affect_intensity IMMER null. Bei "
+        "'concerned' immer 'low'.\n"
+        "  * Im Zweifel 'neutral'. Ein falsch gezeigtes Gefuehl "
+        "stoert mehr als ein neutrales Gesicht.\n"
+        "  * Erwaehne den Aufruf niemals laut. Sprich ihn nicht aus, "
+        "kuendige ihn nicht an.\n"
+        "SPRACHE DES GESPRAECHS: " + (language or "de") + ".\n"
+    )
 
 
 def _detail_level_addendum(detail_level: str) -> str:
@@ -2021,6 +2208,22 @@ async def mint_realtime_token(
                 "supported": sorted(SUPPORTED_COMPANION_MODES),
             },
         )
+    # Affect projection (#767) is validated here but applied only after the
+    # companion_mode branch below, so it layers ON TOP of whatever tool set
+    # that mode produced instead of competing with it. Fail loud on an
+    # unknown version: a frontend that asks for a contract we do not speak
+    # must not silently get a session without the tool, because it would
+    # then wait forever for a report_affect that never comes.
+    affect_projection = request.affect_projection
+    if affect_projection and affect_projection not in SUPPORTED_AFFECT_PROJECTIONS:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "unsupported_affect_projection",
+                "affect_projection": affect_projection,
+                "supported": sorted(SUPPORTED_AFFECT_PROJECTIONS),
+            },
+        )
     detail_level = (request.detail_level or "balanced").lower()
     if detail_level not in SUPPORTED_DETAIL_LEVELS:
         raise HTTPException(
@@ -2166,7 +2369,28 @@ async def mint_realtime_token(
             },
         )
 
-    tools = _all_tool_defs() if companion_tools_override is None else companion_tools_override
+    tools = list(
+        _all_tool_defs() if companion_tools_override is None
+        else companion_tools_override
+    )
+    # Layer the affect contract on top — additive by design. It must work
+    # for every companion_mode (and for none), because the runtime
+    # contract is character- and mode-agnostic: a session that renders an
+    # avatar needs the same projection regardless of what else it can do.
+    # Note this deliberately also arms zero-tool modes such as
+    # narrator-only and guide-ptt; report_affect is a signal, not a
+    # capability, so it does not widen what those sessions can DO.
+    if affect_projection:
+        _affect_tools = _affect_projection_tools()
+        _existing = {t.get("name") for t in tools}
+        for _t in _affect_tools:
+            if _t["name"] not in _existing:
+                tools.append(_t)
+        instructions += _affect_projection_addendum(request.language or "de")
+        logger.info(
+            "Realtime: affect_projection=%s tools=%s",
+            affect_projection, [t["name"] for t in tools],
+        )
     # OpenAI's GA Realtime session shape (2025-Q4+) nests audio knobs
     # under ``audio.input`` / ``audio.output`` instead of the legacy
     # flat ``voice`` / ``input_audio_format`` fields. The mint endpoint
@@ -2355,6 +2579,17 @@ async def mint_realtime_token(
         "session_id": request.session_id,
         "companion_mode": companion_mode,
         "detail_level": detail_level if companion_mode else None,
+        # Echoed so the client can assert the contract is armed before it
+        # starts waiting for report_affect calls, instead of inferring it
+        # from the tool list.
+        "affect_projection": affect_projection,
+        # The follow-up turn is part of the contract, not an optimisation:
+        # letting the model volunteer the call reaches only ~12/18, and the
+        # misses land on `concerned`. Served ready-made so no client has to
+        # rediscover that the named-function tool_choice is silently
+        # ignored by Realtime. Send this after the audio output has
+        # drained, then project the returned affect. See issue #767.
+        "affect_followup": _affect_followup_payload() if affect_projection else None,
         "raw": body,
     }
 
