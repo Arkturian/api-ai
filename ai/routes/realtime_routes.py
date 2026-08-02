@@ -620,6 +620,33 @@ SUPPORTED_DETAIL_LEVELS = {"brief", "balanced", "technical", "flowing"}
 # Deliberately versioned: the frontends must be able to tell a session that
 # speaks this contract from one that does not, without probing.
 SUPPORTED_AFFECT_PROJECTIONS = {"agentos.avatar-runtime.v1"}
+
+# Arcturian turn resolver (#837, approved product p-5cde1ac88a89).
+#
+# THE PROBLEM IT SOLVES: measured on gpt-realtime 2026-08-02, a model asked
+# to call a tool on its own does so in 12/18 turns, and the misses cluster
+# exactly where the answer turns actionable. Arcturian would then say
+# "gesendet" with no action behind it — the very failure the owner hit in
+# the iPhone tests. Forcing the call gives 6/6.
+#
+# WHY IT IS UNCONDITIONAL: an adapter that first decides "was this a
+# request to act?" is a text heuristic in a different place. The contract
+# bans that. Instead EVERY committed user turn runs the resolver, and
+# `none` is a first-class positive answer — measured to be just as
+# reliable and just as fast (~841 ms median either way).
+#
+# WHY IT CARRIES THE DISPOSITION: the contract states there is no
+# voluntary second model tool-call. So the resolver itself returns the
+# domain fields, and the adapter hands them to the server-side executor.
+# The model never calls the executor and never sees an action id.
+SUPPORTED_ARCTURIAN_RESOLVERS = {"agentos.arcturian-action.v1"}
+RESOLVER_DECISIONS = ["action", "clarify", "none"]
+RESOLVER_ACTION_KINDS = [
+    "send_internal_message",
+    "delegate_internal",
+    "create_collab",
+    "start_workflow",
+]
 AFFECT_VALUES = ["neutral", "pleased", "concerned"]
 AFFECT_INTENSITY_VALUES = ["low", "high"]
 
@@ -695,6 +722,164 @@ def _affect_projection_tools() -> List[dict]:
             },
         }
     ]
+
+
+def _arcturian_resolver_tools() -> List[dict]:
+    """The single `resolve_arcturian_turn` tool (#837).
+
+    Contract invariants that live here rather than in the prompt:
+
+      * NO ids. Not action_id, not conversation_id, not task_id, not
+        correlation_id, not principal/tenant. The model supplies domain
+        fields only; the adapter and server mint every identifier. A model
+        that invents an id breaks correlation silently — same rule as
+        report_affect (#767) and create_task_proposal (#751).
+      * NO authority, no grant, no `class`. The contract is explicit that a
+        model-claimed action class is ineffective: the server derives the
+        effective class from content and target against the grant. `kind`
+        here is a DISPOSITION the server may override, never a permission.
+      * `none` is a real decision, not an absence. That is what makes the
+        resolver safe to run unconditionally and removes any need for the
+        adapter to guess whether a turn was actionable.
+      * `clarify` does NOT create a dialogue state. Per the contract the
+        follow-up question is spoken as an ordinary short answer; only a
+        genuine owner decision becomes a persistent TaskDecision.
+    """
+    return [
+        {
+            "type": "function",
+            "name": "resolve_arcturian_turn",
+            "description": (
+                "Decide what the user's last turn actually requires, BEFORE "
+                "you say anything. This runs on every turn without "
+                "exception and reaches nobody by itself — it only tells the "
+                "system whether to carry out an action. "
+                "'action' = the user asked for something to be done or sent "
+                "and you have everything you need. "
+                "'clarify' = a genuine ambiguity blocks you (unclear "
+                "recipient, unclear intent) — you will then ask ONE short "
+                "question out loud. Do not use this to double-check "
+                "something already stated. "
+                "'none' = no action was requested; a normal answer, a "
+                "question about knowledge, or small talk. This is a "
+                "perfectly good answer and the most common one."
+            ),
+            "parameters": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["decision", "kind", "target", "instruction"],
+                "properties": {
+                    "decision": {
+                        "type": "string",
+                        "enum": RESOLVER_DECISIONS,
+                        "description": (
+                            "What this turn requires. Default to 'none' "
+                            "when the user did not ask for anything to be "
+                            "carried out."
+                        ),
+                    },
+                    "kind": {
+                        "type": ["string", "null"],
+                        "enum": RESOLVER_ACTION_KINDS + [None],
+                        "description": (
+                            "Only for decision='action', otherwise null. "
+                            "Your reading of what should happen — the "
+                            "server re-derives the binding classification "
+                            "from content and target, so this is a "
+                            "proposal, never a permission."
+                        ),
+                    },
+                    "target": {
+                        "type": ["string", "null"],
+                        "description": (
+                            "Only for decision='action', otherwise null. "
+                            "The recipient as the user named them (e.g. an "
+                            "agent name). Do NOT invent or normalise it — "
+                            "the server resolves the real recipient. If the "
+                            "user named nobody, use 'clarify' instead of "
+                            "guessing."
+                        ),
+                    },
+                    "instruction": {
+                        "type": ["string", "null"],
+                        "description": (
+                            "Only for decision='action', otherwise null. "
+                            "What should be conveyed or done, in the user's "
+                            "own sense. If they dictated an exact message, "
+                            "reproduce it VERBATIM — do not paraphrase, "
+                            "summarise or add pleasantries."
+                        ),
+                    },
+                },
+            },
+        }
+    ]
+
+
+def _arcturian_resolver_followup_payload() -> dict:
+    """The forced resolver turn the adapter must send before speaking.
+
+    Same shape as the affect follow-up and for the same measured reason:
+    `tool_choice:"required"` fires 6/6, while the named-function form is
+    accepted by Realtime and then SILENTLY ignored (0/6, verified with
+    turn 1 given no tools so no call could be spontaneous). Served from
+    here so no client re-discovers that trap.
+
+    `output_modalities:["text"]` keeps this turn silent — it runs BEFORE
+    the spoken answer, so any audio here would be heard as a false start.
+    Measured cost: median 841 ms (750-918), identical whether the verdict
+    is `action` or `none`.
+
+    The single-element `tools` list is what makes `"required"` safe: it
+    cannot be coerced into calling report_affect or any other tool that
+    the session also carries.
+    """
+    return {
+        "type": "response.create",
+        "response": {
+            "output_modalities": ["text"],
+            "tools": _arcturian_resolver_tools(),
+            "tool_choice": "required",
+        },
+    }
+
+
+def _arcturian_resolver_addendum(language: str = "de") -> str:
+    """Prompt paragraph for the resolver + the receipt gate.
+
+    The hard rule at the end is the whole point of #837: without a
+    committed receipt the model may not claim success. In the iPhone tests
+    Arcturian talked instead of acting; after this contract it could
+    otherwise talk AND claim to have acted, which is worse because it is
+    no longer visible.
+    """
+    return (
+        "\n\nAUFTRAEGE — WIE SIE WIRKLICH AUSGEFUEHRT WERDEN:\n"
+        "Vor jeder Antwort entscheidet das System ueber "
+        "resolve_arcturian_turn, was dein Turn verlangt. Das laeuft "
+        "IMMER, auch bei einer harmlosen Frage.\n"
+        "  * Hat der Operator etwas zu erledigen verlangt und du hast "
+        "alles Noetige -> 'action'. Gib Ziel und Inhalt so wieder, wie "
+        "er es gemeint hat. Diktiert er einen Wortlaut, uebernimm ihn "
+        "WOERTLICH — nicht umformulieren, nicht ausschmuecken.\n"
+        "  * Fehlt dir wirklich etwas Entscheidendes -> 'clarify', dann "
+        "stellst du GENAU EINE kurze Rueckfrage. Nicht rueckfragen, was "
+        "bereits gesagt wurde.\n"
+        "  * Alles andere -> 'none'. Das ist der Normalfall und voellig "
+        "richtig.\n\n"
+        "WAS DU NIEMALS SAGEN DARFST, BEVOR ES BELEGT IST:\n"
+        "  * 'gesendet', 'gestartet', 'erledigt', 'beauftragt' oder "
+        "Aehnliches erst, wenn dir die Bestaetigung der Ausfuehrung "
+        "vorliegt. Vorher weisst du nicht, ob es geklappt hat.\n"
+        "  * Erfinde keine Auftragsnummern, Empfaengerlisten oder "
+        "Zeitangaben.\n"
+        "  * Sprich nie ueber diesen Mechanismus, ueber Werkzeuge, "
+        "Vertraege oder deine eigenen Grenzen. Der Operator will das "
+        "Ergebnis hoeren, nicht den Apparat.\n"
+        "  * Nach der Ausfuehrung genuegt ein kurzer Satz: was getan "
+        "wurde, an wen. Keine Zusammenfassung deines Vorgehens.\n"
+        "SPRACHE DES GESPRAECHS: " + (language or "de") + ".\n"
+    )
 
 
 def _affect_followup_payload() -> dict:
@@ -1422,7 +1607,23 @@ def _companion_talkback_tools() -> List[dict]:
 
 
 def _companion_arcturian_tools() -> List[dict]:
-    """Single create_task_proposal tool for the `arcturian` mode.
+    """create_task_proposal — NO LONGER MINTED INTO THE ARCTURIAN SESSION.
+
+    Superseded by `_arcturian_resolver_tools()` (#837): the owner overruled
+    the proposal-only product role after the physical iPhone tests, and the
+    approved contract states there is no voluntary second model tool-call.
+    A proposal is now a SERVER decision — cloud-api falls back to a durable
+    proposal/confirmation when an action carries cost, external effect,
+    destruction or an unknown recipient — so the model must not be able to
+    volunteer one.
+
+    Kept because the schema below is the frozen wire for cloud-api's
+    task-create path (Cloud-Codex, #751) and its invariants are still
+    asserted by tests/test_arcturian_tool_contract.py — notably that
+    `external_effects` is an array of strings and never a boolean. Do not
+    re-add this to the mint without a contract revision.
+
+    Original contract notes follow.
 
     Contract frozen by Cloud-Codex in issue #751 (cloud-api dev@d3892e1,
     fixture backend/tests/fixtures/arcturian_task_v1.json), aligned with
@@ -2286,30 +2487,49 @@ async def mint_realtime_token(
             f"{len(companion_tools_override)} tools)"
         )
     elif companion_mode == "arcturian":
-        # Arcturian task-proposal companion (#751, product p-5cde1ac88a89).
-        # Exactly ONE tool: create_task_proposal. relay_to_agent and
-        # propose_to_agent are absent by construction — Arcturian must never
-        # contact an agent directly, and the model cannot call a tool that is
-        # not in its session. Cloud-Codex's grant matrix (#745) is therefore
-        # enforced server-side here, not merely asked for in the prompt.
-        # The call itself goes client-side to cloud-api POST
-        # /api/arcturian/tasks, never through our ungated tool proxy.
+        # Arcturian operative companion (#837, approved product
+        # p-5cde1ac88a89 as of 2026-08-02T23:32:59).
+        #
+        # SUPERSEDES the proposal-only shape of #751. The owner overruled
+        # it after the physical iPhone tests: Arcturian must ACT within a
+        # confirmed baseline authority, not fill in a form for every
+        # request. The old contract could not do that — it acknowledged
+        # every create with dispatched=false.
+        #
+        # The single model tool is now `resolve_arcturian_turn`.
+        # create_task_proposal is deliberately GONE from the session:
+        #   * The contract states there is no voluntary second model
+        #     tool-call — the resolver hands its disposition straight to
+        #     the server-side executor.
+        #   * A proposal is no longer something the model decides to
+        #     create. The server classifies content and target against the
+        #     grant and falls back to a durable proposal/confirmation by
+        #     itself when the action carries cost, external effect,
+        #     destruction or an unknown recipient. Leaving the tool in the
+        #     session would let the model volunteer a proposal it has no
+        #     authority to judge.
+        #   * relay_to_agent and propose_to_agent stay absent, unchanged
+        #     from #751: Arcturian never contacts an agent directly, and a
+        #     tool that is not in the session cannot be called. That is
+        #     the capability gate; the prompt is only the second line.
         instructions = _companion_arcturian_prompt(request.language or "de")
+        instructions += _arcturian_resolver_addendum(request.language or "de")
         instructions += _detail_level_addendum(detail_level)
-        companion_tools_override = _companion_arcturian_tools()
+        companion_tools_override = _arcturian_resolver_tools()
         # Fail loud rather than minting a mode that silently has no tools:
-        # a toolless "arcturian" session would look healthy and quietly be
-        # unable to do the one thing it exists for.
+        # a resolver-less "arcturian" session would look healthy while
+        # every turn silently skipped the gate that makes action provable.
         if not companion_tools_override:
             raise HTTPException(
                 status_code=500,
                 detail={
                     "error": "arcturian_tools_missing",
-                    "hint": "create_task_proposal definition failed to build.",
+                    "hint": "resolve_arcturian_turn definition failed to build.",
                 },
             )
         logger.info(
             f"Realtime: companion_mode=arcturian "
+            f"resolver={sorted(SUPPORTED_ARCTURIAN_RESOLVERS)[0]} "
             f"detail_level={detail_level} "
             f"tools={[t['name'] for t in companion_tools_override]} "
             f"({len(instructions)} chars)"
@@ -2583,6 +2803,20 @@ async def mint_realtime_token(
         # starts waiting for report_affect calls, instead of inferring it
         # from the tool list.
         "affect_projection": affect_projection,
+        # Arcturian turn resolver (#837). Served ready-made for the same
+        # reason as the affect follow-up: the named-function tool_choice
+        # is silently ignored by Realtime (0/6 measured), so no client
+        # should assemble this itself. Send `resolver_followup` BEFORE the
+        # spoken answer on every committed user turn; `none` is a valid
+        # verdict, not an error. Null when the mode is not arcturian.
+        "arcturian_resolver": (
+            sorted(SUPPORTED_ARCTURIAN_RESOLVERS)[0]
+            if companion_mode == "arcturian" else None
+        ),
+        "resolver_followup": (
+            _arcturian_resolver_followup_payload()
+            if companion_mode == "arcturian" else None
+        ),
         # The follow-up turn is part of the contract, not an optimisation:
         # letting the model volunteer the call reaches only ~12/18, and the
         # misses land on `concerned`. Served ready-made so no client has to
