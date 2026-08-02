@@ -36,6 +36,27 @@ router = APIRouter()
 
 KLING_BASE = os.getenv("KLING_API_BASE", "https://api.klingai.com")
 
+# Cost model, derived from 7 measured renders on 2026-08-02 (units billed
+# only on success, and the sum fits exactly): units = duration_s * rate.
+KLING_RATE_PER_S = {"kling-v3": 0.6}
+KLING_RATE_DEFAULT_PER_S = 0.2
+# Durations verified to render: 3, 4, 5, 6, 8. Kling neither validates nor
+# rejects out-of-range values — it bills them — so the range is ours to hold.
+KLING_MIN_DURATION_S = float(os.getenv("KLING_MIN_DURATION_S", "3"))
+KLING_MAX_DURATION_S = float(os.getenv("KLING_MAX_DURATION_S", "10"))
+# Trial pack allows 5 parallel jobs ("100Units-5Con-1Months"); excess comes
+# back as "parallel task over resource pack limit".
+_KLING_MAX_PARALLEL = int(os.getenv("KLING_MAX_PARALLEL", "5"))
+_kling_sem: Optional[asyncio.Semaphore] = None
+
+
+def _kling_semaphore() -> asyncio.Semaphore:
+    """Lazy-create the submit semaphore (needs a running event loop)."""
+    global _kling_sem
+    if _kling_sem is None:
+        _kling_sem = asyncio.Semaphore(_KLING_MAX_PARALLEL)
+    return _kling_sem
+
 
 def get_api_key():
     return "placeholder"  # not verified anywhere; see #514 / auth decision
@@ -110,7 +131,7 @@ class KlingVideoRequest(BaseModel):
         ),
     )
     mode: Optional[str] = Field(default=None, description="std (cheaper) or pro (higher quality)")
-    duration: Optional[str] = Field(default=None, description="'5' or '10' seconds")
+    duration: Optional[str] = Field(default=None, description="Clip length in seconds as a string. Verified: 3,4,5,6,8. Cost is linear: duration * 0.6 units on kling-v3.")
     cfg_scale: Optional[float] = Field(default=None, description="0.0-1.0, how strictly to follow the prompt")
     image_tail: Optional[str] = Field(default=None, description="Optional end-frame image (same formats as image)")
     wait_for_result: bool = Field(default=True, description="true = poll until done (video gen takes minutes)")
@@ -121,6 +142,22 @@ class KlingVideoRequest(BaseModel):
     confirm_api_billing: Optional[bool] = Field(
         default=False,
         description="Required true — Kling is prepaid; each job consumes account units.",
+    )
+    check_balance: bool = Field(
+        default=True,
+        description=(
+            "Query remaining units before submitting and refuse with 402 if "
+            "they would not cover this clip. Costs nothing; set false only to "
+            "save the extra round-trip."
+        ),
+    )
+    max_units: Optional[float] = Field(
+        default=None,
+        description=(
+            "Refuse the job if the estimated cost exceeds this many units — a "
+            "spend guard for scripted batches. Estimate is "
+            "duration_s * 0.6 on kling-v3, * 0.2 on the default model."
+        ),
     )
 
 
@@ -202,6 +239,78 @@ async def kling_image_to_video(request: KlingVideoRequest, api_key: str = Depend
         request.model_name = os.getenv("KLING_TAIL_MODEL", "kling-v3")
         logger.info("kling: image_tail given -> model_name=%s", request.model_name)
 
+    # ---- Cost preflight -------------------------------------------------
+    # Kling validates NOTHING before charging: an out-of-range duration is
+    # accepted, rendered and billed, and the job only fails (or silently
+    # succeeds at some other length) later. Learned the expensive way on
+    # 2026-08-02 — a parameter probe with eight duration values burned ~16
+    # units of a 100-unit trial pack. So we validate and price the request
+    # BEFORE handing it to Kling.
+    #
+    # Cost model derived from 7 measured renders (exact fit, see below):
+    #   kling-v3            0.6 units/second
+    #   account default     0.2 units/second
+    # Linear in duration, NOT a flat per-clip fee — a 3s clip really is
+    # cheaper than an 8s one.
+    try:
+        dur_s = float(request.duration) if request.duration is not None else 5.0
+    except (TypeError, ValueError):
+        raise HTTPException(
+            status_code=422,
+            detail={"error": "invalid_duration", "got": request.duration,
+                    "hint": "duration is a string of seconds, e.g. \"5\"."},
+        )
+    if not (KLING_MIN_DURATION_S <= dur_s <= KLING_MAX_DURATION_S):
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "error": "duration_out_of_range",
+                "got": request.duration,
+                "allowed": f"{KLING_MIN_DURATION_S}-{KLING_MAX_DURATION_S} seconds",
+                "hint": (
+                    "Kling accepts and BILLS out-of-range values instead of "
+                    "rejecting them, so we reject here. Verified working: "
+                    "3, 4, 5, 6, 8."
+                ),
+            },
+        )
+
+    rate = KLING_RATE_PER_S.get(request.model_name or "", KLING_RATE_DEFAULT_PER_S)
+    est_units = round(dur_s * rate, 2)
+
+    if request.max_units is not None and est_units > request.max_units:
+        raise HTTPException(
+            status_code=422,
+            detail={"error": "over_max_units", "estimated_units": est_units,
+                    "max_units": request.max_units},
+        )
+
+    if request.check_balance:
+        try:
+            acct = await _kling_call(
+                "GET",
+                f"/account/costs?start_time={int(time.time() - 86400) * 1000}"
+                f"&end_time={int(time.time()) * 1000}",
+            )
+            remaining = sum(
+                (p.get("remaining_quantity") or 0)
+                for p in (acct.get("resource_pack_subscribe_infos") or [])
+            )
+            if remaining < est_units:
+                raise HTTPException(
+                    status_code=402,
+                    detail={
+                        "error": "insufficient_kling_units",
+                        "estimated_units": est_units,
+                        "remaining_units": remaining,
+                        "hint": "Top up the Kling resource pack, or shorten the clip.",
+                    },
+                )
+        except HTTPException:
+            raise
+        except Exception as e:  # balance check must never block a valid job
+            logger.warning(f"kling: balance preflight failed, continuing: {e}")
+
     payload: Dict[str, Any] = {}
     for field, key in (
         ("image", "image"), ("image_tail", "image_tail"), ("prompt", "prompt"),
@@ -212,14 +321,20 @@ async def kling_image_to_video(request: KlingVideoRequest, api_key: str = Depend
         if val is not None:
             payload[key] = val
 
-    data = await _kling_call("POST", "/v1/videos/image2video", payload)
+    # Concurrency: the trial pack allows 5 parallel jobs ("100Units-5Con");
+    # extras come back as "parallel task over resource pack limit". Cap it
+    # locally so a burst degrades into queueing instead of hard rejections.
+    sem = _kling_semaphore()
+    async with sem:
+        data = await _kling_call("POST", "/v1/videos/image2video", payload)
     task_id = data.get("task_id")
     if not task_id:
         raise HTTPException(status_code=502, detail=f"Kling returned no task_id: {data}")
     logger.info(f"kling: submitted task {task_id} (model={request.model_name or 'default'})")
 
     if not request.wait_for_result:
-        return {"task_id": task_id, "status": data.get("task_status") or "submitted"}
+        return {"task_id": task_id, "status": data.get("task_status") or "submitted",
+                "estimated_units": est_units}
 
     deadline = time.monotonic() + max(60, request.timeout_s)
     task: Dict[str, Any] = {}
@@ -241,7 +356,8 @@ async def kling_image_to_video(request: KlingVideoRequest, api_key: str = Depend
                 "hint": f"still running after {request.timeout_s}s — poll GET /ai/genvideo/kling/status/{task_id}"}
 
     video = _extract_video(task)
-    result: Dict[str, Any] = {"task_id": task_id, "status": "succeed", "video": video}
+    result: Dict[str, Any] = {"task_id": task_id, "status": "succeed",
+                              "estimated_units": est_units, "video": video}
     if request.save_to_storage and video and video.get("url"):
         result["saved"] = await _save_video_to_storage(
             video["url"], request.collection_id, request.link_id
