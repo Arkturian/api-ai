@@ -102,8 +102,11 @@ class KlingVideoRequest(BaseModel):
     model_name: Optional[str] = Field(
         default=None,
         description=(
-            "Kling model, e.g. kling-v1, kling-v1-6, kling-v2-master. Omit to "
-            "let Kling pick its account default."
+            "Kling model. Omit to let the server pick: kling-v3 when an "
+            "image_tail (end frame) is given, otherwise the account default. "
+            "Only kling-v3 supports start+end frames — verified against the "
+            "live API: kling-v2-master rejects image_tail with 'Image tail is "
+            "not supported by the current model'."
         ),
     )
     mode: Optional[str] = Field(default=None, description="std (cheaper) or pro (higher quality)")
@@ -189,6 +192,15 @@ async def kling_image_to_video(request: KlingVideoRequest, api_key: str = Depend
             status_code=422,
             detail="Provide at least `image` (image-to-video) or `prompt`.",
         )
+
+    # Start+end-frame loops (the Realtime-avatar use case: same image in both
+    # roles so the clip starts and ends in an identical pose and can be hard-cut
+    # without a black flash) only work on kling-v3. Other models reject
+    # image_tail outright. Pick it automatically instead of letting the caller
+    # hit "Image tail is not supported by the current model".
+    if request.image_tail and not request.model_name:
+        request.model_name = os.getenv("KLING_TAIL_MODEL", "kling-v3")
+        logger.info("kling: image_tail given -> model_name=%s", request.model_name)
 
     payload: Dict[str, Any] = {}
     for field, key in (
