@@ -582,6 +582,7 @@ SUPPORTED_COMPANION_MODES = {
     "agentos-narrator",
     "guide-ptt",
     "agent-transparent",
+    "arcturian",
 }
 SUPPORTED_DETAIL_LEVELS = {"brief", "balanced", "technical", "flowing"}
 
@@ -1231,6 +1232,191 @@ def _companion_talkback_tools() -> List[dict]:
             },
         }
     ]
+
+
+def _companion_arcturian_tools() -> List[dict]:
+    """Single create_task_proposal tool for the `arcturian` mode.
+
+    Contract frozen by Cloud-Codex in issue #751 (cloud-api dev@d3892e1,
+    fixture backend/tests/fixtures/arcturian_task_v1.json), aligned with
+    the approved product p-5cde1ac88a89:
+
+      * This is the ONLY tool in the session. `relay_to_agent` and
+        `propose_to_agent` are deliberately absent — Arcturian must never
+        contact an agent directly, and a tool the model cannot see is a
+        tool it cannot call. That is the capability gate; the prompt is
+        only the second line of defence.
+      * The call does NOT go through /ai/realtime/tool/{name}. The client
+        posts it to cloud-api `POST /api/arcturian/tasks`, which wraps the
+        arguments into the frozen task-create wire.
+      * Creating a proposal contacts nobody: the task starts in state
+        `clarifying`. An explicit offer moves it to `proposed`, a HUMAN
+        accept sets confirmed, and only then is dispatch authorisable.
+      * `authority.*` are named SETS, checked as `requested ⊆ confirmed`.
+        `external_effects` is therefore an ARRAY OF STRINGS — never a
+        boolean. Cloud-api's `_string_set()` would silently turn `false`
+        into the empty set and hollow out the authority check, so the
+        schema below rejects a boolean outright. "No external effect" is
+        `[]`.
+      * IDs stay out of the model's hands: task_id, message_id,
+        correlation_id, revision, principal_user_id and tenant_id are
+        adapter/domain metadata. Principal and tenant come from the
+        authenticated caller on cloud-api's side.
+    """
+    return [
+        {
+            "type": "function",
+            "name": "create_task_proposal",
+            "description": (
+                "Draft a task proposal for the operator. This contacts "
+                "NOBODY: the task is created in state 'clarifying' and "
+                "needs an explicit offer plus a human accept before "
+                "anything is dispatched. Use it whenever the operator "
+                "describes work to be done — capture the intent, do not "
+                "execute it. Never claim a task was sent, assigned or "
+                "started; say that you drafted a proposal for review. "
+                "Ask for missing detail instead of inventing it: an "
+                "unclear proposal costs a clarification round, a wrong "
+                "one costs trust. State only what the operator asked "
+                "for in 'authority' — it is the ceiling of what may "
+                "later be dispatched, and it is checked as a subset of "
+                "what the human confirms."
+            ),
+            "parameters": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "title": {
+                        "type": "string",
+                        "description": "Short headline for the work board.",
+                    },
+                    "description": {
+                        "type": "string",
+                        "description": "What concretely should be done, in the operator's intent.",
+                    },
+                    "mode": {
+                        "type": "string",
+                        "enum": ["direct_iacp", "content_collab", "swfme"],
+                        "description": (
+                            "Delivery route. direct_iacp = one agent directly; "
+                            "content_collab = durable discussion in a Content post; "
+                            "swfme = workflow trigger. Route details for "
+                            "content_collab/swfme are added during clarification, "
+                            "not here."
+                        ),
+                    },
+                    "target": {
+                        "type": ["string", "null"],
+                        "description": (
+                            "Target agent. REQUIRED for direct_iacp. Null for the "
+                            "other modes unless the operator named someone."
+                        ),
+                    },
+                    "participants": {
+                        "type": "array", "items": {"type": "string"},
+                        "description": "Further agents who should take part.",
+                    },
+                    "acceptance_criteria": {
+                        "type": "array", "items": {"type": "string"},
+                        "description": "How the operator will judge this as done.",
+                    },
+                    "constraints": {
+                        "type": "array", "items": {"type": "string"},
+                        "description": "Limits the operator stated (time, budget, scope).",
+                    },
+                    "authority": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "description": (
+                            "Ceiling of what a later dispatch may touch. Named sets, "
+                            "checked as subset-of-confirmed. Empty array means 'none' — "
+                            "never use a boolean."
+                        ),
+                        "properties": {
+                            "targets": {"type": "array", "items": {"type": "string"}},
+                            "systems": {"type": "array", "items": {"type": "string"}},
+                            "data": {"type": "array", "items": {"type": "string"}},
+                            "external_effects": {
+                                "type": "array", "items": {"type": "string"},
+                                "description": (
+                                    "Effects reaching outside the federation (e.g. "
+                                    "'send_email', 'publish'). ARRAY, never a boolean; "
+                                    "'no external effect' is []."
+                                ),
+                            },
+                            "allow_mode_promotion": {
+                                "type": "boolean",
+                                "description": (
+                                    "May direct_iacp later be promoted to "
+                                    "content_collab? Only true if the operator said so."
+                                ),
+                            },
+                        },
+                        "required": [
+                            "targets", "systems", "data",
+                            "external_effects", "allow_mode_promotion",
+                        ],
+                    },
+                    "context_refs": {
+                        "type": "array",
+                        "description": "Stable references the operator pointed at.",
+                        "items": {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "properties": {
+                                "kind": {"type": "string"},
+                                "id": {"type": ["string", "number"]},
+                            },
+                            "required": ["kind", "id"],
+                        },
+                    },
+                    "response_contract": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "properties": {
+                            "deadline_seconds": {"type": "number"},
+                        },
+                        "required": ["deadline_seconds"],
+                    },
+                },
+                "required": [
+                    "title", "description", "mode", "target",
+                    "participants", "acceptance_criteria", "constraints",
+                    "authority", "context_refs", "response_contract",
+                ],
+            },
+        }
+    ]
+
+
+def _companion_arcturian_prompt(language: str = "de") -> str:
+    """System prompt for the `arcturian` companion mode (#751)."""
+    return (
+        "Du bist Arcturian, die Stimme des Operators fuer Aufgaben-"
+        "Entwuerfe.\n\n"
+        "DEINE EINZIGE HANDLUNG: create_task_proposal. Du hast kein "
+        "Werkzeug, um einen Agenten zu kontaktieren, und das ist "
+        "Absicht.\n\n"
+        "WAS EIN VORSCHLAG IST — UND WAS NICHT:\n"
+        "  * Ein Vorschlag erreicht NIEMANDEN. Er entsteht im Zustand "
+        "'clarifying'. Erst ein Angebot macht daraus 'proposed', und "
+        "erst ein MENSCH bestaetigt ihn. Danach erst darf ueberhaupt "
+        "zugestellt werden.\n"
+        "  * Sage deshalb nie 'ich habe das geschickt', 'ist "
+        "beauftragt' oder 'laeuft schon'. Sage: 'Ich habe einen "
+        "Vorschlag entworfen, du kannst ihn pruefen.'\n"
+        "  * Wenn dir etwas fehlt, frag nach. Eine Rueckfrage kostet "
+        "einen Satz, ein erfundenes Detail kostet Vertrauen.\n\n"
+        "AUTHORITY IST EINE OBERGRENZE, KEINE WUNSCHLISTE:\n"
+        "  * Trage in 'authority' nur ein, was der Operator wirklich "
+        "verlangt hat. Es beschreibt, was eine spaetere Zustellung "
+        "hoechstens anfassen darf.\n"
+        "  * Keine Aussenwirkung ist eine leere Liste, niemals 'false'.\n"
+        "  * allow_mode_promotion nur auf true, wenn der Operator das "
+        "ausdruecklich gesagt hat.\n\n"
+        "SPRACHE: " + (language or "de") + ". Sprich knapp und "
+        "bestaetige, was du verstanden hast, bevor du entwirfst.\n"
+    )
 
 
 def _companion_relay_tools() -> List[dict]:
@@ -1895,6 +2081,35 @@ async def mint_realtime_token(
             f"companion_run_id={request.companion_run_id or 'none'} "
             f"({len(instructions)} chars, "
             f"{len(companion_tools_override)} tools)"
+        )
+    elif companion_mode == "arcturian":
+        # Arcturian task-proposal companion (#751, product p-5cde1ac88a89).
+        # Exactly ONE tool: create_task_proposal. relay_to_agent and
+        # propose_to_agent are absent by construction — Arcturian must never
+        # contact an agent directly, and the model cannot call a tool that is
+        # not in its session. Cloud-Codex's grant matrix (#745) is therefore
+        # enforced server-side here, not merely asked for in the prompt.
+        # The call itself goes client-side to cloud-api POST
+        # /api/arcturian/tasks, never through our ungated tool proxy.
+        instructions = _companion_arcturian_prompt(request.language or "de")
+        instructions += _detail_level_addendum(detail_level)
+        companion_tools_override = _companion_arcturian_tools()
+        # Fail loud rather than minting a mode that silently has no tools:
+        # a toolless "arcturian" session would look healthy and quietly be
+        # unable to do the one thing it exists for.
+        if not companion_tools_override:
+            raise HTTPException(
+                status_code=500,
+                detail={
+                    "error": "arcturian_tools_missing",
+                    "hint": "create_task_proposal definition failed to build.",
+                },
+            )
+        logger.info(
+            f"Realtime: companion_mode=arcturian "
+            f"detail_level={detail_level} "
+            f"tools={[t['name'] for t in companion_tools_override]} "
+            f"({len(instructions)} chars)"
         )
     elif companion_mode == "guide-ptt":
         # GuideDevBot's PTT-Hybrid mint (Content-Post #1233):
