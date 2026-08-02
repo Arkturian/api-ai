@@ -36,10 +36,21 @@ router = APIRouter()
 
 KLING_BASE = os.getenv("KLING_API_BASE", "https://api.klingai.com")
 
-# Cost model, derived from 7 measured renders on 2026-08-02 (units billed
+# Cost model, derived from 8 measured renders on 2026-08-02 (units billed
 # only on success, and the sum fits exactly): units = duration_s * rate.
+#
+# `mode` changes BOTH price and output resolution — Kling keeps the pixel
+# count fixed per mode and takes the aspect ratio from the input image:
+#   std  921,600 px  -> 960x960 (1:1), 720x1280 (9:16)   = 720p class
+#   pro  2,073,600 px -> 1440x1440 (1:1), 1080x1920 (9:16) = 1080p class
+# So pro is 2.25x the pixels for 1.33x the price. Measured, not documented:
+# the vendor doc endpoint answers HTTP 446 to automated fetches.
 KLING_RATE_PER_S = {"kling-v3": 0.6}
+KLING_RATE_PER_S_PRO = {"kling-v3": 0.8}
 KLING_RATE_DEFAULT_PER_S = 0.2
+# Same 1.33x factor applied to the unknown-model fallback, so an unpriced
+# model in pro mode is over- rather than under-estimated.
+KLING_PRO_MULTIPLIER = 1.33
 # Durations verified to render: 3, 4, 5, 6, 8. Kling neither validates nor
 # rejects out-of-range values — it bills them — so the range is ours to hold.
 KLING_MIN_DURATION_S = float(os.getenv("KLING_MIN_DURATION_S", "3"))
@@ -130,7 +141,19 @@ class KlingVideoRequest(BaseModel):
             "not supported by the current model'."
         ),
     )
-    mode: Optional[str] = Field(default=None, description="std (cheaper) or pro (higher quality)")
+    mode: Optional[str] = Field(
+        default=None,
+        description=(
+            "Resolution class and price, not just a quality knob. "
+            "std (default): 720p class — 960x960 from a square image, "
+            "720x1280 from 9:16, at 0.6 units/s. "
+            "pro: 1080p class — 1440x1440 from a square image, 1080x1920 "
+            "from 9:16, at 0.8 units/s. Aspect ratio always follows the "
+            "input image; only the pixel count changes. Use pro for "
+            "production footage that sits next to existing 1080p-class "
+            "material, std for cheap tests."
+        ),
+    )
     duration: Optional[str] = Field(default=None, description="Clip length in seconds as a string. Verified: 3,4,5,6,8. Cost is linear: duration * 0.6 units on kling-v3.")
     cfg_scale: Optional[float] = Field(default=None, description="0.0-1.0, how strictly to follow the prompt")
     image_tail: Optional[str] = Field(default=None, description="Optional end-frame image (same formats as image)")
@@ -275,7 +298,18 @@ async def kling_image_to_video(request: KlingVideoRequest, api_key: str = Depend
             },
         )
 
-    rate = KLING_RATE_PER_S.get(request.model_name or "", KLING_RATE_DEFAULT_PER_S)
+    # pro costs more per second AND renders a resolution class higher; both
+    # must be reflected here or the balance preflight and max_units guard
+    # under-count. Measured on 2026-08-02: est 1.8 vs 2.4 actually billed.
+    _mode = (request.mode or "").strip().lower()
+    _model = request.model_name or ""
+    if _mode == "pro":
+        rate = KLING_RATE_PER_S_PRO.get(
+            _model,
+            KLING_RATE_PER_S.get(_model, KLING_RATE_DEFAULT_PER_S) * KLING_PRO_MULTIPLIER,
+        )
+    else:
+        rate = KLING_RATE_PER_S.get(_model, KLING_RATE_DEFAULT_PER_S)
     est_units = round(dur_s * rate, 2)
 
     if request.max_units is not None and est_units > request.max_units:
