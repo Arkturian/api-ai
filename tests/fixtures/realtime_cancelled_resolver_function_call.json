@@ -1,0 +1,246 @@
+{
+  "description": "Real gpt-realtime event sequence: resolver response cancelled at output_item.added; a complete, well-formed function_call still arrives afterwards on BOTH paths (arguments.done and done.output). Captured by AiApi for issue #886 regression pinning.",
+  "captured_at": "2026-08-03",
+  "model": "gpt-realtime",
+  "sent_metadata": {
+    "agentos_response_kind": "arcturian.resolver",
+    "agentos_turn_id": "turn-fixture"
+  },
+  "events": [
+    {
+      "type": "response.created",
+      "response": {
+        "id": "resp_E8pzFM5QwadIegkBNXVr5",
+        "status": "in_progress",
+        "status_details": null,
+        "metadata": {
+          "agentos_response_kind": "arcturian.resolver",
+          "agentos_turn_id": "turn-fixture"
+        },
+        "output": []
+      }
+    },
+    {
+      "type": "response.output_item.added",
+      "response_id": "resp_E8pzFM5QwadIegkBNXVr5",
+      "output_index": 0
+    },
+    {
+      "__marker__": "CLIENT_SENT_response.cancel",
+      "response_id": "resp_E8pzFM5QwadIegkBNXVr5"
+    },
+    {
+      "type": "response.function_call_arguments.delta",
+      "response_id": "resp_E8pzFM5QwadIegkBNXVr5",
+      "item_id": "item_E8pzF0qNYJNQS18EpnnXv",
+      "output_index": 0,
+      "call_id": "call_Rkrxx2IJJ52vFNSk",
+      "delta": "{"
+    },
+    {
+      "type": "response.function_call_arguments.delta",
+      "response_id": "resp_E8pzFM5QwadIegkBNXVr5",
+      "item_id": "item_E8pzF0qNYJNQS18EpnnXv",
+      "output_index": 0,
+      "call_id": "call_Rkrxx2IJJ52vFNSk",
+      "delta": "  \n"
+    },
+    {
+      "type": "response.function_call_arguments.delta",
+      "response_id": "resp_E8pzFM5QwadIegkBNXVr5",
+      "item_id": "item_E8pzF0qNYJNQS18EpnnXv",
+      "output_index": 0,
+      "call_id": "call_Rkrxx2IJJ52vFNSk",
+      "delta": " "
+    },
+    {
+      "type": "response.function_call_arguments.delta",
+      "response_id": "resp_E8pzFM5QwadIegkBNXVr5",
+      "item_id": "item_E8pzF0qNYJNQS18EpnnXv",
+      "output_index": 0,
+      "call_id": "call_Rkrxx2IJJ52vFNSk",
+      "delta": " \""
+    },
+    {
+      "type": "response.function_call_arguments.delta",
+      "response_id": "resp_E8pzFM5QwadIegkBNXVr5",
+      "item_id": "item_E8pzF0qNYJNQS18EpnnXv",
+      "output_index": 0,
+      "call_id": "call_Rkrxx2IJJ52vFNSk",
+      "delta": "decision"
+    },
+    {
+      "type": "response.function_call_arguments.delta",
+      "response_id": "resp_E8pzFM5QwadIegkBNXVr5",
+      "item_id": "item_E8pzF0qNYJNQS18EpnnXv",
+      "output_index": 0,
+      "call_id": "call_Rkrxx2IJJ52vFNSk",
+      "delta": "\":"
+    },
+    {
+      "type": "response.function_call_arguments.delta",
+      "response_id": "resp_E8pzFM5QwadIegkBNXVr5",
+      "item_id": "item_E8pzF0qNYJNQS18EpnnXv",
+      "output_index": 0,
+      "call_id": "call_Rkrxx2IJJ52vFNSk",
+      "delta": " \""
+    },
+    {
+      "type": "response.function_call_arguments.delta",
+      "response_id": "resp_E8pzFM5QwadIegkBNXVr5",
+      "item_id": "item_E8pzF0qNYJNQS18EpnnXv",
+      "output_index": 0,
+      "call_id": "call_Rkrxx2IJJ52vFNSk",
+      "delta": "action"
+    },
+    {
+      "type": "response.function_call_arguments.delta",
+      "response_id": "resp_E8pzFM5QwadIegkBNXVr5",
+      "item_id": "item_E8pzF0qNYJNQS18EpnnXv",
+      "output_index": 0,
+      "call_id": "call_Rkrxx2IJJ52vFNSk",
+      "delta": "\","
+    },
+    {
+      "type": "response.function_call_arguments.delta",
+      "response_id": "resp_E8pzFM5QwadIegkBNXVr5",
+      "item_id": "item_E8pzF0qNYJNQS18EpnnXv",
+      "output_index": 0,
+      "call_id": "call_Rkrxx2IJJ52vFNSk",
+      "delta": " \n"
+    },
+    {
+      "type": "response.function_call_arguments.delta",
+      "response_id": "resp_E8pzFM5QwadIegkBNXVr5",
+      "item_id": "item_E8pzF0qNYJNQS18EpnnXv",
+      "output_index": 0,
+      "call_id": "call_Rkrxx2IJJ52vFNSk",
+      "delta": " "
+    },
+    {
+      "type": "response.function_call_arguments.delta",
+      "response_id": "resp_E8pzFM5QwadIegkBNXVr5",
+      "item_id": "item_E8pzF0qNYJNQS18EpnnXv",
+      "output_index": 0,
+      "call_id": "call_Rkrxx2IJJ52vFNSk",
+      "delta": " \""
+    },
+    {
+      "type": "response.function_call_arguments.delta",
+      "response_id": "resp_E8pzFM5QwadIegkBNXVr5",
+      "item_id": "item_E8pzF0qNYJNQS18EpnnXv",
+      "output_index": 0,
+      "call_id": "call_Rkrxx2IJJ52vFNSk",
+      "delta": "kind"
+    },
+    {
+      "type": "response.function_call_arguments.delta",
+      "response_id": "resp_E8pzFM5QwadIegkBNXVr5",
+      "item_id": "item_E8pzF0qNYJNQS18EpnnXv",
+      "output_index": 0,
+      "call_id": "call_Rkrxx2IJJ52vFNSk",
+      "delta": "\":"
+    },
+    {
+      "type": "response.function_call_arguments.delta",
+      "response_id": "resp_E8pzFM5QwadIegkBNXVr5",
+      "item_id": "item_E8pzF0qNYJNQS18EpnnXv",
+      "output_index": 0,
+      "call_id": "call_Rkrxx2IJJ52vFNSk",
+      "delta": " \""
+    },
+    {
+      "type": "response.function_call_arguments.delta",
+      "response_id": "resp_E8pzFM5QwadIegkBNXVr5",
+      "item_id": "item_E8pzF0qNYJNQS18EpnnXv",
+      "output_index": 0,
+      "call_id": "call_Rkrxx2IJJ52vFNSk",
+      "delta": "send"
+    },
+    {
+      "type": "response.function_call_arguments.delta",
+      "response_id": "resp_E8pzFM5QwadIegkBNXVr5",
+      "item_id": "item_E8pzF0qNYJNQS18EpnnXv",
+      "output_index": 0,
+      "call_id": "call_Rkrxx2IJJ52vFNSk",
+      "delta": "_internal"
+    },
+    {
+      "type": "response.function_call_arguments.delta",
+      "response_id": "resp_E8pzFM5QwadIegkBNXVr5",
+      "item_id": "item_E8pzF0qNYJNQS18EpnnXv",
+      "output_index": 0,
+      "call_id": "call_Rkrxx2IJJ52vFNSk",
+      "delta": "_message"
+    },
+    {
+      "type": "response.function_call_arguments.delta",
+      "response_id": "resp_E8pzFM5QwadIegkBNXVr5",
+      "item_id": "item_E8pzF0qNYJNQS18EpnnXv",
+      "output_index": 0,
+      "call_id": "call_Rkrxx2IJJ52vFNSk",
+      "delta": "\","
+    },
+    {
+      "type": "response.function_call_arguments.delta",
+      "response_id": "resp_E8pzFM5QwadIegkBNXVr5",
+      "item_id": "item_E8pzF0qNYJNQS18EpnnXv",
+      "output_index": 0,
+      "call_id": "call_Rkrxx2IJJ52vFNSk",
+      "delta": " \n"
+    },
+    {
+      "type": "response.function_call_arguments.delta",
+      "response_id": "resp_E8pzFM5QwadIegkBNXVr5",
+      "item_id": "item_E8pzF0qNYJNQS18EpnnXv",
+      "output_index": 0,
+      "call_id": "call_Rkrxx2IJJ52vFNSk",
+      "delta": " "
+    },
+    {
+      "type": "response.function_call_arguments.delta",
+      "response_id": "resp_E8pzFM5QwadIegkBNXVr5",
+      "item_id": "item_E8pzF0qNYJNQS18EpnnXv",
+      "output_index": 0,
+      "call_id": "call_Rkrxx2IJJ52vFNSk",
+      "delta": " \""
+    },
+    {
+      "type": "response.function_call_arguments.done",
+      "response_id": "resp_E8pzFM5QwadIegkBNXVr5",
+      "item_id": "item_E8pzF0qNYJNQS18EpnnXv",
+      "output_index": 0,
+      "call_id": "call_Rkrxx2IJJ52vFNSk",
+      "arguments": "{  \n  \"decision\": \"action\", \n  \"kind\": \"send_internal_message\", \n  \"",
+      "name": "resolve_arcturian_turn"
+    },
+    {
+      "type": "response.output_item.done",
+      "response_id": "resp_E8pzFM5QwadIegkBNXVr5",
+      "output_index": 0
+    },
+    {
+      "type": "response.done",
+      "response": {
+        "id": "resp_E8pzFM5QwadIegkBNXVr5",
+        "status": "cancelled",
+        "status_details": {
+          "type": "cancelled",
+          "reason": "client_cancelled"
+        },
+        "metadata": {
+          "agentos_response_kind": "arcturian.resolver",
+          "agentos_turn_id": "turn-fixture"
+        },
+        "output": [
+          {
+            "type": "function_call",
+            "name": "resolve_arcturian_turn",
+            "call_id": "call_Rkrxx2IJJ52vFNSk",
+            "arguments": "{  \n  \"decision\": \"action\", \n  \"kind\": \"send_internal_message\", \n  \""
+          }
+        ]
+      }
+    }
+  ]
+}
