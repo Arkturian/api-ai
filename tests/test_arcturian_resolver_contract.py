@@ -38,6 +38,8 @@ from ai.routes.realtime_routes import (  # noqa: E402
     _arcturian_resolver_addendum,
     _arcturian_resolver_followup_payload,
     _arcturian_resolver_tools,
+    _companion_arcturian_prompt,
+    _detail_level_addendum,
 )
 
 FORBIDDEN_TOOLS = {
@@ -183,6 +185,32 @@ def test_prompt_forbids_paraphrasing_a_dictated_message():
     """The owner dictated 'Hallo AppDev. Mehr nicht.' — verbatim means verbatim."""
     text = _arcturian_resolver_addendum("de")
     assert "WOERTLICH" in text or "woertlich" in text.lower()
+
+
+def test_arcturian_prompt_carries_no_narration_cadence():
+    """Arcturian is not a narrator — detail_level must not reach him.
+
+    Every observed session ran `detail_level=flowing`, whose text asks for
+    a "durchgehender mündlicher Bericht … alle 4-10 Sekunden ein Satz".
+    That is precisely the paraphrasing and self-commentary the owner
+    rejected after the physical iPhone tests. A narration cadence and a
+    terse operative dialogue cannot both hold, and the narration text was
+    winning. This guards the two prompt pieces the mode actually uses.
+    """
+    used = _companion_arcturian_prompt("de") + _arcturian_resolver_addendum("de")
+    flowing = _detail_level_addendum("flowing")
+    # Sanity: the narrator text really does carry a cadence instruction.
+    assert "Erzählfluss" in flowing or "Erzahlfluss" in flowing
+    for marker in ("DETAIL-LEVEL", "Erzählfluss", "4-10 Sekunden", "5-15 Sekunden"):
+        assert marker not in used, (
+            f"narration cadence {marker!r} leaked into the arcturian prompt"
+        )
+
+
+def test_arcturian_prompt_forbids_talking_about_the_mechanism():
+    """'Interne Vertragsbegriffe … werden nicht vorgelesen' (owner correction)."""
+    text = _arcturian_resolver_addendum("de")
+    assert "Sprich nie ueber diesen Mechanismus" in text
 
 
 def test_prompt_is_emitted_for_any_language():

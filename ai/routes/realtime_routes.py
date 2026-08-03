@@ -2514,7 +2514,18 @@ async def mint_realtime_token(
         #     the capability gate; the prompt is only the second line.
         instructions = _companion_arcturian_prompt(request.language or "de")
         instructions += _arcturian_resolver_addendum(request.language or "de")
-        instructions += _detail_level_addendum(detail_level)
+        # NO detail_level addendum here — deliberately (#837).
+        #
+        # detail_level steers a NARRATOR: how densely to describe what
+        # other agents are doing. Arcturian is not a narrator; he answers
+        # the operator and carries out work. The observed sessions all ran
+        # `detail_level=flowing`, which instructs the model to keep up a
+        # "durchgehender mündlicher Bericht … alle 4-10 Sekunden ein Satz"
+        # — i.e. exactly the paraphrasing, self-commentary and talking
+        # about its own process the owner rejected after the iPhone tests
+        # ("er paraphrasiert, spricht über seinen internen Prozess").
+        # A narration cadence and a terse operative dialogue cannot both
+        # be true, and the narration text was winning.
         companion_tools_override = _arcturian_resolver_tools()
         # Fail loud rather than minting a mode that silently has no tools:
         # a resolver-less "arcturian" session would look healthy while
@@ -2530,7 +2541,7 @@ async def mint_realtime_token(
         logger.info(
             f"Realtime: companion_mode=arcturian "
             f"resolver={sorted(SUPPORTED_ARCTURIAN_RESOLVERS)[0]} "
-            f"detail_level={detail_level} "
+            f"detail_level={detail_level}->ignored "
             f"tools={[t['name'] for t in companion_tools_override]} "
             f"({len(instructions)} chars)"
         )
@@ -2798,7 +2809,13 @@ async def mint_realtime_token(
         "tools": [t["name"] for t in tools],
         "session_id": request.session_id,
         "companion_mode": companion_mode,
-        "detail_level": detail_level if companion_mode else None,
+        # Null for arcturian: detail_level is narrator cadence and is not
+        # applied there (#837). Echoing the requested value would tell the
+        # client it took effect when it did not.
+        "detail_level": (
+            detail_level if companion_mode and companion_mode != "arcturian"
+            else None
+        ),
         # Echoed so the client can assert the contract is armed before it
         # starts waiting for report_affect calls, instead of inferring it
         # from the tool list.
