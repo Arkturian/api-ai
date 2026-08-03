@@ -36,6 +36,7 @@ from ai.routes.realtime_routes import (  # noqa: E402
     SUPPORTED_ARCTURIAN_RESOLVERS,
     _affect_projection_tools,
     _arcturian_resolver_addendum,
+    _arcturian_primary_audio_payload,
     _arcturian_resolver_followup_payload,
     _arcturian_resolver_tools,
     _companion_arcturian_prompt,
@@ -173,6 +174,61 @@ def test_resolver_and_affect_are_separate_forced_turns():
     assert {t["name"] for t in r}.isdisjoint({t["name"] for t in a})
 
 
+def test_correlation_metadata_is_server_set_on_both_followups():
+    """Wire v1 (#886): correlation anchors are server-authorised.
+
+    The model cannot reach metadata — it lives on response.create, which
+    only client and server construct. That is what makes it usable as an
+    authority anchor at all (Cloud, #886).
+    """
+    from ai.routes.realtime_routes import (
+        ARCTURIAN_RESPONSE_KIND_FIELD, _affect_followup_payload,
+    )
+    r = _arcturian_resolver_followup_payload()["response"]["metadata"]
+    a = _affect_followup_payload()["response"]["metadata"]
+    assert r == {ARCTURIAN_RESPONSE_KIND_FIELD: "arcturian.resolver"}
+    assert a == {ARCTURIAN_RESPONSE_KIND_FIELD: "agentos.affect"}
+
+
+def test_server_never_sets_adapter_correlation_keys():
+    """turn id and source response id are adapter-owned.
+
+    The local turn id does not exist at mint time and the source response
+    id only exists once the primary response is bound. Setting either
+    server-side would mint a value that cannot be correct.
+    """
+    from ai.routes.realtime_routes import (
+        ARCTURIAN_CORRELATION_KEYS, _affect_followup_payload,
+    )
+    for payload in (
+        _arcturian_resolver_followup_payload(),
+        _affect_followup_payload(),
+        _arcturian_primary_audio_payload(),
+    ):
+        md = payload["response"]["metadata"]
+        for key in ARCTURIAN_CORRELATION_KEYS:
+            assert key not in md, f"{key} must be set by the adapter, not here"
+
+
+def test_primary_audio_closes_the_tool_gate_explicitly():
+    """Measured: omitting tools/tool_choice yields 2/2 voluntary calls.
+
+    A response override INHERITS the session tools, so a spoken turn
+    without an explicit gate re-offers resolve_arcturian_turn and
+    report_affect — and the model takes them. Omission is an open gate,
+    not a neutral default. Both fields are asserted: the empty list makes
+    the intent explicit and survives a change in inheritance semantics.
+    """
+    resp = _arcturian_primary_audio_payload()["response"]
+    assert resp["tools"] == [], "empty tool list is the gate, not an omission"
+    assert resp["tool_choice"] == "none"
+
+
+def test_primary_audio_does_not_pin_modalities():
+    """Forcing text here would mute the spoken answer."""
+    assert "output_modalities" not in _arcturian_primary_audio_payload()["response"]
+
+
 def test_prompt_states_the_receipt_gate():
     """No success claim without a committed receipt — the point of #837."""
     text = _arcturian_resolver_addendum("de").lower()
@@ -230,5 +286,8 @@ if __name__ == "__main__":
             except AssertionError as exc:
                 failures += 1
                 print(f"  FAIL  {name}: {exc}")
+            except Exception as exc:  # NameError etc. must not truncate the run
+                failures += 1
+                print(f"  ERROR {name}: {type(exc).__name__}: {exc}")
     print(f"\n{'all green' if not failures else str(failures) + ' FAILED'}")
     sys.exit(1 if failures else 0)

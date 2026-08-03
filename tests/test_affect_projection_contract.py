@@ -218,5 +218,8 @@ if __name__ == "__main__":
             except AssertionError as exc:
                 failures += 1
                 print(f"  FAIL  {name}: {exc}")
+            except Exception as exc:  # must not truncate the run
+                failures += 1
+                print(f"  ERROR {name}: {type(exc).__name__}: {exc}")
     print(f"\n{'all green' if not failures else str(failures) + ' FAILED'}")
     sys.exit(1 if failures else 0)
