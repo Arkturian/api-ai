@@ -640,6 +640,42 @@ SUPPORTED_AFFECT_PROJECTIONS = {"agentos.avatar-runtime.v1"}
 # domain fields, and the adapter hands them to the server-side executor.
 # The model never calls the executor and never sees an action id.
 SUPPORTED_ARCTURIAN_RESOLVERS = {"agentos.arcturian-action.v1"}
+
+# Response-kind discriminators for turn correlation (#886).
+#
+# The iOS adapter previously bound resolver / primary audio / affect to
+# "whatever response.created arrives next", using global pending state.
+# That breaks the moment a late or cancelled event arrives out of order:
+# a terminal event of an ABORTED response then gets attributed to the
+# next turn and can mint a receipt for something that was never
+# presented — indistinguishable from a real one afterwards (Cloud, #886).
+#
+# Every response the client opens therefore carries a `kind` in
+# `response.metadata`, and Realtime echoes it back on response.created
+# and response.done. Correlation becomes (metadata.kind + response_id),
+# never arrival order.
+#
+# Set server-side and carried through unchanged. The model cannot reach
+# metadata — it lives on response.create, which only client and server
+# construct — so this anchor is authoritative by construction, not by
+# convention.
+# Field name and values follow AppDev's wire draft v1 verbatim (#886
+# task t-3077cdefc69c) — AppDev-Realtime stated he will not invent field
+# names client-side, so the naming authority sits with the product owner,
+# not with me.
+ARCTURIAN_RESPONSE_KIND_FIELD = "agentos_response_kind"
+
+# Split by WHO sets them. The two server-set kinds ride in the payloads
+# this endpoint ships; the adapter-set kinds are listed only so the client
+# does not have to re-derive the vocabulary. We never emit those three.
+ARCTURIAN_RESPONSE_KINDS_SERVER = ["arcturian.resolver", "agentos.affect"]
+# Set by the native adapter only; listed so the client need not
+# re-derive the vocabulary. We never emit these.
+ARCTURIAN_RESPONSE_KINDS_ADAPTER = ["arcturian.primary_audio"]
+# Adapter-added correlation keys. AiApi never sets them: the local
+# turn id does not exist yet at mint time, and the source response
+# id only exists once the primary response is bound.
+ARCTURIAN_CORRELATION_KEYS = ["agentos_turn_id", "agentos_source_response_id"]
 RESOLVER_DECISIONS = ["action", "clarify", "none"]
 RESOLVER_ACTION_KINDS = [
     "send_internal_message",
@@ -840,6 +876,23 @@ def _arcturian_resolver_followup_payload() -> dict:
             "output_modalities": ["text"],
             "tools": _arcturian_resolver_tools(),
             "tool_choice": "required",
+            # Correlation anchor (#886). Verified round-trip: Realtime
+            # echoes response.metadata unchanged in BOTH response.created
+            # and response.done, including for cancelled responses — so a
+            # late terminal event can be attributed to the response it
+            # actually belongs to instead of to whatever is pending.
+            #
+            # `kind` is set HERE, server-side, and must be carried through
+            # unchanged. The model cannot reach this field: metadata lives
+            # on response.create, which only the client/server construct —
+            # it is never derivable from model output. That is the same
+            # line the contract draws for ids and `kind` ("modellbehauptet
+            # … wirkungslos"), and here it holds structurally rather than
+            # by rule.
+            #
+            # The client ADDS its own turn discriminator (see
+            # ARCTURIAN_RESPONSE_KINDS) and must not overwrite `kind`.
+            "metadata": {ARCTURIAN_RESPONSE_KIND_FIELD: "arcturian.resolver"},
         },
     }
 
@@ -913,6 +966,48 @@ def _affect_followup_payload() -> dict:
             "output_modalities": ["text"],
             "tools": _affect_projection_tools(),
             "tool_choice": "required",
+            # Correlation anchor (#886) — see _arcturian_resolver_followup
+            # _payload for why this is authoritative by construction.
+            "metadata": {ARCTURIAN_RESPONSE_KIND_FIELD: "agentos.affect"},
+        },
+    }
+
+
+
+def _arcturian_primary_audio_payload() -> dict:
+    """Template for the ONE spoken answer — with an explicit no-tool gate.
+
+    MEASURED, and the reason this template exists at all (#886):
+
+        response.create WITHOUT tools/tool_choice   -> 2/2 tool calls
+        response.create with tools:[] + choice none -> 0/2
+        response.create with only tool_choice none  -> 0/2
+
+    A response override does NOT start from an empty tool set: it INHERITS
+    the session tools. So a spoken turn that omits the fields re-offers
+    resolve_arcturian_turn and report_affect, and the model takes them —
+    measured twice out of two, with a plain "send this to AppDev" prompt.
+    That is exactly the voluntary second model tool-call the approved
+    contract rules out, and omitting the fields is therefore not a
+    neutral default but an open gate.
+
+    `tool_choice:"none"` alone also measured clean, but the template sends
+    BOTH: the empty list makes the intent explicit and survives a future
+    change in inheritance semantics, which a bare choice would not.
+
+    Same template path is intended for greeting and resumed narration —
+    only `agentos_response_kind` differs, and that value is set by the
+    adapter for those two (see ARCTURIAN_RESPONSE_KINDS_ADAPTER).
+
+    output_modalities is deliberately NOT pinned here: the spoken answer
+    follows the session default, and forcing text would mute Arcturian.
+    """
+    return {
+        "type": "response.create",
+        "response": {
+            "tools": [],
+            "tool_choice": "none",
+            "metadata": {ARCTURIAN_RESPONSE_KIND_FIELD: "arcturian.primary_audio"},
         },
     }
 
@@ -2832,6 +2927,35 @@ async def mint_realtime_token(
         ),
         "resolver_followup": (
             _arcturian_resolver_followup_payload()
+            if companion_mode == "arcturian" else None
+        ),
+        # Turn-lifecycle correlation (#886). All three responses a turn
+        # opens carry a server-set `kind` in response.metadata, which
+        # Realtime echoes on response.created AND response.done — also
+        # for cancelled ones. Bind on (metadata.kind + response_id), never
+        # on arrival order. Add your own turn discriminator to metadata;
+        # do not overwrite `kind`.
+        "response_kind_field": (
+            ARCTURIAN_RESPONSE_KIND_FIELD
+            if companion_mode == "arcturian" else None
+        ),
+        # Reference template for the spoken turn (and greeting / resumed
+        # narration, which differ only in the kind value). The adapter
+        # builds these natively per wire v1 — this is shipped so it can
+        # VALIDATE against the measured contract instead of re-deriving
+        # it. The no-tool gate is not cosmetic: a response override
+        # inherits the session tools, and omitting the fields produced a
+        # voluntary resolver call in 2 of 2 measured runs.
+        "primary_audio_response": (
+            _arcturian_primary_audio_payload()
+            if companion_mode == "arcturian" else None
+        ),
+        "response_kinds": (
+            {
+                "server_set": ARCTURIAN_RESPONSE_KINDS_SERVER,
+                "adapter_set": ARCTURIAN_RESPONSE_KINDS_ADAPTER,
+                "adapter_correlation_keys": ARCTURIAN_CORRELATION_KEYS,
+            }
             if companion_mode == "arcturian" else None
         ),
         # The follow-up turn is part of the contract, not an optimisation:
