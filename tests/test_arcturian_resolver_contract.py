@@ -309,6 +309,69 @@ def test_persona_and_addendum_do_not_contradict():
     assert "Du hast kein Werkzeug" not in composed
 
 
+def test_persona_teaches_both_order_types():
+    """Delegation must be taught, not just verbatim messaging.
+
+    Measured before the fix: "Klär das mit AppDev" produced
+    kind=send_internal_message in 3 of 3 runs — never delegate_internal.
+    The schema offered the capability, the persona never mentioned it.
+    Exact mirror of the #837 defect (capable but forbidden), inverted:
+    capable but unmentioned. Reported by AppDevV2.
+    """
+    persona = _companion_arcturian_prompt("de")
+    assert "DELEGATION" in persona, "persona teaches only verbatim messaging"
+    assert "BOTSCHAFT" in persona
+    # A delegation must not invent a wording the operator never said.
+    assert "Erfinde dafuer keinen" in persona
+
+
+def test_resolver_addendum_offers_wording_for_work_in_progress():
+    """Without a permitted phrase for "still running", the model reaches
+    for a forbidden one.
+
+    Measured: with receipt {status: queued, delivered: false} the model
+    said "Ist beauftragt" — one of the words the same prompt explicitly
+    forbids, about a message that had not been delivered. The ban alone
+    is not enough; there has to be something true to say instead.
+    """
+    text = _arcturian_resolver_addendum("de")
+    assert "WAEHREND ETWAS LAEUFT" in text
+    assert "die Antwort steht noch aus" in text
+    assert "Warten ist" in text, "waiting must be framed as normal, not as failure"
+    # The ban must still be there — the wording is an alternative, not a licence.
+    for claim in ("gesendet", "beauftragt", "erledigt"):
+        assert claim in text
+
+
+def test_persona_permits_thinking_out_loud():
+    """Cloud's condition: thinking must be allowed to be audible.
+
+    The anti-verbosity rules ("keine Selbstbeschreibung", "im Normalfall
+    ein Satz") also hit "das muss ich kurz nachsehen". Cloud caught four
+    of her own mismeasurements today because she had time to re-check;
+    in a spoken turn she would have asserted them. A prompt that forbids
+    the pause trains fluency that deceives.
+    """
+    persona = _companion_arcturian_prompt("de")
+    assert "Ich sehe kurz nach" in persona
+    assert "das weiss ich nicht" in persona
+    assert "Kurz heisst knapp, nicht vorschnell" in persona
+
+
+def test_clarify_criterion_is_objective_not_knowledge_based():
+    """The model has no agent list — "unknown recipient" is unanswerable.
+
+    Replaced by the only testable criterion: did the operator name a
+    recipient at all. A name the model does not recognise must be passed
+    through, because resolving it is the server's job.
+    """
+    persona = _companion_arcturian_prompt("de")
+    assert "gar keinen Empfaenger genannt" in persona
+    assert "nicht kennst, fragst du NICHT nach" in persona
+    # The old, knowledge-based wording must be gone.
+    assert "unbekannter Empfaenger" not in persona
+
+
 def test_arcturian_prompt_forbids_talking_about_the_mechanism():
     """'Interne Vertragsbegriffe … werden nicht vorgelesen' (owner correction)."""
     text = _arcturian_resolver_addendum("de")
