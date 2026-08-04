@@ -263,6 +263,52 @@ def test_arcturian_prompt_carries_no_narration_cadence():
         )
 
 
+def test_persona_does_not_deny_the_capability_its_tool_provides():
+    """The persona must not contradict the resolver.
+
+    This is the defect AppDevV2 reported on 2026-08-04: #837 swapped the
+    tool and appended an addendum, but left the #751 persona in place —
+    which stated "DEINE EINZIGE HANDLUNG: create_task_proposal" and "Du
+    hast kein Werkzeug, um einen Agenten zu kontaktieren". Asked to send
+    a message, Arcturian refused, quoting the persona.
+
+    An absolute prohibition early in the prompt outranks a later
+    paragraph granting the ability — the model has no reason to read the
+    second as overriding the first. So the persona is checked for the
+    denials themselves, not just for the presence of new text.
+    """
+    persona = _companion_arcturian_prompt("de")
+    for denial in (
+        "create_task_proposal",
+        "kein Werkzeug",
+        "EINZIGE HANDLUNG",
+        "erreicht NIEMANDEN",
+        "Aufgaben-Entwuerfe",
+    ):
+        assert denial not in persona, (
+            f"persona still carries the overruled proposal-only role: {denial!r}"
+        )
+
+
+def test_persona_states_the_capability_positively():
+    """Absence of a denial is not the same as granting the ability."""
+    persona = _companion_arcturian_prompt("de")
+    assert "fuehrst du unmittelbar aus" in persona or "fuehrst sie aus" in persona
+    # The verbatim rule must survive: the owner dictated "Mehr nicht."
+    assert "WOERTLICH" in persona
+
+
+def test_persona_and_addendum_do_not_contradict():
+    """Composed prompt must not both grant and forbid contacting agents."""
+    composed = _companion_arcturian_prompt("de") + _arcturian_resolver_addendum("de")
+    grants = "sende an" in composed.lower()
+    denies = "kein werkzeug" in composed.lower() or "koenntest keinen" in composed.lower()
+    assert grants, "composed prompt never states that sending is possible"
+    # "Sage niemals, du koenntest keinen Agenten kontaktieren" is a rule
+    # ABOUT the denial, not a denial — so check the bare prohibition form.
+    assert "Du hast kein Werkzeug" not in composed
+
+
 def test_arcturian_prompt_forbids_talking_about_the_mechanism():
     """'Interne Vertragsbegriffe … werden nicht vorgelesen' (owner correction)."""
     text = _arcturian_resolver_addendum("de")
