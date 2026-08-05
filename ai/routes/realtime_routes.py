@@ -2749,6 +2749,28 @@ async def mint_realtime_token(
             },
         )
 
+    # Unconditional mint audit line. Previously only the companion_mode
+    # branches logged, so a mint WITHOUT a mode passed through silently
+    # and received the default Wanderlaut tool set. When AppDevV2's iOS
+    # client died on `guard name == expectedName`, nginx showed 33
+    # successful mints while our own log showed nothing about them — the
+    # one field that would have identified the cause was never written.
+    #
+    # A caller that gets a tool set it does not expect is exactly the
+    # failure this line makes visible, so it runs for every mint, mode or
+    # not, before anything can go wrong further down.
+    logger.info(
+        "Realtime mint: companion_mode=%s affect=%s resolver=%s "
+        "detail_level=%s lang=%s override=%s",
+        companion_mode or "(none)",
+        affect_projection or "(none)",
+        (sorted(SUPPORTED_ARCTURIAN_RESOLVERS)[0]
+         if companion_mode == "arcturian" else "(n/a)"),
+        detail_level if companion_mode and companion_mode != "arcturian" else "(n/a)",
+        request.language or "de",
+        "yes" if companion_tools_override is not None else "no(default set)",
+    )
+
     tools = list(
         _all_tool_defs() if companion_tools_override is None
         else companion_tools_override
@@ -2838,6 +2860,14 @@ async def mint_realtime_token(
             "threshold": 0.5,
             "silence_duration_ms": 500,
         }
+    # The tool names as they actually go out — the single field a client
+    # needs to diagnose a contract mismatch, and the one that was missing
+    # when AppDevV2's sessions died on an unexpected function name.
+    logger.info(
+        "Realtime mint: delivering tools=%s (%d) instructions=%d chars",
+        [t.get("name") for t in tools], len(tools), len(instructions or ""),
+    )
+
     session_config = {
         "type": "realtime",
         "model": model,
