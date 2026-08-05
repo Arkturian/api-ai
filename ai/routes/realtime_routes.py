@@ -3279,6 +3279,27 @@ async def realtime_session_heartbeat(
         user_id=grant.sub,
         voice_session_id=body.voice_session_id,
     )
+    if not alive:
+        # A heartbeat that finds nothing used to be a silent False. It
+        # stayed silent for 18 of 18 beats across two live sessions
+        # while the client, correctly, kept talking — the miss was only
+        # visible in AppDevV2's device log, never here.
+        #
+        # A swallowed doubt is fine; an unobserved one is not. We name
+        # the keys we DO hold for this owner so the mismatch is legible
+        # at a glance instead of requiring someone to read the state
+        # file, which is how this was eventually found.
+        try:
+            known = realtime_budget_guard.active_sessions_for(
+                profile_id=grant.profile_id, user_id=grant.sub,
+            )
+        except Exception as exc:  # diagnostics must never break the path
+            known = f"(unavailable: {type(exc).__name__})"
+        logger.warning(
+            "realtime_heartbeat MISS profile=%s user=%s asked=%s known=%s "
+            "(client heartbeats an id we did not book under)",
+            grant.profile_id, grant.sub[:8], body.voice_session_id, known,
+        )
     return {
         "alive": alive,
         "voice_session_id": body.voice_session_id,
