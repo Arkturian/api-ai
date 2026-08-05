@@ -462,3 +462,18 @@ def release_by_voice_session(
         profile_id, user_id[:8], voice_session_id,
     )
     return True
+
+
+def active_sessions_for(profile_id: str, user_id: str) -> list:
+    """The voice_session_ids currently holding a slot for this owner.
+
+    Read-only, for diagnostics. Added because a heartbeat miss used to
+    be an unexplained False: knowing WHICH keys we hold turns "alive:
+    false" from a dead end into a one-line diagnosis (AppDevV2's 18/18
+    misses were a client heartbeating vs_<uuid> against a slot booked
+    under an agent name).
+    """
+    with _locked_state() as state:
+        pv = state.get("profiles", {}).get(profile_id) or {}
+        uv = (pv.get("users") or {}).get(user_id) or {}
+        return list(uv.get("active_sessions") or [])
