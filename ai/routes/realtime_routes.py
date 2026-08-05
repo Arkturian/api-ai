@@ -2854,6 +2854,23 @@ async def mint_realtime_token(
             "prefix_padding_ms": 300,
             "silence_duration_ms": 1000,
         }
+    elif companion_mode == "arcturian":
+        # NO server-side turn detection (#886 follow-up, confirmed by
+        # AppDevV2 2026-08-05: the client is pure push-to-talk — it sets
+        # audio.input.turn_detection = null while the key is held and
+        # closes each turn with input_audio_buffer.commit; without PTT it
+        # uses semantic_vad with create_response:false. It never relies on
+        # the provider answering by itself).
+        #
+        # server_vad here was actively harmful: the provider creates its
+        # own response after 500 ms of silence — one the client never
+        # requested, that carries no agentos_response_kind metadata and
+        # inherits the session tools. That is Alex' second symptom
+        # ("beim zweiten Push-to-Talk kommt nichts mehr an"): a stray
+        # provider response colliding with the PTT cycle.
+        #
+        # Same reasoning as guide-ptt above, which already sets None.
+        turn_detection = None
     else:
         turn_detection = {
             "type": "server_vad",
