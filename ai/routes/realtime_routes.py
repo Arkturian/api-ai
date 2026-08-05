@@ -249,6 +249,22 @@ class RealtimeTokenRequest(BaseModel):
             "forces the call (6/6). Null = off."
         ),
     )
+    voice_session_id: Optional[str] = Field(
+        default=None,
+        description=(
+            "Stable id for the whole WebRTC voice session, used for the "
+            "budget reservation, the parallel-session slot and the "
+            "heartbeat lease. Pass the SAME value here that you later "
+            "send to /ai/realtime/session/heartbeat and /ai/realtime/"
+            "usage — otherwise the heartbeat cannot find the "
+            "reservation and every beat answers alive:false. "
+            "If omitted we fall back to session_id, then "
+            "companion_run_id, then a generated vs_pending_* id, which "
+            "is what caused AppDevV2's 18/18 dead heartbeats: the "
+            "client's session_id was an agent name ('3dApi'), not the "
+            "voice session id it heartbeats with."
+        ),
+    )
     detail_level: Optional[str] = Field(
         default="balanced",
         description=(
@@ -2922,8 +2938,21 @@ async def mint_realtime_token(
     # Post #1215). Placed AFTER all validation paths so a failed
     # validation never leaks a reservation slot. Released on any
     # OpenAI-side mint failure below.
+    # voice_session_id FIRST — it is the only field whose meaning is
+    # "the id this session will heartbeat and report usage with".
+    #
+    # Before this, session_id was taken as the reservation key. On the
+    # iOS client session_id carries an agent name, so the live state
+    # held active_sessions: ["3dApi"] while the client sent heartbeats
+    # for vs_<uuid>. Every beat answered alive:false — 18 of 18 across
+    # two sessions (AppDevV2, 2026-08-05) — and nobody noticed, because
+    # the client rightly treats the socket, not the heartbeat, as
+    # authoritative.
+    #
+    # The fallback chain stays for callers that never sent the field.
     voice_session_id = (
-        request.session_id
+        request.voice_session_id
+        or request.session_id
         or request.companion_run_id
         or f"vs_pending_{int(time.time()*1000)}"
     )
@@ -3014,6 +3043,11 @@ async def mint_realtime_token(
         "voice": voice,
         "tools": [t["name"] for t in tools],
         "session_id": request.session_id,
+        # The id the reservation was actually booked under. Echoed so the
+        # client can heartbeat and report usage with exactly this value
+        # instead of assuming which of its own fields we picked — the
+        # assumption that produced 18/18 dead heartbeats.
+        "voice_session_id": voice_session_id,
         "companion_mode": companion_mode,
         # Null for arcturian: detail_level is narrator cadence and is not
         # applied there (#837). Echoing the requested value would tell the
