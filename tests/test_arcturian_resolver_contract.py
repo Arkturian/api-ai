@@ -298,6 +298,38 @@ def test_persona_states_the_capability_positively():
     assert "WOERTLICH" in persona
 
 
+def test_persona_answers_the_owner_about_its_own_workings():
+    """Anti-verbosity must not become refusal toward the owner.
+
+    Observed on device (AppDevV2, 2026-08-05): asked about his own
+    procedure, Arcturian answered "Diese Details zum Vorgehen kann ich
+    nicht besprechen" — to the person the system belongs to. The rule
+    "never talk about the mechanism" was written against chatter and hit
+    a direct question instead.
+    """
+    persona = _companion_arcturian_prompt("de")
+    assert "FRAGT er dich danach, antwortest du" in persona
+    assert "nichts vor ihm zu verbergen" in persona
+    # The unprompted-chatter rule must survive.
+    assert "unaufgefordert nichts" in persona
+
+
+def test_verbatim_rule_excludes_placeholders():
+    """"Sende irgendwas" is permission to compose, not a message text.
+
+    Observed on device: the operator said "sende irgendwas, egal was";
+    Arcturian first asked back and then sent the literal word
+    "Irgendwas." as the message body — the verbatim rule applied to a
+    placeholder it was never meant for.
+    """
+    persona = _companion_arcturian_prompt("de")
+    assert "KEIN Nachrichtentext" in persona
+    assert "Erlaubnis, selbst zu formulieren" in persona
+    assert "fragst nicht nach" in persona
+    # And the real dictation case must still demand verbatim.
+    assert "WOERTLICH" in persona
+
+
 def test_persona_and_addendum_do_not_contradict():
     """Composed prompt must not both grant and forbid contacting agents."""
     composed = _companion_arcturian_prompt("de") + _arcturian_resolver_addendum("de")
