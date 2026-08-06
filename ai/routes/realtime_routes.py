@@ -286,6 +286,20 @@ class RealtimeTokenRequest(BaseModel):
             "can talk to a freshly cloned voice without redeploying env vars."
         ),
     )
+    conversation_id: Optional[str] = Field(
+        default=None,
+        description=(
+            "Arcturian conversation to continue (`conv_…`). Omit for a "
+            "chat that starts empty — that is the switch, not a separate "
+            "flag: no field = blank session, new id = reset. Server-side "
+            "a reset is therefore not a special case at all, just a new "
+            "conversation. When set, the mint loads the tail of that "
+            "conversation from cloud-api (with the caller's own JWT, "
+            "since the events belong to the user) and returns it as "
+            "`preface` plus `prefaced_through_revision`. Silently "
+            "ignored for non-arcturian modes."
+        ),
+    )
     companion_run_id: Optional[str] = Field(
         default=None,
         description=(
@@ -774,6 +788,108 @@ def _affect_projection_tools() -> List[dict]:
             },
         }
     ]
+
+
+CLOUD_API_URL = os.getenv(
+    "CLOUD_API_URL", "https://cloud-api.arkserver.arkturian.com"
+)
+
+# How much past conversation goes into a new arcturian session.
+#
+# Measured against real turns (o200k_base): the owner's arcturian turns
+# average 56 chars = 15 tokens, so the two limits do NOT measure the same
+# thing. PREFACE_TAIL_TURNS is what actually binds; PREFACE_MAX_CHARS only
+# catches the outlier — a pasted block, a read-out document — which is
+# exactly what a cap should do.
+#
+# 20 turns is ~300 tokens against a persona that already costs 1459 every
+# session. AppDevV2 proposed 10 from the usage side (his view shows 12
+# events and nobody scrolled further); the token math says saving 150
+# tokens against 1459 is thrift in the wrong place, so 20 buys a whole
+# conversational arc for a fifth of what the persona costs anyway.
+#
+# Open and deliberately not assumed: whether the provider caches a
+# prefix-stable preface across turns. The text models do (9728/9851
+# measured). If Realtime does too, even 20 is over-cautious.
+PREFACE_TAIL_TURNS = 20
+PREFACE_MAX_CHARS = 4000
+
+
+async def _fetch_conversation_preface(
+    conversation_id: str,
+    authorization: str,
+) -> tuple[List[dict], Optional[int]]:
+    """Load the tail of an arcturian conversation for a new session.
+
+    The events live in cloud-api and are owned by the USER, not by this
+    service: `list_conversation_events` checks `_owns(principal, ...)`,
+    and there is no service-to-service read path
+    (`ARCTURIAN_SERVICE_AUTHORIZATION` is outbound-only). So the caller's
+    JWT is forwarded verbatim — which is also the correct answer on the
+    merits, not just the available one.
+
+    Returns:
+        ``(items, prefaced_through_revision)``. `items` are ready for the
+        client to replay as `conversation.item.create` right after it
+        connects — the server decides WHAT is in the preface and where it
+        ends, the client only performs the injection, because only it
+        holds the socket.
+
+        `prefaced_through_revision` is the highest revision included, or
+        None when nothing was. It is the boundary AppDevV2's live
+        projection resumes from, which is what turns "duplicate delivery
+        is unlikely" into "duplicate delivery is impossible" — a spoken
+        answer read out twice is instantly obvious in a voice session.
+
+    Never raises: a conversation that cannot be read must not cost the
+    owner his voice session. A session without history is degraded; no
+    session at all is broken. The persona already handles the degraded
+    case honestly ("Ich starte ohne Verlauf").
+    """
+    url = f"{CLOUD_API_URL}/api/arcturian/conversations/{conversation_id}/events"
+    params = {"tail": PREFACE_TAIL_TURNS, "max_chars": PREFACE_MAX_CHARS}
+    try:
+        async with httpx.AsyncClient(timeout=8.0) as client:
+            resp = await client.get(
+                url, params=params, headers={"Authorization": authorization},
+            )
+        if resp.status_code != 200:
+            logger.warning(
+                "Realtime: preface unavailable for %s — HTTP %s (%s)",
+                conversation_id, resp.status_code, resp.text[:200],
+            )
+            return [], None
+        payload = resp.json()
+    except Exception as exc:
+        logger.warning(
+            "Realtime: preface fetch failed for %s — %s: %s",
+            conversation_id, type(exc).__name__, exc,
+        )
+        return [], None
+
+    events = payload if isinstance(payload, list) else payload.get("events", [])
+    items: List[dict] = []
+    highest: Optional[int] = None
+    for event in events:
+        text = (event.get("content") or "").strip()
+        if not text:
+            continue
+        # direction is the reliable speaker signal; `actor` names WHO, but
+        # the model only needs to know whether the owner or Arcturian said
+        # it. Cloud confirmed event_type can be ignored for a transcript.
+        role = "user" if event.get("direction") == "inbound" else "assistant"
+        items.append({
+            "type": "message",
+            "role": role,
+            "content": [{
+                "type": "input_text" if role == "user" else "text",
+                "text": text,
+            }],
+        })
+        revision = event.get("revision")
+        if isinstance(revision, int):
+            highest = revision if highest is None else max(highest, revision)
+    return items, (highest if items else None)
 
 
 def _session_tools(
@@ -2577,6 +2693,7 @@ async def mint_realtime_token(
     request: RealtimeTokenRequest,
     api_key: str = Depends(get_api_key),
     grant: VerifiedGrant = Depends(require_realtime_grant("mint")),
+    authorization: Optional[str] = Header(None),
 ):
     """Mint a short-lived Realtime session token.
 
@@ -3116,6 +3233,23 @@ async def mint_realtime_token(
     from ..services.openai_realtime_cost_tracker import openai_realtime_cost_tracker
     openai_realtime_cost_tracker.track_session_start()
 
+    # Conversation preface — after the token exists, so a slow or broken
+    # cloud-api read can never cost the owner the session itself.
+    # arcturian only: the other modes have no durable conversation, and
+    # silently prefacing them would be a capability nobody asked for.
+    preface_items: List[dict] = []
+    prefaced_through_revision: Optional[int] = None
+    if request.conversation_id and companion_mode == "arcturian":
+        preface_items, prefaced_through_revision = (
+            await _fetch_conversation_preface(
+                request.conversation_id, authorization or "",
+            )
+        )
+        logger.info(
+            "Realtime: preface conversation=%s items=%d through_revision=%s",
+            request.conversation_id, len(preface_items), prefaced_through_revision,
+        )
+
     return {
         "provider": "openai",
         "client_secret": body.get("client_secret") or body.get("value") or body,
@@ -3124,6 +3258,16 @@ async def mint_realtime_token(
         "voice": voice,
         "tools": [t["name"] for t in tools],
         "session_id": request.session_id,
+        # Past turns for the client to replay as conversation.item.create
+        # right after it connects. Empty list when no conversation_id was
+        # given, or when the conversation could not be read — a session
+        # without history is degraded, no session at all would be broken.
+        "preface": preface_items,
+        # The boundary: highest revision contained in `preface`, or null.
+        # AppDevV2's live projection resumes at +1 from here, which is what
+        # makes a duplicated spoken answer impossible rather than merely
+        # unlikely. Null means "nothing was prefaced, project everything".
+        "prefaced_through_revision": prefaced_through_revision,
         # The id the reservation was actually booked under. Echoed so the
         # client can heartbeat and report usage with exactly this value
         # instead of assuming which of its own fields we picked — the
