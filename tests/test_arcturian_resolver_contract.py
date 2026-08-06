@@ -65,7 +65,13 @@ def _props():
 
 
 def test_contract_version_is_the_frozen_one():
-    assert SUPPORTED_ARCTURIAN_RESOLVERS == {"agentos.arcturian-action.v1"}
+    """v2 since Post #4518: navigate_ui + target_kind.
+
+    Bumping this is deliberate — a widened schema is a new revision and
+    needs a fresh approval, because the v1 sign-off was bound to its
+    revision, not to the contract name.
+    """
+    assert SUPPORTED_ARCTURIAN_RESOLVERS == {"agentos.arcturian-action.v2"}
 
 
 def test_tool_is_named_resolve_arcturian_turn():
@@ -97,7 +103,7 @@ def test_disposition_fields_are_nullable_for_none_and_clarify():
 def test_all_fields_required_so_nothing_arrives_absent():
     """Required + nullable beats optional: an omitted field is ambiguous."""
     assert set(_tool()["parameters"]["required"]) == {
-        "decision", "kind", "target", "instruction",
+        "decision", "kind", "target", "target_kind", "instruction",
     }
 
 
@@ -490,6 +496,84 @@ def test_persona_forbids_claiming_a_history_it_was_not_given():
 def test_persona_ties_the_answer_to_the_session_not_to_helpfulness():
     persona = _companion_arcturian_prompt("de")
     assert "nicht nach dem, was hilfreich klaenge" in persona
+
+
+# --- v2: UI navigation (Post #4518, section q-3188aaa6479a) ---------------
+
+
+def test_navigate_ui_is_the_fifth_kind():
+    assert "navigate_ui" in _props()["kind"]["enum"]
+    assert set(RESOLVER_ACTION_KINDS) == {
+        "send_internal_message", "delegate_internal",
+        "create_collab", "start_workflow", "navigate_ui",
+    }
+
+
+def test_navigation_is_not_an_executable_kind():
+    """Cloud's second bolt keys off this list.
+
+    navigate_ui must never appear where a kind is checked for
+    executability — it carries no authority and produces no receipt.
+    """
+    from ai.routes.realtime_routes import RESOLVER_EXECUTABLE_KINDS
+    assert "navigate_ui" not in RESOLVER_EXECUTABLE_KINDS
+    assert len(RESOLVER_EXECUTABLE_KINDS) == 4
+
+
+def test_target_kind_is_a_free_string_not_an_enum():
+    """The list of views belongs to the CLIENT, not to this schema.
+
+    Cloud declined to own it and was right: views change with the app,
+    not with the contract. An enum here would make every new iOS view a
+    server deployment.
+    """
+    assert "enum" not in _props()["target_kind"]
+    assert "null" in _props()["target_kind"]["type"]
+
+
+def test_target_is_the_same_namespace_for_focus_agent():
+    """AppDevV2's condition: one field must not mean two things.
+
+    For focus_agent, `target` is an agent name resolved exactly as for
+    send_internal_message — so "geh zu appdevv2" cannot fail for the same
+    reason "sende an appdevv2" failed today.
+    """
+    desc = _props()["target"]["description"]
+    assert "focus_agent" in desc
+    assert "same namespace" in desc.lower()
+
+
+def test_kind_description_separates_showing_from_sending():
+    desc = _props()["kind"]["description"]
+    assert "navigate_ui" in desc
+    assert "sends nothing to anybody" in desc
+
+
+def test_persona_teaches_that_showing_is_not_sending():
+    """The confusion this prevents is asymmetric and irreversible.
+
+    A wrongly opened view costs a tap. A wrongly sent message sits in
+    someone else's window and cannot be taken back.
+    """
+    persona = _companion_arcturian_prompt("de")
+    assert "ANSEHEN IST NICHT SENDEN" in persona
+    assert "geht dabei nichts an " in persona
+
+
+def test_persona_decides_on_the_verb_not_the_name():
+    persona = _companion_arcturian_prompt("de")
+    assert "am Verb, nicht am Namen" in persona
+
+
+def test_persona_biases_towards_not_navigating_when_unsure():
+    persona = _companion_arcturian_prompt("de")
+    assert "ist es KEINE Navigation" in persona
+
+
+def test_persona_leaves_unsupported_targets_to_the_device():
+    """The device speaks the refusal; the model must not pre-empt it."""
+    persona = _companion_arcturian_prompt("de")
+    assert "sagt " in persona and "nicht zeigen" in persona
 
 if __name__ == "__main__":
     failures = 0

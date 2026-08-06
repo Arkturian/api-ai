@@ -669,7 +669,7 @@ SUPPORTED_AFFECT_PROJECTIONS = {"agentos.avatar-runtime.v1"}
 # voluntary second model tool-call. So the resolver itself returns the
 # domain fields, and the adapter hands them to the server-side executor.
 # The model never calls the executor and never sees an action id.
-SUPPORTED_ARCTURIAN_RESOLVERS = {"agentos.arcturian-action.v1"}
+SUPPORTED_ARCTURIAN_RESOLVERS = {"agentos.arcturian-action.v2"}
 
 # Response-kind discriminators for turn correlation (#886).
 #
@@ -707,12 +707,26 @@ ARCTURIAN_RESPONSE_KINDS_ADAPTER = ["arcturian.primary_audio"]
 # id only exists once the primary response is bound.
 ARCTURIAN_CORRELATION_KEYS = ["agentos_turn_id", "agentos_source_response_id"]
 RESOLVER_DECISIONS = ["action", "clarify", "none"]
-RESOLVER_ACTION_KINDS = [
+# The four federation kinds. Every one of them leaves this device: it is
+# executed server-side against an authority and produces a receipt.
+RESOLVER_EXECUTABLE_KINDS = [
     "send_internal_message",
     "delegate_internal",
     "create_collab",
     "start_workflow",
 ]
+# navigate_ui is the fifth kind and the only one that does NOT: it never
+# reaches the federation executor, carries no authority and produces no
+# receipt. It moves a view on the device the operator is already holding.
+#
+# Why a fifth kind and not a second tool (Post #4518, agreed with Cloud
+# and AppDevV2): a second forced turn would cost +819 ms — and AppDevV2
+# supplied the fact that settled it. In his client the SPOKEN answer
+# hangs off the resolver turn, so a second forced turn does not sit
+# beside the answer but BEFORE it. The owner would hear ~800 ms of
+# silence before every sentence, not just before navigation.
+RESOLVER_UI_KINDS = ["navigate_ui"]
+RESOLVER_ACTION_KINDS = RESOLVER_EXECUTABLE_KINDS + RESOLVER_UI_KINDS
 AFFECT_VALUES = ["neutral", "pleased", "concerned"]
 AFFECT_INTENSITY_VALUES = ["low", "high"]
 
@@ -982,7 +996,9 @@ def _arcturian_resolver_tools() -> List[dict]:
             "parameters": {
                 "type": "object",
                 "additionalProperties": False,
-                "required": ["decision", "kind", "target", "instruction"],
+                "required": [
+                    "decision", "kind", "target", "target_kind", "instruction",
+                ],
                 "properties": {
                     "decision": {
                         "type": "string",
@@ -1001,7 +1017,12 @@ def _arcturian_resolver_tools() -> List[dict]:
                             "Your reading of what should happen — the "
                             "server re-derives the binding classification "
                             "from content and target, so this is a "
-                            "proposal, never a permission."
+                            "proposal, never a permission. Use "
+                            "'navigate_ui' ONLY when the operator wants to "
+                            "SEE something here — 'open X', 'switch to the "
+                            "agents view'. If anything should reach another "
+                            "agent, it is one of the other kinds: showing a "
+                            "view sends nothing to anybody."
                         ),
                     },
                     "target": {
@@ -1012,7 +1033,23 @@ def _arcturian_resolver_tools() -> List[dict]:
                             "agent name). Do NOT invent or normalise it — "
                             "the server resolves the real recipient. If the "
                             "user named nobody, use 'clarify' instead of "
-                            "guessing."
+                            "guessing. For kind='navigate_ui' with "
+                            "target_kind='focus_agent' this is the SAME "
+                            "namespace: an agent name, exactly as for "
+                            "send_internal_message."
+                        ),
+                    },
+                    "target_kind": {
+                        "type": ["string", "null"],
+                        "description": (
+                            "Only for kind='navigate_ui', otherwise null. "
+                            "What KIND of thing to move to: 'focus_agent' "
+                            "to open an agent, 'focus_tab' to switch view. "
+                            "Use exactly these two unless the user clearly "
+                            "names something else — the device decides what "
+                            "it can actually show and says so out loud when "
+                            "it cannot, so an unknown value costs a spoken "
+                            "sentence, not a silent nothing."
                         ),
                     },
                     "instruction": {
@@ -2110,6 +2147,24 @@ def _companion_arcturian_prompt(language: str = "de") -> str:
         "was zu tun ist, und antwortet dir. Erfinde dafuer keinen "
         "Wortlaut, den der Operator nie gesagt hat.\n"
         "  * Beides ist ein Auftrag, kein Entwurf.\n\n"
+        "ANSEHEN IST NICHT SENDEN:\n"
+        "  * Will der Operator etwas SEHEN — 'oeffne AppDevV2', 'geh zu "
+        "den Agenten', 'zeig mir das Board' — dann ist das eine "
+        "Navigation auf seinem Geraet. Es geht dabei nichts an "
+        "irgendjemanden hinaus, niemand wird benachrichtigt, es "
+        "entsteht kein Auftrag.\n"
+        "  * Der Unterschied entscheidet sich am Verb, nicht am Namen: "
+        "'geh zu Cloud' oeffnet eine Ansicht, 'sag Cloud Bescheid' "
+        "schickt eine Nachricht. Derselbe Name, zwei voellig "
+        "verschiedene Dinge — verwechsle sie nie.\n"
+        "  * Im Zweifel gilt: Wenn unklar ist, ob jemand etwas erfahren "
+        "soll, ist es KEINE Navigation. Eine faelschlich geoeffnete "
+        "Ansicht kostet einen Klick; eine faelschlich verschickte "
+        "Nachricht steht bei einem anderen im Fenster und laesst sich "
+        "nicht zuruecknehmen.\n"
+        "  * Kann das Geraet die gewuenschte Ansicht nicht zeigen, sagt "
+        "es das selbst. Du musst nichts vorwegnehmen und nichts "
+        "entschuldigen.\n\n"
         "WANN DU FRAGST — GENAU EINMAL, KURZ:\n"
         "  * Nur wenn der Operator gar keinen Empfaenger genannt hat "
         "oder die Absicht wirklich mehrdeutig ist. Einen Namen, den du "
