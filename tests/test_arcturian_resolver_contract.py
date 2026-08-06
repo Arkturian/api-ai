@@ -41,6 +41,7 @@ from ai.routes.realtime_routes import (  # noqa: E402
     _arcturian_resolver_tools,
     _companion_arcturian_prompt,
     _detail_level_addendum,
+    _session_tools,
 )
 
 FORBIDDEN_TOOLS = {
@@ -415,6 +416,59 @@ def test_prompt_is_emitted_for_any_language():
         text = _arcturian_resolver_addendum(lang)
         assert "resolve_arcturian_turn" in text
         assert len(text) > 100
+
+
+# --- session.tools = [] (AppDevV2 device reproduction, 2026-08-06) ---------
+#
+# The device logged `tool_misrouted got=report_affect
+# expected=resolve_arcturian_turn`. 72 runs against this endpoint never
+# reproduced the trigger, so the fix is structural rather than a
+# mitigation: leave nothing in the session for a stray turn to reach.
+
+
+def test_arcturian_session_carries_no_tools_even_with_affect():
+    """The one rule the on-device misroute made necessary.
+
+    Both arcturian turns ship their own single-element `tools` list on
+    the response.create override, so the session list is never read on a
+    healthy turn — it can only be reached by a turn that should not have
+    called anything.
+    """
+    tools = _session_tools([], "arcturian", "v1")
+    assert tools == [], f"arcturian session must stay empty, got {tools}"
+
+
+def test_arcturian_stays_empty_regardless_of_affect_version():
+    for version in ("v1", "v2", "anything-future"):
+        assert _session_tools([], "arcturian", version) == []
+
+
+def test_affect_still_reaches_every_other_mode():
+    """The exception is arcturian's alone — it must not become the rule.
+
+    report_affect is a signal, not a capability, so zero-tool modes such
+    as narrator-only and guide-ptt are deliberately armed with it too.
+    """
+    for mode in ("narrator-only", "guide-ptt", "talkback-enabled", None):
+        names = {t["name"] for t in _session_tools([], mode, "v1")}
+        assert "report_affect" in names, f"{mode} lost the affect contract"
+
+
+def test_affect_tool_is_absent_when_projection_is_off():
+    for mode in ("arcturian", "narrator-only", None):
+        assert _session_tools([], mode, None) == []
+
+
+def test_session_tools_never_mutates_its_input():
+    base: list = []
+    _session_tools(base, "narrator-only", "v1")
+    assert base == [], "defensive copy missing — caller's list was mutated"
+
+
+def test_affect_tool_is_never_added_twice():
+    once = _session_tools(_affect_projection_tools(), "narrator-only", "v1")
+    names = [t["name"] for t in once]
+    assert names.count("report_affect") == 1, names
 
 
 if __name__ == "__main__":

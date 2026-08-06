@@ -776,6 +776,53 @@ def _affect_projection_tools() -> List[dict]:
     ]
 
 
+def _session_tools(
+    base: List[dict],
+    companion_mode: Optional[str],
+    affect_projection: Optional[str],
+) -> List[dict]:
+    """The tool list that goes into ``session.tools`` at mint time.
+
+    Split out of the mint endpoint so the one rule that matters here is
+    testable on its own: **arcturian's session carries no tools at all.**
+
+    The affect contract is otherwise additive by design and must work for
+    every companion_mode (and for none), because the runtime contract is
+    character- and mode-agnostic: a session that renders an avatar needs
+    the same projection regardless of what else it can do. That includes
+    zero-tool modes such as narrator-only and guide-ptt; ``report_affect``
+    is a signal, not a capability, so it does not widen what those
+    sessions can DO.
+
+    arcturian is the single exception, and deliberately so. Its affect
+    turn is ALWAYS a forced follow-up carrying ``report_affect`` in its
+    own response-level ``tools`` list (:func:`_affect_followup_payload`),
+    exactly as its resolver turn carries ``resolve_arcturian_turn``
+    (:func:`_arcturian_resolver_followup_payload`). The session copy is
+    therefore never READ on a healthy turn — it only ever widened what a
+    turn could reach when an override did NOT take, which is precisely
+    the ``tool_misrouted got=report_affect`` AppDevV2 reproduced
+    on-device on 2026-08-06.
+
+    Args:
+        base: Tools already chosen for the mode (the per-mode override,
+            or the full default set when the mode did not narrow it).
+        companion_mode: The requested companion mode, if any.
+        affect_projection: The affect contract version, if enabled.
+
+    Returns:
+        A new list; ``base`` is never mutated.
+    """
+    tools = list(base)
+    if not affect_projection or companion_mode == "arcturian":
+        return tools
+    existing = {t.get("name") for t in tools}
+    for tool in _affect_projection_tools():
+        if tool["name"] not in existing:
+            tools.append(tool)
+    return tools
+
+
 def _arcturian_resolver_tools() -> List[dict]:
     """The single `resolve_arcturian_turn` tool (#837).
 
@@ -2701,11 +2748,14 @@ async def mint_realtime_token(
         # ("er paraphrasiert, spricht über seinen internen Prozess").
         # A narration cadence and a terse operative dialogue cannot both
         # be true, and the narration text was winning.
-        companion_tools_override = _arcturian_resolver_tools()
-        # Fail loud rather than minting a mode that silently has no tools:
-        # a resolver-less "arcturian" session would look healthy while
-        # every turn silently skipped the gate that makes action provable.
-        if not companion_tools_override:
+        # The resolver definition is still built here — but only to prove
+        # it BUILDS, not to put it in the session. Fail loud rather than
+        # minting a mode whose resolver contract is broken: a session that
+        # cannot construct `resolve_arcturian_turn` would look healthy
+        # while every turn silently skipped the gate that makes action
+        # provable.
+        _resolver_defs = _arcturian_resolver_tools()
+        if not _resolver_defs:
             raise HTTPException(
                 status_code=500,
                 detail={
@@ -2713,11 +2763,37 @@ async def mint_realtime_token(
                     "hint": "resolve_arcturian_turn definition failed to build.",
                 },
             )
+        # EMPTY session tools (AppDevV2 device reproduction, 2026-08-06).
+        #
+        # Every arcturian turn that may call a tool already ships its own
+        # single-element `tools` list on the response.create override —
+        # `_arcturian_resolver_followup_payload()` for the resolver,
+        # `_affect_followup_payload()` for the affect signal. The session
+        # list was therefore never READ on a healthy turn; it only ever
+        # widened what a turn could reach when an override did NOT take.
+        #
+        # That is exactly the observed failure: AppDevV2 logged
+        # `tool_misrouted got=report_affect expected=resolve_arcturian_turn`
+        # on-device — the model reached a tool the resolver turn never
+        # offered. It could only come from the session list, since
+        # `report_affect` is appended to it below whenever affect
+        # projection is on. 72 runs against this endpoint never reproduced
+        # it, so the trigger lives on the device side (real microphone
+        # audio); rather than keep hunting a trigger I cannot reproduce,
+        # remove what the wrong turn reaches FOR.
+        #
+        # This is structural, not a mitigation: with an empty session list
+        # a spontaneous turn has nothing to call. Either the override
+        # takes and the correct tool fires, or no tool fires at all and
+        # the client logs `response_without_tool_call` — which since
+        # AppDevV2's 4bc43d7 no longer kills the conversation.
+        companion_tools_override = []
         logger.info(
             f"Realtime: companion_mode=arcturian "
             f"resolver={sorted(SUPPORTED_ARCTURIAN_RESOLVERS)[0]} "
             f"detail_level={detail_level}->ignored "
-            f"tools={[t['name'] for t in companion_tools_override]} "
+            f"session_tools=[] "
+            f"per_turn_tools={[t['name'] for t in _resolver_defs]} "
             f"({len(instructions)} chars)"
         )
     elif companion_mode == "guide-ptt":
@@ -2801,23 +2877,17 @@ async def mint_realtime_token(
         _all_tool_defs() if companion_tools_override is None
         else companion_tools_override
     )
-    # Layer the affect contract on top — additive by design. It must work
-    # for every companion_mode (and for none), because the runtime
-    # contract is character- and mode-agnostic: a session that renders an
-    # avatar needs the same projection regardless of what else it can do.
-    # Note this deliberately also arms zero-tool modes such as
-    # narrator-only and guide-ptt; report_affect is a signal, not a
-    # capability, so it does not widen what those sessions can DO.
+    # Layer the affect contract on top — additive for every mode except
+    # arcturian, which serves it per turn instead. Rationale and the
+    # measured incident behind the exception: see _session_tools().
+    tools = _session_tools(tools, companion_mode, affect_projection)
     if affect_projection:
-        _affect_tools = _affect_projection_tools()
-        _existing = {t.get("name") for t in tools}
-        for _t in _affect_tools:
-            if _t["name"] not in _existing:
-                tools.append(_t)
         instructions += _affect_projection_addendum(request.language or "de")
         logger.info(
-            "Realtime: affect_projection=%s tools=%s",
+            "Realtime: affect_projection=%s session_tools=%s%s",
             affect_projection, [t["name"] for t in tools],
+            " (arcturian: report_affect per-turn only)"
+            if companion_mode == "arcturian" else "",
         )
     # OpenAI's GA Realtime session shape (2025-Q4+) nests audio knobs
     # under ``audio.input`` / ``audio.output`` instead of the legacy
