@@ -471,6 +471,26 @@ def test_affect_tool_is_never_added_twice():
     assert names.count("report_affect") == 1, names
 
 
+
+def test_persona_forbids_claiming_a_history_it_was_not_given():
+    """Alex asked "Bist du mit einer kompletten History gestartet?" and
+    Arcturian said yes. The mint attaches no transcript and the client
+    starts with snapshot=nil, so the answer was invented.
+
+    The persona said nothing about memory either way — neither claiming
+    nor denying it — and the model filled the gap with the friendly
+    answer. This is the failure mode that cost the owner the most time
+    today: statements that sounded helpful and were not true.
+    """
+    persona = _companion_arcturian_prompt("de")
+    assert "Wurde dir kein Verlauf mitgegeben" in persona
+    assert "Ich starte ohne Verlauf" in persona
+
+
+def test_persona_ties_the_answer_to_the_session_not_to_helpfulness():
+    persona = _companion_arcturian_prompt("de")
+    assert "nicht nach dem, was hilfreich klaenge" in persona
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(globals().items()):
