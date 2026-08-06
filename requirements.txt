@@ -22,6 +22,11 @@ Pillow>=10.1.0            # Image processing
 # AI Services - Audio
 elevenlabs>=0.2.26        # TTS & Music generation
 pydub>=0.25.1             # Audio processing and manipulation
+# pydub imports the stdlib `audioop`, which PEP 594 removed in Python 3.13.
+# arkserver runs 3.11 and never noticed; pdrei runs 3.13 and has failed to
+# start since at least 2026-08-05 with `ModuleNotFoundError: pyaudioop`,
+# taking every release down with it. audioop-lts restores both module names.
+audioop-lts>=0.2.1; python_version >= "3.13"
 
 # Translation
 deep-translator>=1.11.4    # Google Translate (free, no API key)
