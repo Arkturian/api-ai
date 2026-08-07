@@ -1049,7 +1049,10 @@ def _arcturian_resolver_tools() -> List[dict]:
                             "names something else — the device decides what "
                             "it can actually show and says so out loud when "
                             "it cannot, so an unknown value costs a spoken "
-                            "sentence, not a silent nothing."
+                            "sentence, not a silent nothing. If you pick "
+                            "'navigate_ui' you MUST name a target_kind: "
+                            "leaving it null is not a neutral choice, it "
+                            "means nothing happens at all."
                         ),
                     },
                     "instruction": {

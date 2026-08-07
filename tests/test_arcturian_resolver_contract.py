@@ -575,6 +575,24 @@ def test_persona_leaves_unsupported_targets_to_the_device():
     persona = _companion_arcturian_prompt("de")
     assert "sagt " in persona and "nicht zeigen" in persona
 
+
+def test_navigate_ui_demands_a_target_kind():
+    """Cloud's addendum to the v2 sign-off (#4518, 21:16).
+
+    JSON Schema cannot express "if kind == navigate_ui then target_kind
+    is not null" in a way the model reliably honours, so the rule lives
+    where it actually bites: the schema TELLS the model, and the client
+    treats a null target_kind exactly like an unknown one — no
+    navigation, spoken hint, log line.
+
+    Without this, null is the one value that is neither allowed nor
+    forbidden. Three of today's incidents lived in exactly such an
+    in-between state.
+    """
+    desc = _props()["target_kind"]["description"]
+    assert "MUST name a target_kind" in desc
+    assert "not a neutral choice" in desc
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(globals().items()):
