@@ -42,6 +42,7 @@ so the browser only ever decides routing, not whether a tool exists.
 from __future__ import annotations
 
 import fcntl
+import hmac
 import logging
 import json
 import os
@@ -2650,6 +2651,53 @@ def get_api_key():  # placeholder, mirrors other routes
     return "placeholder"
 
 
+def require_operator_key(
+    x_api_key: Optional[str] = Header(None, alias="X-API-KEY"),
+) -> str:
+    """Real check for operator-only endpoints — unlike `get_api_key`.
+
+    `get_api_key()` returns the literal string "placeholder" and verifies
+    NOTHING. Every endpoint that "requires" it is in fact open, which is
+    how `POST /ai/realtime/cost-status/reset-hard-cap` — the brake
+    against runaway spend — ended up publicly callable, and how
+    `/ai/*/cost-status` served the owner's spend, budget and token counts
+    to the open internet (found by AppDevV2 2026-08-07: a sandbox account
+    read the 35 EUR pot that is not its own).
+
+    The mint is NOT affected: it carries `require_realtime_grant("mint")`
+    on top, which does real JWKS-pinned JWT verification. The placeholder
+    was never the thing protecting it.
+
+    Uses the shared secret the grant verifier already relies on, so this
+    introduces no new credential to distribute or rotate.
+    """
+    expected = os.environ.get("REALTIME_GRANT_SERVICE_KEY", "")
+    if not expected:
+        # Fail closed. An unset secret must not silently mean "open" —
+        # that is the same shape as the placeholder it replaces.
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "error": "operator_key_not_configured",
+                "hint": "REALTIME_GRANT_SERVICE_KEY unset on this host.",
+            },
+        )
+    if not x_api_key or not hmac.compare_digest(x_api_key, expected):
+        logger.warning(
+            "Operator endpoint refused: %s X-API-KEY",
+            "wrong" if x_api_key else "missing",
+        )
+        raise HTTPException(
+            status_code=401,
+            detail={
+                "error": "operator_key_required",
+                "hint": "Send the host's X-API-KEY. Cost figures and the "
+                        "hard-cap control are operator data, not public.",
+            },
+        )
+    return x_api_key
+
+
 # ── Endpoints ─────────────────────────────────────────────────────────
 
 
@@ -3560,7 +3608,7 @@ async def list_realtime_models():
 
 
 @router.get("/realtime/cost-status")
-async def realtime_cost_status():
+async def realtime_cost_status(_: str = Depends(require_operator_key)):
     """Federation-shared Realtime cap state, same shape as the other
     /ai/{provider}/cost-status endpoints."""
     from ..services.openai_realtime_cost_tracker import openai_realtime_cost_tracker
@@ -3568,7 +3616,7 @@ async def realtime_cost_status():
 
 
 @router.post("/realtime/cost-status/reset-hard-cap")
-async def reset_realtime_hard_cap(api_key: str = Depends(get_api_key)):
+async def reset_realtime_hard_cap(_: str = Depends(require_operator_key)):
     """Operator escape hatch — clears the persistent hard-cap flag.
 
     Mirror of ``/ai/gemini/cost-status/reset-hard-cap``. The cap will
