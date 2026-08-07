@@ -286,6 +286,20 @@ class RealtimeTokenRequest(BaseModel):
             "can talk to a freshly cloned voice without redeploying env vars."
         ),
     )
+    arcturian_resolver: Optional[str] = Field(
+        default=None,
+        description=(
+            "Which resolver revision this client can decode. Omit to get "
+            "`agentos.arcturian-action.v1` — the four-field schema every "
+            "shipped client already understands, and what legacy clients "
+            "keep receiving forever without changing a line. Send "
+            "`agentos.arcturian-action.v2` to opt into `target_kind` and "
+            "the `navigate_ui` kind. An unsupported value is REJECTED "
+            "(422) rather than downgraded: a silent fallback would hand a "
+            "v2 client a v1 schema, and the mismatch would surface far "
+            "away from its cause. arcturian mode only."
+        ),
+    )
     conversation_id: Optional[str] = Field(
         default=None,
         description=(
@@ -669,7 +683,26 @@ SUPPORTED_AFFECT_PROJECTIONS = {"agentos.avatar-runtime.v1"}
 # voluntary second model tool-call. So the resolver itself returns the
 # domain fields, and the adapter hands them to the server-side executor.
 # The model never calls the executor and never sees an action id.
-SUPPORTED_ARCTURIAN_RESOLVERS = {"agentos.arcturian-action.v2"}
+ARCTURIAN_RESOLVER_V1 = "agentos.arcturian-action.v1"
+ARCTURIAN_RESOLVER_V2 = "agentos.arcturian-action.v2"
+SUPPORTED_ARCTURIAN_RESOLVERS = {ARCTURIAN_RESOLVER_V1, ARCTURIAN_RESOLVER_V2}
+
+# What a client gets when it asks for nothing. v1, deliberately.
+#
+# Cloud-Codex caught the alternative in review (#4518): a single global
+# constant flipped to v2 would have handed EVERY already-shipped client a
+# resolver identifier it compares for exact equality — a v2 mint dies in
+# `invalidTokenContract` before the resolver ever runs. That is a hard
+# break disguised as a version bump, and it is the same "client first,
+# then server" lesson that cost the owner his voice sessions this
+# morning; I re-made the mistake one layer down.
+#
+# So the version is NEGOTIATED, not decreed: no request means v1 forever,
+# and a client opts in by asking. An unknown request fails closed rather
+# than falling back, because a silent downgrade would hand a v2 client a
+# v1 schema and the mismatch would surface as a missing field somewhere
+# far away from its cause.
+DEFAULT_ARCTURIAN_RESOLVER = ARCTURIAN_RESOLVER_V1
 
 # Response-kind discriminators for turn correlation (#886).
 #
@@ -953,8 +986,15 @@ def _session_tools(
     return tools
 
 
-def _arcturian_resolver_tools() -> List[dict]:
+def _arcturian_resolver_tools(
+    resolver: str = DEFAULT_ARCTURIAN_RESOLVER,
+) -> List[dict]:
     """The single `resolve_arcturian_turn` tool (#837).
+
+    `resolver` selects the negotiated revision. v1 is the four-field
+    schema every shipped client already decodes; v2 adds `target_kind`
+    and the `navigate_ui` kind. Both are built from the same code so the
+    two revisions cannot drift apart in the parts they share.
 
     Contract invariants that live here rather than in the prompt:
 
@@ -974,7 +1014,7 @@ def _arcturian_resolver_tools() -> List[dict]:
         follow-up question is spoken as an ordinary short answer; only a
         genuine owner decision becomes a persistent TaskDecision.
     """
-    return [
+    tools = [
         {
             "type": "function",
             "name": "resolve_arcturian_turn",
@@ -996,9 +1036,11 @@ def _arcturian_resolver_tools() -> List[dict]:
             "parameters": {
                 "type": "object",
                 "additionalProperties": False,
-                "required": [
-                    "decision", "kind", "target", "target_kind", "instruction",
-                ],
+                "required": (
+                    ["decision", "kind", "target", "target_kind", "instruction"]
+                    if resolver == ARCTURIAN_RESOLVER_V2
+                    else ["decision", "kind", "target", "instruction"]
+                ),
                 "properties": {
                     "decision": {
                         "type": "string",
@@ -1011,7 +1053,11 @@ def _arcturian_resolver_tools() -> List[dict]:
                     },
                     "kind": {
                         "type": ["string", "null"],
-                        "enum": RESOLVER_ACTION_KINDS + [None],
+                        "enum": (
+                            (RESOLVER_ACTION_KINDS
+                             if resolver == ARCTURIAN_RESOLVER_V2
+                             else RESOLVER_EXECUTABLE_KINDS) + [None]
+                        ),
                         "description": (
                             "Only for decision='action', otherwise null. "
                             "Your reading of what should happen — the "
@@ -1069,10 +1115,24 @@ def _arcturian_resolver_tools() -> List[dict]:
             },
         }
     ]
+    if resolver != ARCTURIAN_RESOLVER_V2:
+        # Keep the v1 schema bit-identical to what every shipped client
+        # already decodes. Leaving `target_kind` in `properties` while
+        # dropping it from `required` would still be a wider schema than
+        # the one those clients were built against — and with
+        # additionalProperties:false the difference is exactly the sort
+        # of near-invisible drift this contract exists to prevent.
+        tools[0]["parameters"]["properties"].pop("target_kind", None)
+    return tools
 
 
-def _arcturian_resolver_followup_payload() -> dict:
+def _arcturian_resolver_followup_payload(
+    resolver: str = DEFAULT_ARCTURIAN_RESOLVER,
+) -> dict:
     """The forced resolver turn the adapter must send before speaking.
+
+    Carries the tool for the NEGOTIATED revision — a v1 client must never
+    be handed a five-field schema it cannot decode.
 
     Same shape as the affect follow-up and for the same measured reason:
     `tool_choice:"required"` fires 6/6, while the named-function form is
@@ -1093,7 +1153,7 @@ def _arcturian_resolver_followup_payload() -> dict:
         "type": "response.create",
         "response": {
             "output_modalities": ["text"],
-            "tools": _arcturian_resolver_tools(),
+            "tools": _arcturian_resolver_tools(resolver),
             "tool_choice": "required",
             # Correlation anchor (#886). Verified round-trip: Realtime
             # echoes response.metadata unchanged in BOTH response.created
@@ -2940,7 +3000,27 @@ async def mint_realtime_token(
         # cannot construct `resolve_arcturian_turn` would look healthy
         # while every turn silently skipped the gate that makes action
         # provable.
-        _resolver_defs = _arcturian_resolver_tools()
+        # Version negotiation (Cloud-Codex + AppDev-Realtime +
+        # Tschepp-Codex2 review, #4518). Absent means v1: an already
+        # shipped client compares the identifier for exact equality and
+        # would die in `invalidTokenContract` if the server decided the
+        # revision unilaterally.
+        arcturian_resolver = request.arcturian_resolver or DEFAULT_ARCTURIAN_RESOLVER
+        if arcturian_resolver not in SUPPORTED_ARCTURIAN_RESOLVERS:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "error": "unsupported_arcturian_resolver",
+                    "requested": arcturian_resolver,
+                    "supported": sorted(SUPPORTED_ARCTURIAN_RESOLVERS),
+                    "hint": (
+                        "Omit the field for v1. An unknown revision is "
+                        "rejected rather than downgraded so a schema "
+                        "mismatch surfaces here and not three layers away."
+                    ),
+                },
+            )
+        _resolver_defs = _arcturian_resolver_tools(arcturian_resolver)
         if not _resolver_defs:
             raise HTTPException(
                 status_code=500,
@@ -2976,7 +3056,7 @@ async def mint_realtime_token(
         companion_tools_override = []
         logger.info(
             f"Realtime: companion_mode=arcturian "
-            f"resolver={sorted(SUPPORTED_ARCTURIAN_RESOLVERS)[0]} "
+            f"resolver={arcturian_resolver} "
             f"detail_level={detail_level}->ignored "
             f"session_tools=[] "
             f"per_turn_tools={[t['name'] for t in _resolver_defs]} "
@@ -3052,7 +3132,7 @@ async def mint_realtime_token(
         "detail_level=%s lang=%s override=%s",
         companion_mode or "(none)",
         affect_projection or "(none)",
-        (sorted(SUPPORTED_ARCTURIAN_RESOLVERS)[0]
+        (request.arcturian_resolver or DEFAULT_ARCTURIAN_RESOLVER
          if companion_mode == "arcturian" else "(n/a)"),
         detail_level if companion_mode and companion_mode != "arcturian" else "(n/a)",
         request.language or "de",
@@ -3349,12 +3429,14 @@ async def mint_realtime_token(
         # should assemble this itself. Send `resolver_followup` BEFORE the
         # spoken answer on every committed user turn; `none` is a valid
         # verdict, not an error. Null when the mode is not arcturian.
+        # The NEGOTIATED revision, not a server-chosen one. A client
+        # that asked for nothing sees v1 here and can keep comparing for
+        # exact equality, which is what it already does.
         "arcturian_resolver": (
-            sorted(SUPPORTED_ARCTURIAN_RESOLVERS)[0]
-            if companion_mode == "arcturian" else None
+            arcturian_resolver if companion_mode == "arcturian" else None
         ),
         "resolver_followup": (
-            _arcturian_resolver_followup_payload()
+            _arcturian_resolver_followup_payload(arcturian_resolver)
             if companion_mode == "arcturian" else None
         ),
         # Turn-lifecycle correlation (#886). All three responses a turn

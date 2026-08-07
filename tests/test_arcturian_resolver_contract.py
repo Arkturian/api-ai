@@ -33,6 +33,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from ai.routes.realtime_routes import (  # noqa: E402
     RESOLVER_ACTION_KINDS,
     RESOLVER_DECISIONS,
+    ARCTURIAN_RESOLVER_V1,
+    ARCTURIAN_RESOLVER_V2,
+    DEFAULT_ARCTURIAN_RESOLVER,
     SUPPORTED_ARCTURIAN_RESOLVERS,
     _affect_projection_tools,
     _arcturian_resolver_addendum,
@@ -64,6 +67,17 @@ def _props():
     return _tool()["parameters"]["properties"]
 
 
+def _tool_v2():
+    """v2 must be asked for by name — the default is v1 on purpose."""
+    tools = _arcturian_resolver_tools(ARCTURIAN_RESOLVER_V2)
+    assert len(tools) == 1
+    return tools[0]
+
+
+def _props_v2():
+    return _tool_v2()["parameters"]["properties"]
+
+
 def test_contract_version_is_the_frozen_one():
     """v2 since Post #4518: navigate_ui + target_kind.
 
@@ -71,7 +85,11 @@ def test_contract_version_is_the_frozen_one():
     needs a fresh approval, because the v1 sign-off was bound to its
     revision, not to the contract name.
     """
-    assert SUPPORTED_ARCTURIAN_RESOLVERS == {"agentos.arcturian-action.v2"}
+    assert SUPPORTED_ARCTURIAN_RESOLVERS == {
+        ARCTURIAN_RESOLVER_V1, ARCTURIAN_RESOLVER_V2,
+    }
+    # Which one an un-asking client gets is the migration-critical half.
+    assert DEFAULT_ARCTURIAN_RESOLVER == ARCTURIAN_RESOLVER_V1
 
 
 def test_tool_is_named_resolve_arcturian_turn():
@@ -91,7 +109,7 @@ def test_none_is_a_first_class_verdict():
 
 
 def test_action_kinds_match_the_envelope():
-    assert set(_props()["kind"]["enum"]) == set(RESOLVER_ACTION_KINDS) | {None}
+    assert set(_props_v2()["kind"]["enum"]) == set(RESOLVER_ACTION_KINDS) | {None}
 
 
 def test_disposition_fields_are_nullable_for_none_and_clarify():
@@ -102,7 +120,7 @@ def test_disposition_fields_are_nullable_for_none_and_clarify():
 
 def test_all_fields_required_so_nothing_arrives_absent():
     """Required + nullable beats optional: an omitted field is ambiguous."""
-    assert set(_tool()["parameters"]["required"]) == {
+    assert set(_tool_v2()["parameters"]["required"]) == {
         "decision", "kind", "target", "target_kind", "instruction",
     }
 
@@ -502,7 +520,7 @@ def test_persona_ties_the_answer_to_the_session_not_to_helpfulness():
 
 
 def test_navigate_ui_is_the_fifth_kind():
-    assert "navigate_ui" in _props()["kind"]["enum"]
+    assert "navigate_ui" in _props_v2()["kind"]["enum"]
     assert set(RESOLVER_ACTION_KINDS) == {
         "send_internal_message", "delegate_internal",
         "create_collab", "start_workflow", "navigate_ui",
@@ -527,8 +545,8 @@ def test_target_kind_is_a_free_string_not_an_enum():
     not with the contract. An enum here would make every new iOS view a
     server deployment.
     """
-    assert "enum" not in _props()["target_kind"]
-    assert "null" in _props()["target_kind"]["type"]
+    assert "enum" not in _props_v2()["target_kind"]
+    assert "null" in _props_v2()["target_kind"]["type"]
 
 
 def test_target_is_the_same_namespace_for_focus_agent():
@@ -589,7 +607,7 @@ def test_navigate_ui_demands_a_target_kind():
     forbidden. Three of today's incidents lived in exactly such an
     in-between state.
     """
-    desc = _props()["target_kind"]["description"]
+    desc = _props_v2()["target_kind"]["description"]
     assert "MUST name a target_kind" in desc
     assert "not a neutral choice" in desc
 
