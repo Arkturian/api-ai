@@ -2787,7 +2787,15 @@ async def voice_clone(
     name: str = Form("Cloned Voice"),
     description: Optional[str] = Form(None),
     language: str = Form("de"),
-    api_key: str = Depends(get_api_key),
+    # Spends money at ElevenLabs and carried only the placeholder, i.e.
+    # nothing. Closed on 2026-08-07 alongside the cost endpoints, after
+    # searching the whole federation for a caller: none in cloud-v2-ios
+    # (AppDevV2 confirmed for his and AppDev's parts of the same repo),
+    # none in cloud-api, content-api, guide-api, or the CloudV2 web
+    # frontend on mac. The two hits inside api-ai are unrelated — a
+    # cost-accounting modality string and narration_routes' own
+    # tts_voice_clone.
+    _: str = Depends(require_operator_key),
 ):
     """Clone a voice from a user-uploaded audio sample, then create a
     dedicated ElevenLabs Conversational AI agent that uses that voice.
