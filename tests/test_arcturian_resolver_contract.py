@@ -611,6 +611,88 @@ def test_navigate_ui_demands_a_target_kind():
     assert "MUST name a target_kind" in desc
     assert "not a neutral choice" in desc
 
+
+# --- Brain-Regeln aus den Gespraechen vom 2026-08-07 (AppDevV2-Analyse) ---
+#
+# Einzeln benannt und einzeln getestet, ausdruecklich auf AppDevV2s Bitte:
+# bei vier Regeln in einer Sammel-Umschreibung waere bei einer
+# Verschlechterung nicht mehr zuzuordnen, welche es war. Genau so ist am
+# 04.08. der #751-Satz stehengeblieben und hat #837 ueberstimmt.
+
+
+def test_regel1_target_comes_from_the_sentence_not_the_conversation():
+    """Der teuerste Fehler des Tages, mit Beleg.
+
+    19:39 sagt der Operator "schick AppDevV2 eine Testnachricht", das
+    Modell sagt "ich schicke AppDevV2" — und der Resolver liefert
+    target=3dApi, weil ueber 3dApi Minuten vorher gesprochen wurde. Die
+    Nachricht ging ab, an den Falschen, und beide Seiten hielten sie fuer
+    zugestellt. Zwei Stunden Suche an der Zustellung, die nie kaputt war.
+    """
+    persona = _companion_arcturian_prompt("de")
+    assert "REGEL 1 — DAS ZIEL STEHT IM SATZ" in persona
+    assert "AUSSCHLIESSLICH aus der" in persona
+    assert "ist Zusammenhang — kein Ziel" in persona
+
+
+def test_regel2_spelling_is_never_a_reason_to_ask_back():
+    """'sende an appdevv2' loeste eine Rueckfrage zur Schreibweise aus."""
+    persona = _companion_arcturian_prompt("de")
+    assert "REGEL 2 — SCHREIBWEISE IST KEIN GRUND" in persona
+    assert "'appdevv2' ist AppDevV2" in persona
+    assert "nie, weil dir die Schreibweise komisch vorkommt" in persona
+
+
+def test_regel3_uses_the_server_supplied_last_target():
+    """Der Client haengt das zuletzt benutzte Ziel an (f7e7f6b).
+
+    Ohne diese Regel fragt das Modell trotzdem zurueck, und der Hinweis
+    verpufft.
+    """
+    persona = _companion_arcturian_prompt("de")
+    assert "REGEL 3 — 'NOCHMAL' IST EIN ZIEL" in persona
+    assert "NIMM ES. Frag nicht erneut" in persona
+
+
+def test_regel3_explicitly_reconciles_itself_with_regel1():
+    """Zwei Regeln, die einander widersprechen, sind schlimmer als eine.
+
+    Regel 1 verbietet Namen aus dem Verlauf, Regel 3 verlangt einen —
+    der Unterschied (Server nennt ihn vs. Modell holt ihn sich) muss IM
+    Text stehen, sonst gewinnt die absolutere. Genau so hat der
+    #751-Satz die #837-Faehigkeit ueberstimmt.
+    """
+    persona = _companion_arcturian_prompt("de")
+    assert "kein Widerspruch zu Regel 1" in persona
+    assert "Ohne diesen Hinweis gilt" in persona
+
+
+def test_regel4_never_acts_on_unintelligible_input():
+    """Der gefaehrlichste: ein Whisper-Artefakt loeste eine Aktion aus.
+
+    Es ist der einzige dieser Fehler, der etwas an Dritte schickt.
+    """
+    persona = _companion_arcturian_prompt("de")
+    assert "REGEL 4 — WAS DU NICHT VERSTANDEN HAST" in persona
+    assert "NIEMALS 'action'" in persona
+
+
+def test_regel4_names_the_known_artefacts_verbatim():
+    """Die Artefakte muessen woertlich dastehen — 'unverstaendlich' allein
+    erkennt das Modell bei einem grammatisch sauberen Satz nicht."""
+    persona = _companion_arcturian_prompt("de")
+    for artefact in ("Untertitelung aufgrund der Audioqualitaet",
+                     "Vielen Dank fuers Zuschauen"):
+        assert artefact in persona, artefact
+
+
+def test_all_four_rules_are_present_and_numbered_once():
+    """Doppelte oder fehlende Nummern machen eine Verschlechterung
+    unzuordenbar — der Grund, warum sie einzeln benannt sind."""
+    persona = _companion_arcturian_prompt("de")
+    for n in (1, 2, 3, 4):
+        assert persona.count(f"REGEL {n} — ") == 1, f"REGEL {n}"
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(globals().items()):
