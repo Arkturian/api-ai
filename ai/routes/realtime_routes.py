@@ -882,7 +882,19 @@ async def _fetch_conversation_preface(
             "type": "message",
             "role": role,
             "content": [{
-                "type": "input_text" if role == "user" else "text",
+                # The two roles take DIFFERENT content types, and the
+                # assistant one is `output_text`, not `text`. Shipping
+                # `text` here broke every arcturian session that carried a
+                # conversation_id within hours of release (issue #959):
+                # the provider rejects the item with
+                # "Invalid value: 'text'. Value must be 'output_text'."
+                # and the session dies at start.
+                #
+                # Easy to get wrong because `text` IS correct one field
+                # over, in `response.output_modalities` — same word, two
+                # meanings, and the client validates that one against
+                # ["text"] quite properly.
+                "type": "input_text" if role == "user" else "output_text",
                 "text": text,
             }],
         })
