@@ -138,14 +138,20 @@ jobs:
 
             # Robust health check: uvicorn workers take a few seconds to bind
             # after restart. Poll for up to ~30s before giving up.
+            # 90s, not 30s: the service reliably reaches "Application
+            # startup complete" but has needed >30s since the app grew.
+            # On 2026-08-07 the run went red while the service was fine —
+            # startup completed 12:18:39, the loop had already given up.
+            # A deploy that reports red while succeeding is how pdrei
+            # stayed dead through six releases without anyone looking.
             echo "🩺 Waiting for /health to come back up..."
-            for i in $(seq 1 15); do
+            for i in $(seq 1 45); do
               if curl -fsS --max-time 5 http://127.0.0.1:8000/health > /dev/null 2>&1; then
                 echo "✅ Healthy after ${i} attempt(s)"
                 break
               fi
-              if [ "$i" -eq 15 ]; then
-                echo "❌ Service did not come up within 30s"
+              if [ "$i" -eq 45 ]; then
+                echo "❌ Service did not come up within 90s"
                 systemctl status api-ai --no-pager | tail -20 || true
                 exit 1
               fi
