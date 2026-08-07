@@ -155,6 +155,31 @@ def test_request_model_carries_conversation_id():
     assert field.default is None, "omitting it must mean an empty chat"
 
 
+
+def test_assistant_items_use_output_text_not_text():
+    """Issue #959 — this shipped broken and killed live sessions.
+
+    Realtime takes DIFFERENT content types per role, and the assistant one
+    is `output_text`. Sending `text` makes the provider reject the item
+    with "Invalid value: 'text'. Value must be 'output_text'." and the
+    session dies at start.
+
+    The trap: `text` IS the correct value one field over, in
+    `response.output_modalities` — same word, two meanings.
+    """
+    (items, _), _ = _run(_Resp(200, EVENTS))
+    by_role = {i["role"]: i["content"][0]["type"] for i in items}
+    assert by_role["user"] == "input_text"
+    assert by_role["assistant"] == "output_text"
+
+
+def test_no_preface_item_ever_uses_the_bare_text_type():
+    (items, _), _ = _run(_Resp(200, EVENTS))
+    for item in items:
+        assert item["content"][0]["type"] != "text", (
+            "bare 'text' is rejected by the provider for both roles"
+        )
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(globals().items()):
