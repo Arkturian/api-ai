@@ -287,6 +287,29 @@ class RealtimeTokenRequest(BaseModel):
             "can talk to a freshly cloned voice without redeploying env vars."
         ),
     )
+    push_to_talk: bool = Field(
+        default=False,
+        description=(
+            "Opt-in: force `turn_detection: null` so the CLIENT owns "
+            "every turn boundary — release is `input_audio_buffer.commit` "
+            "followed by exactly one `response.create`. Omit (false) and "
+            "nothing changes for anyone: each mode keeps the detection it "
+            "has today. Only meaningful for the modes that currently run "
+            "server_vad (`agent-transparent`, `talkback-enabled`); a no-op "
+            "for the modes already at null.\n\n"
+            "Why it exists as a mint flag and not a client setting: with "
+            "server_vad the PROVIDER creates a response of its own after "
+            "the silence window. That response carries no "
+            "`agentos_response_kind` metadata AND inherits the session "
+            "tools — `propose_to_agent` for talkback, `relay_to_agent` "
+            "for agent-transparent. A client that also sends "
+            "`response.create` therefore does not merely get two answers; "
+            "it can get an unrequested proposal or relay it cannot even "
+            "correlate. That was the owner's 'beim zweiten Push-to-Talk "
+            "kommt nichts mehr an' on 2026-08-06. The switch has to be "
+            "server-side because only the mint decides turn_detection."
+        ),
+    )
     arcturian_resolver: Optional[str] = Field(
         default=None,
         description=(
@@ -2983,6 +3006,14 @@ async def mint_realtime_token(
             detail={
                 "error": "unsupported_companion_mode",
                 "companion_mode": companion_mode,
+        # The turn detection ACTUALLY minted, and whether the opt-in took.
+        # Echoed for the same reason as voice_session_id and
+        # arcturian_resolver: a client must be able to ASSERT what it got
+        # instead of inferring it from what it asked for. Assuming the
+        # server picked what you requested is how 18 of 18 heartbeats
+        # came back dead.
+        "turn_detection": turn_detection,
+        "push_to_talk": bool(request.push_to_talk) and turn_detection is None,
                 "supported": sorted(SUPPORTED_COMPANION_MODES),
             },
         )
@@ -3348,6 +3379,23 @@ async def mint_realtime_token(
             "threshold": 0.5,
             "silence_duration_ms": 500,
         }
+    # Opt-in PTT (CloudV2-Codex, #975). Deliberately AFTER the per-mode
+    # branches and deliberately one-way: it can only turn detection OFF,
+    # never on. A client that does not send the flag is bit-identical to
+    # before — that is the whole point, and it is the lesson from my own
+    # a137d86 today, where a server-side default flip would have killed
+    # every already-shipped client at once.
+    #
+    # Tool lists, confirmation and relay contracts are untouched by this;
+    # it changes who closes a turn, not what a turn may do.
+    if request.push_to_talk and turn_detection is not None:
+        logger.info(
+            "Realtime: push_to_talk=on — turn_detection forced null "
+            "(mode=%s, was %s)",
+            companion_mode or "(none)", turn_detection.get("type"),
+        )
+        turn_detection = None
+
     # The tool names as they actually go out — the single field a client
     # needs to diagnose a contract mismatch, and the one that was missing
     # when AppDevV2's sessions died on an unexpected function name.
