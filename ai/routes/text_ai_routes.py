@@ -9,6 +9,10 @@ Endpoints for text-based AI models:
 """
 
 from fastapi import APIRouter, Depends, HTTPException, Request
+# Real operator gate — the local get_api_key() is a placeholder that
+# verifies nothing, which is why these three served the owner's spend
+# to the open internet until 2026-08-07.
+from ai.routes.realtime_routes import require_operator_key
 from pydantic import BaseModel
 from typing import Optional, List, Dict, Any, Union
 import asyncio
@@ -843,7 +847,7 @@ async def claude_endpoint(
 
 
 @router.get("/claude/cost-status")
-async def claude_cost_status():
+async def claude_cost_status(_: str = Depends(require_operator_key)):
     """
     Get current Claude CLI cost tracking status.
 
@@ -1149,7 +1153,7 @@ async def chatgpt_endpoint(
 
 
 @router.get("/chatgpt/cost-status")
-async def chatgpt_cost_status():
+async def chatgpt_cost_status(_: str = Depends(require_operator_key)):
     """
     Get current Codex CLI cost tracking status.
 
@@ -1660,7 +1664,7 @@ async def gemini_endpoint(
 
 
 @router.get("/gemini/cost-status")
-async def gemini_cost_status():
+async def gemini_cost_status(_: str = Depends(require_operator_key)):
     """
     Get current Gemini CLI usage tracking status.
 
