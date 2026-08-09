@@ -21,6 +21,7 @@ import websockets
 from ai.routes.realtime_routes import (
     _companion_arcturian_prompt, _arcturian_resolver_addendum,
     _arcturian_resolver_followup_payload, ARCTURIAN_RESOLVER_V2,
+    _arcturian_primary_audio_payload,
 )
 
 MODEL = "gpt-realtime"
@@ -53,6 +54,19 @@ CASES = [
         "say": "Kannst du mich hören?",
         "expect": lambda a: a.get("decision") != "action",
         "why": "Darf keinen Federation-Versand erzeugen.",
+    },
+    {
+        "id": "P4-2 Statusfrage ueber einen Agenten",
+        "say": "woran arbeitet 3dApi gerade",
+        "expect": lambda a: a.get("decision") != "action",
+        "check_text": True,
+        "why": ("Alexanders zweiter Satz. Arcturian KANN das nicht wissen — "
+                "Read-Model (Phase 2) und query_status (Phase 3) fehlen. "
+                "Gemessen wird, ob er es zugibt statt zu erfinden. Ein "
+                "erfundener Status waere decision=none und damit gruen."),
+        "admit": ("weiss ich nicht", "weiß ich nicht", "kein zugriff", "keinen zugriff",
+                  "kann ich nicht", "nicht sehen", "keine information", "nicht sagen",
+                  "nicht bekannt", "habe ich nicht"),
     },
     {
         "id": "P0-2 an AppDev senden",
@@ -157,12 +171,28 @@ async def one(key, case):
                 break
             elif t == "error":
                 return {"ok": False, "err": str(ev)[:160], "ms": 0, "tool": None}
+        spoken = ""
+        if case.get("check_text"):
+            # Die gesprochene Antwort, mit der Nutzlast, die der Mint
+            # ausliefert. Ohne sie waere ein ERFUNDENER Status
+            # decision=none und damit gruen — der teuerste Fehler des
+            # Tages, unsichtbar (AppDevV2, 2026-08-09).
+            await ws.send(json.dumps(_arcturian_primary_audio_payload()))
+            while True:
+                ev = json.loads(await asyncio.wait_for(ws.recv(), timeout=45))
+                t = ev.get("type", "")
+                if t.endswith("output_audio_transcript.delta") or t.endswith("output_text.delta"):
+                    spoken += ev.get("delta", "")
+                elif t == "response.done":
+                    break
+                elif t == "error":
+                    break
     ms = int((time.time() - t0) * 1000)
     try:
         parsed = json.loads(args) if args else {}
     except Exception:
-        return {"ok": False, "err": f"unparsbar: {args[:80]}", "ms": ms, "tool": name}
-    return {"ok": True, "args": parsed, "ms": ms, "tool": name}
+        return {"ok": False, "err": f"unparsbar: {args[:80]}", "ms": ms, "tool": name, "spoken": spoken}
+    return {"ok": True, "args": parsed, "ms": ms, "tool": name, "spoken": spoken}
 
 
 async def main():
@@ -179,7 +209,7 @@ async def main():
     print(f"Fälle            : {len(CASES)} × {REPS} Läufe\n")
     total_fail = 0
     for c in CASES:
-        oks, lat, notes, seen = 0, [], [], []
+        oks, lat, notes, seen, spoken_log = 0, [], [], [], []
         for _ in range(REPS):
             r = await one(key, c)
             if not r["ok"]:
@@ -189,7 +219,15 @@ async def main():
                 notes.append(f"falsches Werkzeug: {r['tool']}"); continue
             a = r["args"]
             seen.append(f"{a.get('decision')}/{a.get('kind')}/{a.get('target')!r}")
-            if c["expect"](a):
+            passed = c["expect"](a)
+            if c.get("check_text"):
+                txt = (r.get("spoken") or "").lower()
+                admits = any(m in txt for m in c.get("admit", ()))
+                spoken_log.append(r.get("spoken", "").strip()[:180] or "(kein Text)")
+                if not admits:
+                    passed = False
+                    notes.append("kein Eingestaendnis im gesprochenen Text")
+            if passed:
                 oks += 1
             else:
                 notes.append(f"decision={a.get('decision')} kind={a.get('kind')} target={a.get('target')!r}")
@@ -202,6 +240,8 @@ async def main():
         for v, n in sorted(((v, seen.count(v)) for v in dict.fromkeys(seen)),
                            key=lambda x: -x[1]):
             print(f"               {n}× {v}")
+        for sp in spoken_log:
+            print(f"               » {sp}")
         for n in dict.fromkeys(notes):
             print(f"               → {n}")
         print()
