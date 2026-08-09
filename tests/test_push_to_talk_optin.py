@@ -158,6 +158,29 @@ def test_error_body_for_unsupported_mode_stayed_intact():
         pass
     assert "supported" in errs
 
+
+def test_persona_provenance_is_in_the_response_body():
+    """#1002: a device run must be comparable to a bench run.
+
+    Same placement guard as the PTT echo — these two fields are useless
+    if they sit anywhere but the mint response.
+    """
+    body = _mint_response_keys()
+    assert "persona_sha256" in body
+    assert "persona_chars" in body
+
+
+def test_provenance_is_hashed_not_read_from_git():
+    """The serving tree's .git lies.
+
+    On arkserver it reports 1d1c876 while the deployed commit is
+    5fe4043, and realtime_routes.py is untracked there. A revision read
+    from it would be wrong and look authoritative. The hash is taken
+    from the instruction string actually sent, so it cannot go stale.
+    """
+    assert 'hashlib.sha256((instructions or "").encode())' in SRC
+    assert "rev-parse" not in SRC, "provenance must not come from git at runtime"
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(globals().items()):

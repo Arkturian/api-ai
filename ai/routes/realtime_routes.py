@@ -42,6 +42,7 @@ so the browser only ever decides routing, not whether a tool exists.
 from __future__ import annotations
 
 import fcntl
+import hashlib
 import hmac
 import logging
 import json
@@ -3561,6 +3562,21 @@ async def mint_realtime_token(
         # assumption that produced 18/18 dead heartbeats.
         "voice_session_id": voice_session_id,
         "companion_mode": companion_mode,
+        # Provenance of the persona that was ACTUALLY minted (#1002).
+        # AppDev needs it to compare a device run against a bench run —
+        # today the owner's phone ran an old build for hours while every
+        # report said "live", and nobody could tell from a session which
+        # persona it carried.
+        #
+        # Deliberately NOT a code revision: the serving tree on arkserver
+        # carries a leftover .git that reports 1d1c876 while the deployed
+        # commit is 5fe4043, and realtime_routes.py shows up as untracked
+        # there. A revision read from it would be wrong AND look
+        # authoritative — the exact failure mode this field exists to
+        # prevent. The hash is taken from the instruction string that
+        # goes out on THIS request, so it cannot go stale.
+        "persona_sha256": hashlib.sha256((instructions or "").encode()).hexdigest(),
+        "persona_chars": len(instructions or ""),
         # The turn detection ACTUALLY minted, and whether the opt-in took.
         # A client must be able to ASSERT what it got instead of inferring
         # that the server did what it asked — inferring that is how 18 of
