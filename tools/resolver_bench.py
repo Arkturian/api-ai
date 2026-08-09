@@ -69,6 +69,30 @@ CASES = [
                   "nicht bekannt", "habe ich nicht"),
     },
     {
+        "id": "P4-3 Statusfrage MIT frischem Kontext",
+        "context": "Woran deine Agenten gerade arbeiten (Stand: jetzt):\n3dApi: working, thinking\nAppDevV2: working, thinking, Prueflauf laeuft",
+        "say": "woran arbeitet 3dApi gerade",
+        "expect": lambda a: a.get("decision") == "none",
+        "check_text": True,
+        # Wortstaemme, nicht Literale: rb-1786299009 wertete 4 von 5
+        # korrekten Antworten als Fehlschlag, weil sie "am Arbeiten",
+        # "auszuarbeiten" und "nachzudenken" sagten. Der Fehler lag im
+        # Matcher, nicht im Modell — der dritte Fall heute, in dem der
+        # erste rote Lauf ein Fehler im Pruefstand war.
+        "admit": ("arbeit", "denk", "working", "thinking", "ueberleg", "überleg"),
+        "why": "Mit Schnappschuss soll er antworten statt zu navigieren oder zu vertroesten.",
+    },
+    {
+        "id": "P4-4 Statusfrage mit VERALTETEM Kontext",
+        "context": "Woran deine Agenten gerade arbeiten (Stand: aelter als zehn Minuten — sag das, wenn du dich darauf beziehst):\n3dApi: working, thinking\nAppDevV2: working, thinking, Prueflauf laeuft",
+        "say": "woran arbeitet 3dApi gerade",
+        "expect": lambda a: a.get("decision") == "none",
+        "check_text": True,
+        "admit": ("zehn minuten", "aelter", "älter", "nicht mehr aktuell",
+                  "veraltet", "alter stand", "aeltere", "ältere"),
+        "why": "Vertragszeile 7 in der Praxis: Veraltetes wird gesagt, nicht ueberspielt.",
+    },
+    {
         "id": "P0-2 an AppDev senden",
         "say": "Schick AppDev bitte eine kurze Testnachricht.",
         "expect": lambda a: a.get("decision") == "action"
@@ -151,6 +175,17 @@ async def one(key, case):
         # Assistenz-Inhalte MUESSEN output_text sein, nicht text. Genau
         # diese Verwechslung hat am 07.08. jede Sitzung mit Vorlauf beim
         # Start sterben lassen (#959).
+        # Kontext-Ereignis (AppDevV2 c803503): der Client legt den
+        # Ambient-Schnappschuss als Kontext in die Sitzung, kein
+        # Werkzeug. Hier in der Huellenform des Narrator-Vertrags
+        # eingespeist — wenn der Client es anders tut, ist die Messung
+        # entsprechend zu lesen.
+        if case.get("context"):
+            await ws.send(json.dumps({"type": "conversation.item.create", "item": {
+                "type": "message", "role": "user",
+                "content": [{"type": "input_text", "text":
+                    "[source_agent=federation · context_kind=background_work · "
+                    "speak=false]\n" + case["context"]}]}}))
         for role, text in list(case.get("history") or []) + [("user", case["say"])]:
             ctype = "input_text" if role == "user" else "output_text"
             await ws.send(json.dumps({"type": "conversation.item.create", "item": {
@@ -208,7 +243,10 @@ async def main():
     print(f"Persona-Revision : {sha} · {len(persona)} Zeichen · sha256 {hashlib.sha256(persona.encode()).hexdigest()[:12]}")
     print(f"Fälle            : {len(CASES)} × {REPS} Läufe\n")
     total_fail = 0
+    only = os.environ.get("BENCH_ONLY", "")
     for c in CASES:
+        if only and only not in c["id"]:
+            continue
         oks, lat, notes, seen, spoken_log = 0, [], [], [], []
         for _ in range(REPS):
             r = await one(key, c)
