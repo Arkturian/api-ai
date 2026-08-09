@@ -70,10 +70,43 @@ CASES = [
     },
     {
         "id": "P0-4 Ziel aus dem Satz, nicht aus dem Verlauf",
-        "history": "Wir haben vorhin lange über 3dApi gesprochen.",
+        "history": [
+            ("user", "was macht 3dApi gerade"),
+            ("assistant", "3dApi arbeitet gerade an der Kartenansicht."),
+        ],
         "say": "Schick AppDevV2 eine Testnachricht.",
         "expect": lambda a: (a.get("target") or "").lower().startswith("appdevv2"),
         "why": "Der teuerste Fehler des 07.08.: Ziel kam aus dem Verlauf (3dApi).",
+    },
+    {
+        "id": "P1-1 Ziel im Satz gegen konkurrierenden Namen",
+        "history": [
+            ("user", "was macht 3dApi gerade"),
+            ("assistant", "3dApi arbeitet gerade an der Kartenansicht."),
+        ],
+        "say": "sende AppDevV2 eine Testnachricht",
+        "expect": lambda a: a.get("decision") == "action"
+                  and (a.get("target") or "").lower().replace(" ", "") == "appdevv2",
+        "why": "07.08. 19:39: sagte 'ich schicke AppDevV2', schickte an 3dApi. Zwei Stunden Fehlersuche.",
+    },
+    {
+        "id": "P1-3 verstuemmelte Erkennung",
+        "say": "sende an App der V2 eine Testnachricht",
+        # Korrigiert nach rb-1786295734: Die alte Erwartung verlangte
+        # `appdevv2` und war FALSCH. Der Vertrag sagt woertlich "Do NOT
+        # invent or normalise it — the server resolves the real
+        # recipient". Das Modell reichte fuenfmal korrekt 'App der V2'
+        # durch; rot war der Test, nicht der Agent.
+        #
+        # Haette der Loop hier automatisch "verbessert", waere die
+        # naheliegende Aenderung "Normalisiere Agentennamen" gewesen —
+        # also das Brechen einer bewussten Vertragsregel, um einen
+        # falschen Test gruen zu bekommen. Deshalb steht zwischen Messen
+        # und Aendern ein Mensch.
+        "expect": lambda a: a.get("decision") == "action"
+                  and a.get("kind") == "send_internal_message"
+                  and bool((a.get("target") or "").strip()),
+        "why": "Modell muss handeln statt abzubrechen und den Namen unveraendert weitergeben; das Aufloesen ist Client-Sache.",
     },
     {
         "id": "P0-5 Schreibweise ist kein Grund zur Rueckfrage",
@@ -97,10 +130,18 @@ async def one(key, case):
             "tools": [], "tool_choice": "none",
             "audio": {"input": {"turn_detection": None}},
         }}))
-        for text in ([case["history"]] if case.get("history") else []) + [case["say"]]:
+        # Vorgeschichte als echte Zuege mit Rollen. Ohne sie kann kein
+        # Name "aus dem Verlauf" gezogen werden — der Fall bestuende,
+        # ohne etwas zu beweisen (AppDevV2, 2026-08-09).
+        #
+        # Assistenz-Inhalte MUESSEN output_text sein, nicht text. Genau
+        # diese Verwechslung hat am 07.08. jede Sitzung mit Vorlauf beim
+        # Start sterben lassen (#959).
+        for role, text in list(case.get("history") or []) + [("user", case["say"])]:
+            ctype = "input_text" if role == "user" else "output_text"
             await ws.send(json.dumps({"type": "conversation.item.create", "item": {
-                "type": "message", "role": "user",
-                "content": [{"type": "input_text", "text": text}]}}))
+                "type": "message", "role": role,
+                "content": [{"type": ctype, "text": text}]}}))
         await ws.send(json.dumps(followup))
         args, name = "", None
         while True:
@@ -138,7 +179,7 @@ async def main():
     print(f"Fälle            : {len(CASES)} × {REPS} Läufe\n")
     total_fail = 0
     for c in CASES:
-        oks, lat, notes = 0, [], []
+        oks, lat, notes, seen = 0, [], [], []
         for _ in range(REPS):
             r = await one(key, c)
             if not r["ok"]:
@@ -146,10 +187,11 @@ async def main():
             lat.append(r["ms"])
             if r["tool"] != "resolve_arcturian_turn":
                 notes.append(f"falsches Werkzeug: {r['tool']}"); continue
-            if c["expect"](r["args"]):
+            a = r["args"]
+            seen.append(f"{a.get('decision')}/{a.get('kind')}/{a.get('target')!r}")
+            if c["expect"](a):
                 oks += 1
             else:
-                a = r["args"]
                 notes.append(f"decision={a.get('decision')} kind={a.get('kind')} target={a.get('target')!r}")
         verdict = "BESTANDEN" if oks == REPS else "DURCHGEFALLEN"
         if oks != REPS:
@@ -157,6 +199,9 @@ async def main():
         med = f"{int(statistics.median(lat))} ms" if lat else "—"
         print(f"{verdict:14} {c['id']}   {oks}/{REPS}   Median {med}")
         print(f"               {c['why']}")
+        for v, n in sorted(((v, seen.count(v)) for v in dict.fromkeys(seen)),
+                           key=lambda x: -x[1]):
+            print(f"               {n}× {v}")
         for n in dict.fromkeys(notes):
             print(f"               → {n}")
         print()
