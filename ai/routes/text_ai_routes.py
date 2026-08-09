@@ -117,6 +117,23 @@ def _run_cli_with_pgid(cmd, env, timeout=300, cwd="/"):
     )
 
 
+# Which real account a gated endpoint spends on. The 403 used to say
+# "Gemini API (GCP-billed)" for ALL of them — copy-paste, caught by
+# Tschepp 2026-08-07 while pricing a 3D run. Two of the three pointed at
+# the wrong cost centre, and at the one account that is deliberately dead
+# since the May 2026 incident (209,56 EUR) — so a reader chasing the cost
+# would have looked at a pot that cannot be charged.
+#
+# The cap below is a separate matter and NOT fixed here: it is the Gemini
+# tracker for every endpoint in this list. See the note in the module the
+# caller lives in.
+_BILLING_ACCOUNTS = {
+    "transcribe-gemini": "the Google/GCP account (Gemini API)",
+    "kling-video": "the Kling prepaid unit balance",
+    "hunyuan-3d": "the Tencent Cloud account (Hunyuan 3D)",
+}
+
+
 def _check_api_billing_gate(confirmed: Optional[bool], endpoint: str) -> None:
     """Reject the request unless:
       1. caller explicitly opted in to GCP-billed Gemini API via
@@ -144,9 +161,11 @@ def _check_api_billing_gate(confirmed: Optional[bool], endpoint: str) -> None:
             detail={
                 "error": "api_billing_confirmation_required",
                 "endpoint": endpoint,
-                "hint": ("This path hits the Gemini API (GCP-billed, not "
-                         "subscription). Send `confirm_api_billing: true` in "
-                         "the request body to acknowledge billing exposure."),
+                "hint": (
+                    f"This path is billed on {_BILLING_ACCOUNTS.get(endpoint, 'an external provider account')}"
+                    " — not a subscription. Send `confirm_api_billing: true`"
+                    " in the request body to acknowledge billing exposure."
+                ),
             },
         )
 
