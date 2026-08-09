@@ -3006,14 +3006,6 @@ async def mint_realtime_token(
             detail={
                 "error": "unsupported_companion_mode",
                 "companion_mode": companion_mode,
-        # The turn detection ACTUALLY minted, and whether the opt-in took.
-        # Echoed for the same reason as voice_session_id and
-        # arcturian_resolver: a client must be able to ASSERT what it got
-        # instead of inferring it from what it asked for. Assuming the
-        # server picked what you requested is how 18 of 18 heartbeats
-        # came back dead.
-        "turn_detection": turn_detection,
-        "push_to_talk": bool(request.push_to_talk) and turn_detection is None,
                 "supported": sorted(SUPPORTED_COMPANION_MODES),
             },
         )
@@ -3569,6 +3561,20 @@ async def mint_realtime_token(
         # assumption that produced 18/18 dead heartbeats.
         "voice_session_id": voice_session_id,
         "companion_mode": companion_mode,
+        # The turn detection ACTUALLY minted, and whether the opt-in took.
+        # A client must be able to ASSERT what it got instead of inferring
+        # that the server did what it asked — inferring that is how 18 of
+        # 18 heartbeats came back dead (051968b).
+        #
+        # These two lines lived in the WRONG dict from 7490c18 until now:
+        # a find_replace hit the first `"companion_mode": companion_mode,`
+        # in the file, which belongs to the unsupported_companion_mode
+        # ERROR body. So the mint never echoed either field, the client
+        # read `undefined !== null` as a contract violation and refused to
+        # open the mic. CloudV2 found it by taking the failing condition
+        # apart instead of assuming which half was red.
+        "turn_detection": turn_detection,
+        "push_to_talk": bool(request.push_to_talk) and turn_detection is None,
         # Null for arcturian: detail_level is narrator cadence and is not
         # applied there (#837). Echoing the requested value would tell the
         # client it took effect when it did not.
