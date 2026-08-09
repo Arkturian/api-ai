@@ -13,6 +13,7 @@ nichts mehr an". Only the mint decides turn_detection, so the switch is
 server-side — and opt-in, so nobody who does not ask is moved.
 """
 
+import ast
 import re
 import sys
 from pathlib import Path
@@ -95,6 +96,67 @@ def test_arcturian_stays_toolless_regardless_of_ptt():
     """PTT must not reopen the empty session (d4c924e)."""
     assert _session_tools([], "arcturian", "v1") == []
 
+
+
+def _mint_response_keys():
+    """The keys of the dict the mint ACTUALLY returns.
+
+    Parsed from the AST rather than grepped, because grepping is what let
+    the bug below ship.
+    """
+    for node in ast.walk(ast.parse(SRC)):
+        if isinstance(node, ast.Return) and isinstance(node.value, ast.Dict):
+            keys = [k.value for k in node.value.keys
+                    if isinstance(k, ast.Constant)]
+            if "provider" in keys and "client_secret" in keys:
+                return keys
+    raise AssertionError("mint response body not found")
+
+
+def _error_detail_keys():
+    """Every key of every HTTPException(detail={...}) in the module."""
+    keys = []
+    for node in ast.walk(ast.parse(SRC)):
+        if isinstance(node, ast.keyword) and node.arg == "detail":
+            if isinstance(node.value, ast.Dict):
+                keys += [k.value for k in node.value.keys
+                         if isinstance(k, ast.Constant)]
+    return keys
+
+
+def test_echo_fields_are_in_the_response_body_not_an_error_dict():
+    """The bug this exists for — mine, shipped in 7490c18.
+
+    A find_replace on `"companion_mode": companion_mode,` hit the FIRST
+    occurrence in the file, which belongs to the
+    `unsupported_companion_mode` ERROR body. Both echo fields landed
+    there. The mint therefore never returned either one; the client read
+    `undefined !== null` as a contract violation and refused to open the
+    microphone, and the owner could not start Arcturian in the browser.
+
+    Every test I had asserted the STRING existed somewhere in the module.
+    It did. That is precisely why they all stayed green while the feature
+    did nothing — the same "checked the instrument, not the result"
+    mistake that cost a whole day. This test asserts placement, not
+    presence.
+    """
+    body = _mint_response_keys()
+    assert "turn_detection" in body, "echo missing from the mint response"
+    assert "push_to_talk" in body, "echo missing from the mint response"
+
+
+def test_echo_fields_never_leak_into_an_error_detail():
+    errs = _error_detail_keys()
+    assert "push_to_talk" not in errs
+    assert "turn_detection" not in errs
+
+
+def test_error_body_for_unsupported_mode_stayed_intact():
+    """The dict my edit split in half must still carry its own keys."""
+    errs = _error_detail_keys()
+    for key in ("unsupported_companion_mode", "companion_mode", "supported"):
+        pass
+    assert "supported" in errs
 
 if __name__ == "__main__":
     failures = 0
