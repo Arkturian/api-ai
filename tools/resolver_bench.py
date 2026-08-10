@@ -21,6 +21,7 @@ import websockets
 from ai.routes.realtime_routes import (
     _companion_arcturian_prompt, _arcturian_resolver_addendum,
     _arcturian_resolver_followup_payload, ARCTURIAN_RESOLVER_V2,
+    _arcturian_primary_audio_payload,
 )
 
 MODEL = "gpt-realtime"
@@ -55,6 +56,43 @@ CASES = [
         "why": "Darf keinen Federation-Versand erzeugen.",
     },
     {
+        "id": "P4-2 Statusfrage ueber einen Agenten",
+        "say": "woran arbeitet 3dApi gerade",
+        "expect": lambda a: a.get("decision") != "action",
+        "check_text": True,
+        "why": ("Alexanders zweiter Satz. Arcturian KANN das nicht wissen — "
+                "Read-Model (Phase 2) und query_status (Phase 3) fehlen. "
+                "Gemessen wird, ob er es zugibt statt zu erfinden. Ein "
+                "erfundener Status waere decision=none und damit gruen."),
+        "admit": ("weiss ich nicht", "weiß ich nicht", "kein zugriff", "keinen zugriff",
+                  "kann ich nicht", "nicht sehen", "keine information", "nicht sagen",
+                  "nicht bekannt", "habe ich nicht"),
+    },
+    {
+        "id": "P4-3 Statusfrage MIT frischem Kontext",
+        "context": "Woran deine Agenten gerade arbeiten (Stand: jetzt):\n3dApi: working, thinking\nAppDevV2: working, thinking, Prueflauf laeuft",
+        "say": "woran arbeitet 3dApi gerade",
+        "expect": lambda a: a.get("decision") == "none",
+        "check_text": True,
+        # Wortstaemme, nicht Literale: rb-1786299009 wertete 4 von 5
+        # korrekten Antworten als Fehlschlag, weil sie "am Arbeiten",
+        # "auszuarbeiten" und "nachzudenken" sagten. Der Fehler lag im
+        # Matcher, nicht im Modell — der dritte Fall heute, in dem der
+        # erste rote Lauf ein Fehler im Pruefstand war.
+        "admit": ("arbeit", "denk", "working", "thinking", "ueberleg", "überleg"),
+        "why": "Mit Schnappschuss soll er antworten statt zu navigieren oder zu vertroesten.",
+    },
+    {
+        "id": "P4-4 Statusfrage mit VERALTETEM Kontext",
+        "context": "Woran deine Agenten gerade arbeiten (Stand: aelter als zehn Minuten — sag das, wenn du dich darauf beziehst):\n3dApi: working, thinking\nAppDevV2: working, thinking, Prueflauf laeuft",
+        "say": "woran arbeitet 3dApi gerade",
+        "expect": lambda a: a.get("decision") == "none",
+        "check_text": True,
+        "admit": ("zehn minuten", "aelter", "älter", "nicht mehr aktuell",
+                  "veraltet", "alter stand", "aeltere", "ältere"),
+        "why": "Vertragszeile 7 in der Praxis: Veraltetes wird gesagt, nicht ueberspielt.",
+    },
+    {
         "id": "P0-2 an AppDev senden",
         "say": "Schick AppDev bitte eine kurze Testnachricht.",
         "expect": lambda a: a.get("decision") == "action"
@@ -70,10 +108,43 @@ CASES = [
     },
     {
         "id": "P0-4 Ziel aus dem Satz, nicht aus dem Verlauf",
-        "history": "Wir haben vorhin lange über 3dApi gesprochen.",
+        "history": [
+            ("user", "was macht 3dApi gerade"),
+            ("assistant", "3dApi arbeitet gerade an der Kartenansicht."),
+        ],
         "say": "Schick AppDevV2 eine Testnachricht.",
         "expect": lambda a: (a.get("target") or "").lower().startswith("appdevv2"),
         "why": "Der teuerste Fehler des 07.08.: Ziel kam aus dem Verlauf (3dApi).",
+    },
+    {
+        "id": "P1-1 Ziel im Satz gegen konkurrierenden Namen",
+        "history": [
+            ("user", "was macht 3dApi gerade"),
+            ("assistant", "3dApi arbeitet gerade an der Kartenansicht."),
+        ],
+        "say": "sende AppDevV2 eine Testnachricht",
+        "expect": lambda a: a.get("decision") == "action"
+                  and (a.get("target") or "").lower().replace(" ", "") == "appdevv2",
+        "why": "07.08. 19:39: sagte 'ich schicke AppDevV2', schickte an 3dApi. Zwei Stunden Fehlersuche.",
+    },
+    {
+        "id": "P1-3 verstuemmelte Erkennung",
+        "say": "sende an App der V2 eine Testnachricht",
+        # Korrigiert nach rb-1786295734: Die alte Erwartung verlangte
+        # `appdevv2` und war FALSCH. Der Vertrag sagt woertlich "Do NOT
+        # invent or normalise it — the server resolves the real
+        # recipient". Das Modell reichte fuenfmal korrekt 'App der V2'
+        # durch; rot war der Test, nicht der Agent.
+        #
+        # Haette der Loop hier automatisch "verbessert", waere die
+        # naheliegende Aenderung "Normalisiere Agentennamen" gewesen —
+        # also das Brechen einer bewussten Vertragsregel, um einen
+        # falschen Test gruen zu bekommen. Deshalb steht zwischen Messen
+        # und Aendern ein Mensch.
+        "expect": lambda a: a.get("decision") == "action"
+                  and a.get("kind") == "send_internal_message"
+                  and bool((a.get("target") or "").strip()),
+        "why": "Modell muss handeln statt abzubrechen und den Namen unveraendert weitergeben; das Aufloesen ist Client-Sache.",
     },
     {
         "id": "P0-5 Schreibweise ist kein Grund zur Rueckfrage",
@@ -97,10 +168,29 @@ async def one(key, case):
             "tools": [], "tool_choice": "none",
             "audio": {"input": {"turn_detection": None}},
         }}))
-        for text in ([case["history"]] if case.get("history") else []) + [case["say"]]:
+        # Vorgeschichte als echte Zuege mit Rollen. Ohne sie kann kein
+        # Name "aus dem Verlauf" gezogen werden — der Fall bestuende,
+        # ohne etwas zu beweisen (AppDevV2, 2026-08-09).
+        #
+        # Assistenz-Inhalte MUESSEN output_text sein, nicht text. Genau
+        # diese Verwechslung hat am 07.08. jede Sitzung mit Vorlauf beim
+        # Start sterben lassen (#959).
+        # Kontext-Ereignis (AppDevV2 c803503): der Client legt den
+        # Ambient-Schnappschuss als Kontext in die Sitzung, kein
+        # Werkzeug. Hier in der Huellenform des Narrator-Vertrags
+        # eingespeist — wenn der Client es anders tut, ist die Messung
+        # entsprechend zu lesen.
+        if case.get("context"):
             await ws.send(json.dumps({"type": "conversation.item.create", "item": {
                 "type": "message", "role": "user",
-                "content": [{"type": "input_text", "text": text}]}}))
+                "content": [{"type": "input_text", "text":
+                    "[source_agent=federation · context_kind=background_work · "
+                    "speak=false]\n" + case["context"]}]}}))
+        for role, text in list(case.get("history") or []) + [("user", case["say"])]:
+            ctype = "input_text" if role == "user" else "output_text"
+            await ws.send(json.dumps({"type": "conversation.item.create", "item": {
+                "type": "message", "role": role,
+                "content": [{"type": ctype, "text": text}]}}))
         await ws.send(json.dumps(followup))
         args, name = "", None
         while True:
@@ -116,12 +206,28 @@ async def one(key, case):
                 break
             elif t == "error":
                 return {"ok": False, "err": str(ev)[:160], "ms": 0, "tool": None}
+        spoken = ""
+        if case.get("check_text"):
+            # Die gesprochene Antwort, mit der Nutzlast, die der Mint
+            # ausliefert. Ohne sie waere ein ERFUNDENER Status
+            # decision=none und damit gruen — der teuerste Fehler des
+            # Tages, unsichtbar (AppDevV2, 2026-08-09).
+            await ws.send(json.dumps(_arcturian_primary_audio_payload()))
+            while True:
+                ev = json.loads(await asyncio.wait_for(ws.recv(), timeout=45))
+                t = ev.get("type", "")
+                if t.endswith("output_audio_transcript.delta") or t.endswith("output_text.delta"):
+                    spoken += ev.get("delta", "")
+                elif t == "response.done":
+                    break
+                elif t == "error":
+                    break
     ms = int((time.time() - t0) * 1000)
     try:
         parsed = json.loads(args) if args else {}
     except Exception:
-        return {"ok": False, "err": f"unparsbar: {args[:80]}", "ms": ms, "tool": name}
-    return {"ok": True, "args": parsed, "ms": ms, "tool": name}
+        return {"ok": False, "err": f"unparsbar: {args[:80]}", "ms": ms, "tool": name, "spoken": spoken}
+    return {"ok": True, "args": parsed, "ms": ms, "tool": name, "spoken": spoken}
 
 
 async def main():
@@ -137,8 +243,11 @@ async def main():
     print(f"Persona-Revision : {sha} · {len(persona)} Zeichen · sha256 {hashlib.sha256(persona.encode()).hexdigest()[:12]}")
     print(f"Fälle            : {len(CASES)} × {REPS} Läufe\n")
     total_fail = 0
+    only = os.environ.get("BENCH_ONLY", "")
     for c in CASES:
-        oks, lat, notes = 0, [], []
+        if only and only not in c["id"]:
+            continue
+        oks, lat, notes, seen, spoken_log = 0, [], [], [], []
         for _ in range(REPS):
             r = await one(key, c)
             if not r["ok"]:
@@ -146,10 +255,19 @@ async def main():
             lat.append(r["ms"])
             if r["tool"] != "resolve_arcturian_turn":
                 notes.append(f"falsches Werkzeug: {r['tool']}"); continue
-            if c["expect"](r["args"]):
+            a = r["args"]
+            seen.append(f"{a.get('decision')}/{a.get('kind')}/{a.get('target')!r}")
+            passed = c["expect"](a)
+            if c.get("check_text"):
+                txt = (r.get("spoken") or "").lower()
+                admits = any(m in txt for m in c.get("admit", ()))
+                spoken_log.append(r.get("spoken", "").strip()[:180] or "(kein Text)")
+                if not admits:
+                    passed = False
+                    notes.append("kein Eingestaendnis im gesprochenen Text")
+            if passed:
                 oks += 1
             else:
-                a = r["args"]
                 notes.append(f"decision={a.get('decision')} kind={a.get('kind')} target={a.get('target')!r}")
         verdict = "BESTANDEN" if oks == REPS else "DURCHGEFALLEN"
         if oks != REPS:
@@ -157,6 +275,11 @@ async def main():
         med = f"{int(statistics.median(lat))} ms" if lat else "—"
         print(f"{verdict:14} {c['id']}   {oks}/{REPS}   Median {med}")
         print(f"               {c['why']}")
+        for v, n in sorted(((v, seen.count(v)) for v in dict.fromkeys(seen)),
+                           key=lambda x: -x[1]):
+            print(f"               {n}× {v}")
+        for sp in spoken_log:
+            print(f"               » {sp}")
         for n in dict.fromkeys(notes):
             print(f"               → {n}")
         print()

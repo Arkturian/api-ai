@@ -1023,6 +1023,55 @@ def _session_tools(
     return tools
 
 
+def _arcturian_read_tools() -> List[dict]:
+    """Lesende Werkzeuge für `arcturian` — Alex' Entscheidung, 2026-08-09.
+
+    Vorgeschichte, damit niemand sie für eine Unachtsamkeit hält: Die
+    Sitzung war seit `d4c924e` bewusst werkzeuglos, weil AppDevV2 auf
+    dem Gerät `tool_misrouted got=report_affect` reproduziert hatte und
+    ich den Auslöser in 72 Läufen nicht fand. Die Fähigkeit wurde
+    stattdessen über Phase 3 und eine Vertragsrevision verschoben.
+
+    Der Eigentümer hat das überstimmt, und der Kern seines Einwands ist
+    belegbar richtig: Das Guide-Profil mintet seit Monaten acht
+    Werkzeuge in produktiven Realtime-Sitzungen. Ein Agent, der handeln
+    aber nichts nachschlagen kann, ist für seinen Zweck nutzlos — fünf
+    Tage Sicherheitsgrenzen ohne eine einzige Fähigkeit.
+
+    Die Grenze, die BLEIBT: nur Lesen, nur unter der Kennung des
+    Aufrufers (der Proxy reicht dessen Bearer durch), niemals mit einer
+    erweiterten Identität. Er sieht, was ER sehen darf.
+    """
+    return [
+        {
+            "type": "function",
+            "name": "agent_status",
+            "description": (
+                "Aktuellen Zustand der Agenten des Operators lesen — was "
+                "sie gerade tun, ob sie laufen. Rufe das auf, wenn der "
+                "Operator fragt, woran ein Agent arbeitet oder wie es um "
+                "ihn steht. Antworte danach aus dem Ergebnis; erfinde "
+                "NIE einen Zustand, den das Ergebnis nicht nennt."
+            ),
+            "parameters": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["agent"],
+                "properties": {
+                    "agent": {
+                        "type": ["string", "null"],
+                        "description": (
+                            "Name des Agenten, so wie der Operator ihn "
+                            "genannt hat — nicht normalisieren. null oder "
+                            "leer liefert alle Agenten des Operators."
+                        ),
+                    },
+                },
+            },
+        },
+    ]
+
+
 def _arcturian_resolver_tools(
     resolver: str = DEFAULT_ARCTURIAN_RESOLVER,
 ) -> List[dict]:
@@ -3186,7 +3235,10 @@ async def mint_realtime_token(
         # takes and the correct tool fires, or no tool fires at all and
         # the client logs `response_without_tool_call` — which since
         # AppDevV2's 4bc43d7 no longer kills the conversation.
-        companion_tools_override = []
+        # Lesende Werkzeuge ab 2026-08-09 (Eigentümer-Entscheidung).
+        # Die Schreib-/Handlungsseite bleibt unverändert beim erzwungenen
+        # Resolver-Zug — hier kommt ausschliesslich Lesen dazu.
+        companion_tools_override = _arcturian_read_tools()
         logger.info(
             f"Realtime: companion_mode=arcturian "
             f"resolver={arcturian_resolver} "
@@ -4185,7 +4237,34 @@ async def realtime_config_health(
 # (the browser shorts them locally); we reject them so a bug there
 # surfaces fast instead of silently going to OpenAI's expensive
 # fail-mode of "model thinks it called the tool, never got an answer".
-READ_TOOL_NAMES = {"knowledge_query", "pois_near", "narration_near", "osm_nearby"}
+READ_TOOL_NAMES = {"knowledge_query", "pois_near", "narration_near", "osm_nearby",
+                   "agent_status"}
+
+
+async def _tool_agent_status(args: dict, authorization: Optional[str]) -> Any:
+    """Agentenzustände lesen — UNTER DER KENNUNG DES AUFRUFERS.
+
+    Der Bearer des Operators wird durchgereicht, nicht ersetzt. Zwei
+    Gründe, beide von CloudV2 benannt: Er soll sehen, was ER sehen darf;
+    und sobald Clouds Absicherung von `/api/agents/status` ausgeliefert
+    ist, filtert der Endpunkt automatisch richtig, statt plötzlich leer
+    zu antworten oder zu viel zu zeigen.
+
+    Ohne Bearer wird NICHT anonym gelesen — heute antwortet der Endpunkt
+    zwar noch ungefiltert, und genau das wäre der Moment, in dem ein
+    Sprachagent Zustände fremder Nutzer vorliest.
+    """
+    if not authorization:
+        return {"ok": False, "error": "no_caller_identity",
+                "hint": "Der Client muss den Bearer des Operators durchreichen."}
+    agent = (args.get("agent") or "").strip()
+    base = os.getenv("CLOUD_API_URL", "https://cloud-api.arkserver.arkturian.com")
+    url = f"{base}/api/agents/{agent}/status" if agent else f"{base}/api/agents/status"
+    async with httpx.AsyncClient(timeout=8.0) as client:
+        r = await client.get(url, headers={"Authorization": authorization})
+    if r.status_code != 200:
+        return {"ok": False, "status": r.status_code, "error": r.text[:200]}
+    return {"ok": True, "agent": agent or "(alle)", "data": r.json()}
 
 
 @router.post("/realtime/tool/{tool_name}")
@@ -4197,6 +4276,7 @@ async def realtime_tool_call(
         alias="X-Session-ID",
         description="Guide-api session id, stamped by the browser.",
     ),
+    authorization: Optional[str] = Header(None),
 ):
     """Resolve a Realtime function-call against the Federation MCPs.
 
@@ -4241,6 +4321,8 @@ async def realtime_tool_call(
             result = await _tool_narration_near(args)
         elif tool_name == "osm_nearby":
             result = await _tool_osm_nearby(args)
+        elif tool_name == "agent_status":
+            result = await _tool_agent_status(args, authorization)
         else:
             # Defensive: should be caught by READ_TOOL_NAMES check above.
             raise HTTPException(status_code=400, detail="unknown tool")

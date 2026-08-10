@@ -450,7 +450,7 @@ def test_prompt_is_emitted_for_any_language():
 # mitigation: leave nothing in the session for a stray turn to reach.
 
 
-def test_arcturian_session_carries_no_tools_even_with_affect():
+def test_arcturian_session_never_carries_the_affect_tool():
     """The one rule the on-device misroute made necessary.
 
     Both arcturian turns ship their own single-element `tools` list on
@@ -458,13 +458,24 @@ def test_arcturian_session_carries_no_tools_even_with_affect():
     healthy turn — it can only be reached by a turn that should not have
     called anything.
     """
-    tools = _session_tools([], "arcturian", "v1")
-    assert tools == [], f"arcturian session must stay empty, got {tools}"
+    from ai.routes.realtime_routes import _arcturian_read_tools
+    names = {t["name"] for t in _session_tools(_arcturian_read_tools(), "arcturian", "v1")}
+    assert "report_affect" not in names, (
+        "the exact tool AppDevV2 reproduced as tool_misrouted must stay per-turn"
+    )
+    assert "resolve_arcturian_turn" not in names, (
+        "the resolver is a forced turn, never a session tool"
+    )
 
 
-def test_arcturian_stays_empty_regardless_of_affect_version():
+def test_arcturian_stays_free_of_affect_regardless_of_version():
+    """Read tools are the owner's decision (2026-08-09); the affect tool
+    is not — it stays a forced turn in every contract version."""
+    from ai.routes.realtime_routes import _arcturian_read_tools
     for version in ("v1", "v2", "anything-future"):
-        assert _session_tools([], "arcturian", version) == []
+        names = {t["name"] for t in
+                 _session_tools(_arcturian_read_tools(), "arcturian", version)}
+        assert "report_affect" not in names
 
 
 def test_affect_still_reaches_every_other_mode():

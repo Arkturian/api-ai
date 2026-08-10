@@ -92,9 +92,18 @@ def test_tool_contracts_are_untouched():
         _companion_relay_tools(), "agent-transparent", None)] == ["relay_to_agent"]
 
 
-def test_arcturian_stays_toolless_regardless_of_ptt():
-    """PTT must not reopen the empty session (d4c924e)."""
-    assert _session_tools([], "arcturian", "v1") == []
+def test_ptt_does_not_change_the_arcturian_tool_set():
+    """PTT changes who CLOSES a turn, not what a turn may do.
+
+    The session is no longer empty — the owner decided on 2026-08-09
+    that Arcturian gets read tools. What must not change is that the
+    affect tool stays per-turn, which is the specific defect AppDevV2
+    reproduced on-device as tool_misrouted.
+    """
+    from ai.routes.realtime_routes import _arcturian_read_tools
+    names = {t["name"] for t in
+             _session_tools(_arcturian_read_tools(), "arcturian", "v1")}
+    assert names == {"agent_status"}
 
 
 
