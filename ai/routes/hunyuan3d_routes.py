@@ -25,6 +25,7 @@ import json
 import logging
 import os
 import time
+from pathlib import Path
 import uuid
 from ai.clients.storage_client import storage_api_key
 
@@ -126,6 +127,42 @@ class Gen3DRequest(BaseModel):
     collection_id: Optional[str] = Field(default="ai-generated-3d", description="Storage collection for saved results")
     link_id: Optional[str] = Field(default=None)
     confirm_api_billing: Optional[bool] = Field(default=False, description="Required true — Tencent PAYG billing")
+
+
+# Absicht des Absenders, damit der Status-Abruf sie einlösen kann.
+#
+# Der Fehler, den das behebt (3dApi, 2026-08-09): `save_to_storage: true`
+# wirkte NUR im synchronen Pfad. Wer asynchron arbeitet — der empfohlene
+# Weg, weil ein Lauf bis zu 7 Minuten dauert — holt das Ergebnis über
+# GET /gen3d/status, und dort stand Speichern auf `False`. Das Flag wurde
+# angenommen und tat nichts. Zusammen mit "die Tencent-Signaturen laufen
+# ab" heisst das: bezahltes Ergebnis, das spaeter nicht mehr erreichbar
+# ist, ohne eine einzige Fehlermeldung.
+_INTENT_PATH = Path("/var/lib/api-ai/hunyuan3d_intents.json")
+
+
+def _remember_intent(job_id: str, save: bool, collection_id, link_id) -> None:
+    try:
+        _INTENT_PATH.parent.mkdir(parents=True, exist_ok=True)
+        data = json.loads(_INTENT_PATH.read_text()) if _INTENT_PATH.exists() else {}
+        data[job_id] = {"save": bool(save), "collection_id": collection_id,
+                        "link_id": link_id, "at": time.time()}
+        # Auf die letzten 200 begrenzen; ein Auftrag ist Minuten alt, nicht Tage.
+        if len(data) > 200:
+            for k in sorted(data, key=lambda k: data[k].get("at", 0))[:-200]:
+                data.pop(k, None)
+        _INTENT_PATH.write_text(json.dumps(data))
+    except Exception as e:  # Merken darf den Auftrag nie scheitern lassen
+        logger.warning(f"gen3d: intent not remembered for {job_id}: {e}")
+
+
+def _recall_intent(job_id: str) -> dict:
+    try:
+        if _INTENT_PATH.exists():
+            return (json.loads(_INTENT_PATH.read_text()) or {}).get(job_id) or {}
+    except Exception:
+        pass
+    return {}
 
 
 async def _save_files_to_storage(files: List[Dict[str, Any]], collection_id: Optional[str],
@@ -235,6 +272,9 @@ async def generate_3d(request: Gen3DRequest, api_key: str = Depends(get_api_key)
 
     resp = await _tc_call("SubmitHunyuanTo3DProJob", payload)
     job_id = resp.get("JobId")
+    if job_id:
+        _remember_intent(job_id, request.save_to_storage,
+                         request.collection_id, request.link_id)
     if not job_id:
         raise HTTPException(status_code=502, detail=f"Hunyuan submit returned no JobId: {resp}")
     logger.info(f"gen3d: submitted job {job_id} "
@@ -269,11 +309,19 @@ async def generate_3d(request: Gen3DRequest, api_key: str = Depends(get_api_key)
 
 
 @router.get("/gen3d/status/{job_id}")
-async def gen3d_status(job_id: str, save_to_storage: bool = False,
-                       collection_id: Optional[str] = "ai-generated-3d",
+async def gen3d_status(job_id: str, save_to_storage: Optional[bool] = None,
+                       collection_id: Optional[str] = None,
                        link_id: Optional[str] = None,
                        api_key: str = Depends(get_api_key)):
-    """Poll a Hunyuan 3D job. Optionally persist results on DONE (?save_to_storage=true)."""
+    """Poll a Hunyuan 3D job; persist results on DONE.
+
+    `save_to_storage` defaults to the intent recorded when the job was
+    SUBMITTED, not to False. Passing it explicitly still overrides.
+
+    Before this, an async caller who sent `save_to_storage: true` got
+    nothing stored — the flag only ever applied to the synchronous path,
+    and the Tencent URLs expire. Paid result, silently unreachable later.
+    """
     q = await _tc_call("QueryHunyuanTo3DProJob", {"JobId": job_id})
     status = q.get("Status") or "WAIT"
     out: Dict[str, Any] = {"job_id": job_id, "status": status,
@@ -281,6 +329,16 @@ async def gen3d_status(job_id: str, save_to_storage: bool = False,
     if status == "FAIL":
         out["error_code"] = q.get("ErrorCode")
         out["error_message"] = q.get("ErrorMessage")
-    if status == "DONE" and save_to_storage and out["files"]:
-        out["saved"] = await _save_files_to_storage(out["files"], collection_id, link_id)
+    intent = _recall_intent(job_id)
+    do_save = save_to_storage if save_to_storage is not None else intent.get("save", True)
+    coll = collection_id or intent.get("collection_id") or "ai-generated-3d"
+    lid = link_id if link_id is not None else intent.get("link_id")
+    if status == "DONE" and do_save and out["files"]:
+        out["saved"] = await _save_files_to_storage(out["files"], coll, lid)
+    elif status == "DONE" and not do_save:
+        # Sichtbar machen, dass NICHT gespeichert wurde — die Tencent-URLs
+        # laufen ab, und ein stilles Nichts ist hier der teure Fall.
+        out["saved"] = None
+        out["storage_hint"] = ("nicht gespeichert (save_to_storage=false); "
+                               "die Tencent-URLs laufen ab")
     return out
