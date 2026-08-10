@@ -1383,8 +1383,29 @@ def _arcturian_primary_audio_payload() -> dict:
     return {
         "type": "response.create",
         "response": {
-            "tools": [],
-            "tool_choice": "none",
+            # Die lesenden Werkzeuge gehoeren GENAU hierher, seit der
+            # Eigentuemer sie am 2026-08-09 angeordnet hat.
+            #
+            # Warum sie in der Sitzungsliste allein wirkungslos waeren:
+            # Jede der drei Vorlagen legt `tools` fest, und ein Override
+            # ERSETZT die Sitzungsliste. Resolver und Affekt pinnen je
+            # ihr eines Werkzeug, diese hier pinnte `[]` — es gab also
+            # keinen Zug, in dem ein Sitzungswerkzeug haette feuern
+            # koennen. Aufgefallen ist das erst, als CloudV2-Codex nach
+            # dem korrelierten Zug fragte, statt es aus der alten
+            # Bauart abzuleiten. Ohne seine Frage haette ich eine
+            # Faehigkeit ausgeliefert, die nie ausloest.
+            #
+            # `auto` statt `required`: Nachschlagen ist ein Angebot, kein
+            # Zwang — die meisten Zuege brauchen es nicht.
+            #
+            # Was dadurch NICHT zurueckkommt: `report_affect` und
+            # `resolve_arcturian_turn` stehen hier weiterhin nicht drin.
+            # Der Griff, den AppDevV2 auf dem Geraet reproduziert hat
+            # (`tool_misrouted got=report_affect`), bleibt strukturell
+            # unmoeglich — nur Lesen kommt dazu.
+            "tools": _arcturian_read_tools(),
+            "tool_choice": "auto",
             "metadata": {ARCTURIAN_RESPONSE_KIND_FIELD: "arcturian.primary_audio"},
         },
     }

@@ -235,18 +235,38 @@ def test_server_never_sets_adapter_correlation_keys():
             assert key not in md, f"{key} must be set by the adapter, not here"
 
 
-def test_primary_audio_closes_the_tool_gate_explicitly():
+def test_primary_audio_states_its_tools_explicitly():
     """Measured: omitting tools/tool_choice yields 2/2 voluntary calls.
 
     A response override INHERITS the session tools, so a spoken turn
-    without an explicit gate re-offers resolve_arcturian_turn and
+    without explicit fields re-offers resolve_arcturian_turn and
     report_affect — and the model takes them. Omission is an open gate,
-    not a neutral default. Both fields are asserted: the empty list makes
-    the intent explicit and survives a change in inheritance semantics.
+    not a neutral default. Both fields must therefore always be present.
+
+    The list is no longer empty: since 2026-08-09 the owner decided
+    Arcturian gets read tools, and this is the ONLY turn where they can
+    fire — the other two templates pin their single forced tool. A read
+    tool that lives only in the session list can never be called.
     """
     resp = _arcturian_primary_audio_payload()["response"]
-    assert resp["tools"] == [], "empty tool list is the gate, not an omission"
-    assert resp["tool_choice"] == "none"
+    assert "tools" in resp and "tool_choice" in resp, (
+        "omitting either field re-opens the gate through inheritance"
+    )
+    assert resp["tool_choice"] == "auto", "lookup is an offer, not a compulsion"
+
+
+def test_primary_audio_offers_only_read_tools():
+    """What the gate is still for.
+
+    The specific defect AppDevV2 reproduced on-device was the model
+    reaching for report_affect in a turn that never offered it. That stays
+    impossible: only read tools are on this turn.
+    """
+    from ai.routes.realtime_routes import _arcturian_read_tools
+    offered = {t["name"] for t in _arcturian_primary_audio_payload()["response"]["tools"]}
+    assert offered == {t["name"] for t in _arcturian_read_tools()}
+    assert "report_affect" not in offered
+    assert "resolve_arcturian_turn" not in offered
 
 
 def test_primary_audio_does_not_pin_modalities():
