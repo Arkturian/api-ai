@@ -163,6 +163,20 @@ async def test_ohne_agentnamen_bleibt_es_die_uebersicht(monkeypatch):
     # Agentenliste unkompaktiert in den Modellkontext.
     assert "data" in res, "Uebersicht muss `data` heissen (Web-Kompaktierung)"
     assert res["data"] == {"agents": []}
+    # `scope` ist das maschinenlesbare Merkmal. `agent: "(alle)"` ist
+    # Anzeigetext — wer darauf prueft, bricht bei der ersten Uebersetzung.
+    assert res["scope"] == "all"
+
+
+@pytest.mark.asyncio
+async def test_benannter_fall_traegt_scope_one(monkeypatch):
+    monkeypatch.setattr(rr.httpx, "AsyncClient", _client_factory({
+        "/agent-state": (200, {"state": "ready"}),
+        "/api/agents/": (500, {}),
+        "/history": (500, {}),
+    }))
+    res = await rr._tool_agent_status({"agent": "3dApi"}, "Bearer x")
+    assert res["scope"] == "one"
 
 
 # ------------------------------------------------------------------- persona

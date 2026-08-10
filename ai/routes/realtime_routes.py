@@ -4337,7 +4337,13 @@ async def _tool_agent_status(args: dict, authorization: Optional[str]) -> Any:
         # ich diesen Zweig mitbenannt; CloudV2-Codex hat es gefunden,
         # bevor es lief. Ohne den Schluessel waere die volle Agentenliste
         # unkompaktiert in den Modellkontext gelaufen.
-        return {"ok": True, "agent": "(alle)", "data": r.json()}
+        # `scope` ist das maschinenlesbare Merkmal, an dem der Client die
+        # Uebersicht erkennt. `agent: "(alle)"` bleibt daneben stehen,
+        # ist aber ANZEIGETEXT: deutsch, uebersetzbar, jederzeit
+        # aenderbar. CloudV2-Codex hatte seine fail-closed-Pruefung an
+        # genau dieses Literal gehaengt — dann bricht die Uebersicht in
+        # dem Moment, in dem jemand das Wort anfasst.
+        return {"ok": True, "scope": "all", "agent": "(alle)", "data": r.json()}
 
     async def _get(path: str, timeout: float) -> Optional[Any]:
         """Eine Quelle holen; Ausfall ist erlaubt und wird zu None.
@@ -4383,6 +4389,7 @@ async def _tool_agent_status(args: dict, authorization: Optional[str]) -> Any:
 
     return {
         "ok": True,
+        "scope": "one",
         "agent": agent,
         "state": state,
         "board": board,
