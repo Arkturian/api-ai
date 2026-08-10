@@ -311,6 +311,25 @@ class RealtimeTokenRequest(BaseModel):
             "server-side because only the mint decides turn_detection."
         ),
     )
+    read_tools: bool = Field(
+        default=False,
+        description=(
+            "Opt-in: offer the arcturian read tools (`agent_status`) on "
+            "the spoken turn. Omit and the session behaves exactly as "
+            "before — `primary_audio_response` carries `tools: []` and "
+            "`tool_choice: none`.\n\n"
+            "Why opt-in and not simply on: the owner decided on "
+            "2026-08-09 that Arcturian must be able to look things up, "
+            "and the web client shipped against it the same day. But the "
+            "approved context contract (p-ddadae828183, line 8) still "
+            "reads 'Wissen wird nie in die Sitzung gelegt', and the iOS "
+            "guard enforces that literally — turning it on for everyone "
+            "broke the owner's phone before the microphone even opened. "
+            "Neither client is wrong; they were shipped against different "
+            "truths. A client that asks gets the capability, a client "
+            "that does not keeps the contract it was built against."
+        ),
+    )
     arcturian_resolver: Optional[str] = Field(
         default=None,
         description=(
@@ -1352,7 +1371,7 @@ def _affect_followup_payload() -> dict:
 
 
 
-def _arcturian_primary_audio_payload() -> dict:
+def _arcturian_primary_audio_payload(read_tools: bool = False) -> dict:
     """Template for the ONE spoken answer — with an explicit no-tool gate.
 
     MEASURED, and the reason this template exists at all (#886):
@@ -1404,8 +1423,8 @@ def _arcturian_primary_audio_payload() -> dict:
             # Der Griff, den AppDevV2 auf dem Geraet reproduziert hat
             # (`tool_misrouted got=report_affect`), bleibt strukturell
             # unmoeglich — nur Lesen kommt dazu.
-            "tools": _arcturian_read_tools(),
-            "tool_choice": "auto",
+            "tools": _arcturian_read_tools() if read_tools else [],
+            "tool_choice": "auto" if read_tools else "none",
             "metadata": {ARCTURIAN_RESPONSE_KIND_FIELD: "arcturian.primary_audio"},
         },
     }
@@ -3259,7 +3278,9 @@ async def mint_realtime_token(
         # Lesende Werkzeuge ab 2026-08-09 (Eigentümer-Entscheidung).
         # Die Schreib-/Handlungsseite bleibt unverändert beim erzwungenen
         # Resolver-Zug — hier kommt ausschliesslich Lesen dazu.
-        companion_tools_override = _arcturian_read_tools()
+        companion_tools_override = (
+            _arcturian_read_tools() if request.read_tools else []
+        )
         logger.info(
             f"Realtime: companion_mode=arcturian "
             f"resolver={arcturian_resolver} "
@@ -3709,7 +3730,7 @@ async def mint_realtime_token(
         # inherits the session tools, and omitting the fields produced a
         # voluntary resolver call in 2 of 2 measured runs.
         "primary_audio_response": (
-            _arcturian_primary_audio_payload()
+            _arcturian_primary_audio_payload(request.read_tools)
             if companion_mode == "arcturian" else None
         ),
         "response_kinds": (

@@ -101,9 +101,12 @@ def test_ptt_does_not_change_the_arcturian_tool_set():
     reproduced on-device as tool_misrouted.
     """
     from ai.routes.realtime_routes import _arcturian_read_tools
+    # Read tools are opt-in since the iOS incident of 2026-08-10; the
+    # session list is whatever the mint decided for that request.
     names = {t["name"] for t in
              _session_tools(_arcturian_read_tools(), "arcturian", "v1")}
-    assert names == {"agent_status"}
+    assert "report_affect" not in names
+    assert "resolve_arcturian_turn" not in names
 
 
 
