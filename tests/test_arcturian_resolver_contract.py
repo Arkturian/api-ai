@@ -252,7 +252,9 @@ def test_primary_audio_states_its_tools_explicitly():
     assert "tools" in resp and "tool_choice" in resp, (
         "omitting either field re-opens the gate through inheritance"
     )
-    assert resp["tool_choice"] == "auto", "lookup is an offer, not a compulsion"
+    # Default is the contract every shipped client was built against.
+    assert resp["tools"] == [], "a client that does not ask must see no change"
+    assert resp["tool_choice"] == "none"
 
 
 def test_primary_audio_offers_only_read_tools():
@@ -263,7 +265,8 @@ def test_primary_audio_offers_only_read_tools():
     impossible: only read tools are on this turn.
     """
     from ai.routes.realtime_routes import _arcturian_read_tools
-    offered = {t["name"] for t in _arcturian_primary_audio_payload()["response"]["tools"]}
+    offered = {t["name"] for t in
+               _arcturian_primary_audio_payload(True)["response"]["tools"]}
     assert offered == {t["name"] for t in _arcturian_read_tools()}
     assert "report_affect" not in offered
     assert "resolve_arcturian_turn" not in offered
