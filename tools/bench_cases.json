@@ -1,0 +1,17 @@
+[
+  {
+    "id": "UC-A Status von Agent X (ohne Kontext)",
+    "say": "hey, was ist der Status von 3dApi?",
+    "must_not_say": ["wie heisst", "wie heißt", "welchen agent", "welcher agent",
+                     "kannst du den namen", "meinst du"],
+    "why": "Alexanders Beschwerde: kommt meist 'das weiss ich nicht' oder eine Rueckfrage nach dem Namen."
+  },
+  {
+    "id": "UC-B Nachricht an Agent X zu einem Thema",
+    "say": "sende eine Nachricht an AppDevV2 zum Thema Prüflauf laeuft",
+    "expect_decision": "action",
+    "expect_target_contains": "appdevv2",
+    "must_not_say": ["wie heisst", "wie heißt", "meinst du", "welchen agent"],
+    "why": "Muss ohne Rueckfrage abgehen, Ziel korrekt, Thema im Auftrag."
+  }
+]

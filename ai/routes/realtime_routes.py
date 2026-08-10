@@ -41,12 +41,14 @@ so the browser only ever decides routing, not whether a tool exists.
 """
 from __future__ import annotations
 
+import asyncio
 import fcntl
 import hashlib
 import hmac
 import logging
 import json
 import os
+import re
 import time
 from typing import Any, List, Optional
 
@@ -1066,11 +1068,18 @@ def _arcturian_read_tools() -> List[dict]:
             "type": "function",
             "name": "agent_status",
             "description": (
-                "Aktuellen Zustand der Agenten des Operators lesen — was "
-                "sie gerade tun, ob sie laufen. Rufe das auf, wenn der "
-                "Operator fragt, woran ein Agent arbeitet oder wie es um "
-                "ihn steht. Antworte danach aus dem Ergebnis; erfinde "
-                "NIE einen Zustand, den das Ergebnis nicht nennt."
+                "Nachsehen, woran ein Agent des Operators arbeitet. "
+                "Liefert seinen Laufzustand (`state`), seine gemeldete "
+                "Arbeit (`board`) und vor allem `last_reply` — den "
+                "Wortlaut dessen, was er zuletzt tatsaechlich gesagt "
+                "hat. Rufe das auf, sobald der Operator nach einem "
+                "Agenten fragt: woran er arbeitet, wie es steht, was er "
+                "gesagt hat. Antworte danach in EINEM Satz aus "
+                "`last_reply`, denn das ist der Inhalt, den er hoeren "
+                "will — `state` allein ('ready', 'thinking') ist keine "
+                "Auskunft. Erfinde NIE einen Zustand oder eine Aussage, "
+                "die das Ergebnis nicht nennt; steht dort nichts, sag "
+                "genau das."
             ),
             "parameters": {
                 "type": "object",
@@ -2395,6 +2404,21 @@ def _companion_arcturian_prompt(language: str = "de") -> str:
         "  * Auf einer Eingabe zu handeln, die niemand verstanden hat, "
         "ist schlimmer als gar nicht zu antworten — es ist der einzige "
         "dieser Fehler, der etwas an Dritte schickt.\n\n"
+        "REGEL 5 — LIEBER SCHWEIGEN ALS FUELLEN:\n"
+        "  * Hast du nichts Sinnvolles zu sagen, sag NICHTS. Ein "
+        "stummer Zug ist erlaubt und richtig. Der Operator hat das "
+        "ausdruecklich so entschieden.\n"
+        "  * VERBOTEN sind Fuellsaetze, die Arbeit oder einen Verlauf "
+        "behaupten, den du nicht kennst: 'ich kuemmere mich darum', "
+        "'ich schaue nach', 'einen Moment', 'die Antwort steht noch "
+        "aus', 'ich melde mich'. Du kuemmerst dich um nichts — du "
+        "rufst ein Werkzeug auf oder du schweigst.\n"
+        "  * Kennst du einen Zustand nicht, dann nenne KEINEN. Weder "
+        "erfunden noch beschoenigt noch als Vermutung. Lieber ein "
+        "Satz weniger als ein Satz, der nicht stimmt.\n"
+        "  * Diese Regel schlaegt jeden Hoeflichkeitsreflex. Eine "
+        "hoefliche Unwahrheit ist hier der teuerste Fehler: Der "
+        "Operator handelt danach.\n\n"
         "WANN DU FRAGST — GENAU EINMAL, KURZ:\n"
         "  * Nur wenn der Operator gar keinen Empfaenger genannt hat "
         "oder die Absicht wirklich mehrdeutig ist. Einen Namen, den du "
@@ -4301,12 +4325,87 @@ async def _tool_agent_status(args: dict, authorization: Optional[str]) -> Any:
                 "hint": "Der Client muss den Bearer des Operators durchreichen."}
     agent = (args.get("agent") or "").strip()
     base = os.getenv("CLOUD_API_URL", "https://cloud-api.arkserver.arkturian.com")
-    url = f"{base}/api/agents/{agent}/status" if agent else f"{base}/api/agents/status"
-    async with httpx.AsyncClient(timeout=8.0) as client:
-        r = await client.get(url, headers={"Authorization": authorization})
-    if r.status_code != 200:
-        return {"ok": False, "status": r.status_code, "error": r.text[:200]}
-    return {"ok": True, "agent": agent or "(alle)", "data": r.json()}
+    hdrs = {"Authorization": authorization}
+
+    if not agent:
+        async with httpx.AsyncClient(timeout=8.0) as client:
+            r = await client.get(f"{base}/api/agents/status", headers=hdrs)
+        if r.status_code != 200:
+            return {"ok": False, "status": r.status_code, "error": r.text[:200]}
+        return {"ok": True, "agent": "(alle)", "board": r.json()}
+
+    async def _get(path: str, timeout: float) -> Optional[Any]:
+        """Eine Quelle holen; Ausfall ist erlaubt und wird zu None.
+
+        Kein `raise`: Fehlt eine der drei Quellen, soll die Antwort
+        aermer werden, nicht ausbleiben. Ein Sprachagent, der auf eine
+        langsame Verlaufsdatei wartet, haengt hoerbar.
+        """
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                r = await client.get(f"{base}{path}", headers=hdrs)
+            return r.json() if r.status_code == 200 else None
+        except Exception:
+            return None
+
+    board, live, hist = await asyncio.gather(
+        _get(f"/api/agents/{agent}/status", 5.0),
+        _get(f"/api/sessions/{agent}/agent-state", 5.0),
+        _get(f"/api/sessions/{agent}/history?limit=1", 6.0),
+    )
+
+    last_reply: Optional[str] = None
+    last_reply_at: Optional[str] = None
+    turns = (hist or {}).get("turns") or []
+    if turns:
+        turn = turns[-1]
+        last_reply_at = turn.get("ended_at") or turn.get("timestamp")
+        texts = [
+            (s.get("content") or "").strip()
+            for s in (turn.get("sections") or [])
+            if s.get("kind") == "text"
+        ]
+        texts = [t for t in texts if t]
+        if texts:
+            last_reply = _condense_for_speech(texts[-1])
+
+    state = (live or {}).get("state")
+    if not any([board, state, last_reply]):
+        return {"ok": False, "agent": agent, "error": "nothing_readable",
+                "hint": "Kein Zustand und keine Antwort lesbar — sag, dass "
+                        "du zu diesem Agenten gerade nichts weisst, und "
+                        "erfinde nichts."}
+
+    return {
+        "ok": True,
+        "agent": agent,
+        "state": state,
+        "board": board,
+        "last_reply": last_reply,
+        "last_reply_at": last_reply_at,
+    }
+
+
+_SPEECH_MAX_CHARS = 700
+
+
+def _condense_for_speech(text: str) -> str:
+    """Fliesstext einer Agentenantwort auf etwas Sprechbares kuerzen.
+
+    Agentenantworten sind fuer Augen geschrieben: Markdown-Zeichen,
+    Codebloecke, Tabellen, Werkzeug-JSON. Vorgelesen wird daraus
+    Zeichensalat. Wir nehmen die Prosa und kappen an einer Satzgrenze,
+    damit der Agent zitieren kann, ohne mitten im Wort abzubrechen.
+    """
+    body = re.sub(r"```.*?```", " ", text, flags=re.S)
+    body = re.sub(r"^\s*[|>#-]+\s*", "", body, flags=re.M)
+    body = re.sub(r"[*_`]+", "", body)
+    body = re.sub(r"\s+", " ", body).strip()
+    if len(body) <= _SPEECH_MAX_CHARS:
+        return body
+    cut = body[:_SPEECH_MAX_CHARS]
+    stop = max(cut.rfind(". "), cut.rfind("! "), cut.rfind("? "))
+    return (cut[: stop + 1] if stop > 200 else cut).strip() + " …"
 
 
 @router.post("/realtime/tool/{tool_name}")
