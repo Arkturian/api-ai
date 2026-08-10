@@ -15,6 +15,7 @@ this bench covers them would be the "green tick that means nothing" this
 whole loop exists to avoid.
 """
 import asyncio, json, os, statistics, sys, time
+from pathlib import Path
 sys.path.insert(0, "/var/www/api-ai.arkturian.com")
 
 import websockets
@@ -156,8 +157,62 @@ CASES = [
 ]
 
 
-async def one(key, case):
+# Zusaetzliche Faelle als Daten, damit ein neuer Use-Case kein Python
+# braucht. Format je Eintrag:
+#   {"id","say","context"?,"history"?[[rolle,text]],
+#    "expect_decision"?, "expect_target_contains"?, "must_say"?[...],
+#    "must_not_say"?[...], "why"}
+CASES_FILE = Path(os.environ.get(
+    "BENCH_CASES", "/var/code/api-ai/tools/bench_cases.json"))
+
+
+def _load_extra_cases():
+    if not CASES_FILE.exists():
+        return []
+    out = []
+    for c in json.loads(CASES_FILE.read_text()):
+        exp_d = c.get("expect_decision")
+        exp_t = (c.get("expect_target_contains") or "").lower()
+        forbid = [w.lower() for w in (c.get("must_not_say") or [])]
+
+        def make(exp_d=exp_d, exp_t=exp_t):
+            def check(a):
+                if exp_d and a.get("decision") != exp_d:
+                    return False
+                if exp_t and exp_t not in (a.get("target") or "").lower():
+                    return False
+                return True
+            return check
+
+        case = {"id": c["id"], "say": c["say"], "expect": make(),
+                "why": c.get("why", ""),
+                "history": [tuple(h) for h in (c.get("history") or [])]}
+        if c.get("context"):
+            case["context"] = c["context"]
+        if c.get("must_say") or forbid:
+            case["check_text"] = True
+            case["admit"] = tuple(w.lower() for w in (c.get("must_say") or ()))
+            case["forbid"] = tuple(forbid)
+        out.append(case)
+    return out
+
+
+# Varianten: derselbe Fallsatz gegen verschiedene Zustaende, damit eine
+# Aenderung an Persona, Kontext oder Werkzeugen MESSBAR wird statt
+# gefuehlt. Ohne BENCH_VARIANTS laeuft nur "live" — der Ist-Zustand.
+def _variants():
+    raw = os.environ.get("BENCH_VARIANTS", "")
+    out = {"live": {"persona_extra": "", "context_extra": ""}}
+    for part in [p for p in raw.split(";") if p.strip()]:
+        name, _, extra = part.partition("=")
+        out[name.strip()] = {"persona_extra": extra, "context_extra": ""}
+    return out
+
+
+async def one(key, case, variant=None):
     persona = _companion_arcturian_prompt("de") + _arcturian_resolver_addendum("de")
+    if variant and variant.get("persona_extra"):
+        persona += "\n\n" + variant["persona_extra"]
     followup = _arcturian_resolver_followup_payload(ARCTURIAN_RESOLVER_V2)
     t0 = time.time()
     async with websockets.connect(
@@ -241,15 +296,25 @@ async def main():
     print(f"Modell           : {MODEL}")
     print(f"Resolver-Vertrag : {ARCTURIAN_RESOLVER_V2}")
     print(f"Persona-Revision : {sha} · {len(persona)} Zeichen · sha256 {hashlib.sha256(persona.encode()).hexdigest()[:12]}")
-    print(f"Fälle            : {len(CASES)} × {REPS} Läufe\n")
-    total_fail = 0
+    cases = CASES + _load_extra_cases()
+    variants = _variants()
     only = os.environ.get("BENCH_ONLY", "")
-    for c in CASES:
-        if only and only not in c["id"]:
-            continue
+    cases = [c for c in cases if not only or only in c["id"]]
+    print(f"Fälle            : {len(cases)} × {REPS} Läufe")
+    if len(variants) > 1:
+        print(f"Varianten        : {', '.join(variants)}")
+    if CASES_FILE.exists():
+        print(f"Zusatzfälle      : {CASES_FILE}")
+    print()
+    total_fail = 0
+    matrix = {}
+    for vname, variant in variants.items():
+      if len(variants) > 1:
+        print(f"── Variante: {vname} " + "─" * 40)
+      for c in cases:
         oks, lat, notes, seen, spoken_log = 0, [], [], [], []
         for _ in range(REPS):
-            r = await one(key, c)
+            r = await one(key, c, variant)
             if not r["ok"]:
                 notes.append(r["err"]); continue
             lat.append(r["ms"])
@@ -262,14 +327,19 @@ async def main():
                 txt = (r.get("spoken") or "").lower()
                 admits = any(m in txt for m in c.get("admit", ()))
                 spoken_log.append(r.get("spoken", "").strip()[:180] or "(kein Text)")
-                if not admits:
+                if c.get("admit") and not admits:
                     passed = False
-                    notes.append("kein Eingestaendnis im gesprochenen Text")
+                    notes.append("erwartete Formulierung fehlt")
+                for bad in c.get("forbid", ()):
+                    if bad in txt:
+                        passed = False
+                        notes.append(f"verbotene Formulierung: {bad!r}")
             if passed:
                 oks += 1
             else:
                 notes.append(f"decision={a.get('decision')} kind={a.get('kind')} target={a.get('target')!r}")
         verdict = "BESTANDEN" if oks == REPS else "DURCHGEFALLEN"
+        matrix.setdefault(c["id"], {})[vname] = f"{oks}/{REPS}"
         if oks != REPS:
             total_fail += 1
         med = f"{int(statistics.median(lat))} ms" if lat else "—"
@@ -283,7 +353,22 @@ async def main():
         for n in dict.fromkeys(notes):
             print(f"               → {n}")
         print()
-    print(f"Ergebnis: {len(CASES)-total_fail}/{len(CASES)} Fälle bestanden")
+    if len(variants) > 1:
+        # Die eigentliche Antwort bei einem Verbesserungsversuch: hat die
+        # Aenderung geholfen, geschadet oder nichts getan — je Fall.
+        width = max(len(k) for k in matrix) + 2
+        print("\n── Vergleich " + "─" * 46)
+        print("Fall".ljust(width) + "  ".join(v.rjust(7) for v in variants))
+        for cid, per in matrix.items():
+            row = "  ".join((per.get(v, "—")).rjust(7) for v in variants)
+            vals = [per.get(v) for v in variants]
+            mark = ""
+            if len(set(vals)) > 1:
+                mark = "   ← unterschiedlich"
+            print(cid.ljust(width) + row + mark)
+    runs = len(cases) * len(variants)
+    print(f"\nErgebnis: {runs-total_fail}/{runs} bestanden "
+          f"({len(cases)} Fälle × {len(variants)} Variante(n))")
     return 1 if total_fail else 0
 
 sys.exit(asyncio.run(main()))

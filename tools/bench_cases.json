@@ -1,0 +1,11 @@
+[
+  {
+    "id": "UC-1 Agent nach Arbeitsstand fragen",
+    "context": "Woran deine Agenten gerade arbeiten (Stand: jetzt):\n3dApi: working, thinking",
+    "say": "woran arbeitet 3dApi gerade",
+    "expect_decision": "none",
+    "must_say": ["arbeit", "denk"],
+    "must_not_say": ["weitergegeben", "kümmere mich"],
+    "why": "Er soll aus dem Kontext antworten und keine Handlung ankündigen, die er nicht ausführt."
+  }
+]
