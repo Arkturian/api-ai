@@ -156,7 +156,13 @@ async def test_ohne_agentnamen_bleibt_es_die_uebersicht(monkeypatch):
     }))
     res = await rr._tool_agent_status({}, "Bearer x")
     assert res["ok"] is True and res["agent"] == "(alle)"
-    assert "board" in res
+    # `data`, NICHT `board`: Der Web-Client kompaktiert die Uebersicht
+    # ueber `result.data.agents`. Beim Umbau auf den benannten Fall hatte
+    # ich diesen Zweig mitbenannt — CloudV2-Codex fand es in der
+    # Gegenpruefung, bevor es lief. Ohne den Schluessel liefe die volle
+    # Agentenliste unkompaktiert in den Modellkontext.
+    assert "data" in res, "Uebersicht muss `data` heissen (Web-Kompaktierung)"
+    assert res["data"] == {"agents": []}
 
 
 # ------------------------------------------------------------------- persona

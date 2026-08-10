@@ -4332,7 +4332,12 @@ async def _tool_agent_status(args: dict, authorization: Optional[str]) -> Any:
             r = await client.get(f"{base}/api/agents/status", headers=hdrs)
         if r.status_code != 200:
             return {"ok": False, "status": r.status_code, "error": r.text[:200]}
-        return {"ok": True, "agent": "(alle)", "board": r.json()}
+        # `data` bleibt `data` — der Web-Client kompaktiert genau ueber
+        # `result.data.agents`. Beim Umbau auf `board` (2026-08-10) hatte
+        # ich diesen Zweig mitbenannt; CloudV2-Codex hat es gefunden,
+        # bevor es lief. Ohne den Schluessel waere die volle Agentenliste
+        # unkompaktiert in den Modellkontext gelaufen.
+        return {"ok": True, "agent": "(alle)", "data": r.json()}
 
     async def _get(path: str, timeout: float) -> Optional[Any]:
         """Eine Quelle holen; Ausfall ist erlaubt und wird zu None.
