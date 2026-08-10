@@ -1,11 +1,17 @@
 [
   {
-    "id": "UC-1 Agent nach Arbeitsstand fragen",
-    "context": "Woran deine Agenten gerade arbeiten (Stand: jetzt):\n3dApi: working, thinking",
-    "say": "woran arbeitet 3dApi gerade",
-    "expect_decision": "none",
-    "must_say": ["arbeit", "denk"],
-    "must_not_say": ["weitergegeben", "kümmere mich"],
-    "why": "Er soll aus dem Kontext antworten und keine Handlung ankündigen, die er nicht ausführt."
+    "id": "UC-A Status von Agent X (ohne Kontext)",
+    "say": "hey, was ist der Status von 3dApi?",
+    "must_not_say": ["wie heisst", "wie heißt", "welchen agent", "welcher agent",
+                     "kannst du den namen", "meinst du"],
+    "why": "Alexanders Beschwerde: kommt meist 'das weiss ich nicht' oder eine Rueckfrage nach dem Namen."
+  },
+  {
+    "id": "UC-B Nachricht an Agent X zu einem Thema",
+    "say": "sende eine Nachricht an AppDevV2 zum Thema Prüflauf laeuft",
+    "expect_decision": "action",
+    "expect_target_contains": "appdevv2",
+    "must_not_say": ["wie heisst", "wie heißt", "meinst du", "welchen agent"],
+    "why": "Muss ohne Rueckfrage abgehen, Ziel korrekt, Thema im Auftrag."
   }
 ]
