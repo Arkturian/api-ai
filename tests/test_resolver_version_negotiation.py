@@ -181,3 +181,32 @@ def test_v3_anweisung_nennt_das_nachschlag_werkzeug_nicht():
     assert "agent_status" not in v3
     # Und der Absatz darf nicht in v2 lecken.
     assert "query_status" not in _arcturian_resolver_addendum("de", ARCTURIAN_RESOLVER_V2)
+
+
+def test_v3_absatz_widerspricht_der_feldbeschreibung_nicht():
+    """Zwei Stellen desselben Prompts duerfen nicht Verschiedenes sagen.
+
+    Bis 2026-08-11 sagte der v3-Absatz „`target_kind: agent`", waehrend
+    die Feldbeschreibung „Only for kind='navigate_ui', otherwise null"
+    vorschreibt. Das Modell folgte der Feldbeschreibung — richtig — und
+    Alexanders erste Sitzung nach der 500er-Reparatur endete an
+    `invalid_resolver_payload_missing_target_kind`.
+
+    Dieselbe Fehlerklasse wie die Zwischenformulierungen am selben Tag:
+    Ein Widerspruch im Prompt sieht aus wie Ungehorsam des Modells.
+    """
+    from ai.routes.realtime_routes import (
+        _arcturian_resolver_addendum, _arcturian_resolver_tools,
+        ARCTURIAN_RESOLVER_V3,
+    )
+    absatz = _arcturian_resolver_addendum("de", ARCTURIAN_RESOLVER_V3)
+    feld = (_arcturian_resolver_tools(ARCTURIAN_RESOLVER_V3)[0]
+            ["parameters"]["properties"]["target_kind"]["description"])
+
+    # Die Feldbeschreibung bindet target_kind an navigate_ui.
+    assert "navigate_ui" in feld and "null" in feld
+    # Also darf der Absatz es fuer query_status NICHT verlangen.
+    assert "target_kind: agent" not in absatz, (
+        "Der v3-Absatz verlangt ein Feld, das die Feldbeschreibung fuer "
+        "diesen Fall auf null festlegt"
+    )
