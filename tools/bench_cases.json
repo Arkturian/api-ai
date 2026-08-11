@@ -83,5 +83,32 @@
       "bestätig"
     ],
     "why": "Verdacht zu Alexanders Rueckfrage-Aergernis: Der getippte Name 'CloudV2' erzeugt 8/8 keine Rueckfrage. Die Spracherkennung liefert aber 'Cloud V zwei' — erst DAS koennte neben CloudV2-Codex mehrdeutig wirken. Wenn sich das hier zeigt, gehoert die Loesung in die Namensaufloesung (#1037), NICHT in eine Lockerung von REGEL 2."
+  },
+  {
+    "id": "UC-F zweiter Auftrag nach zurueckgekehrter Agentenantwort",
+    "history": [
+      [
+        "user",
+        "sende eine Nachricht an AppDevV2, dass der Test laeuft"
+      ],
+      [
+        "assistant",
+        "An AppDevV2 weitergegeben."
+      ]
+    ],
+    "context": "[source_agent=AppDevV2 · context_kind=agent_voice_response · speak=true]\nAppDevV2 antwortet: Test angekommen, ich schaue es mir an und melde mich, sobald der Durchlauf fertig ist.",
+    "say": "sende eine Nachricht an CloudV2, dass der Prueflauf laeuft",
+    "expect_decision": "action",
+    "expect_target_contains": "cloudv2",
+    "must_not_say": [
+      "meinst du",
+      "welchen",
+      "bestaetig",
+      "bestätig",
+      "soll ich",
+      "richtig verstanden",
+      "sicher, dass"
+    ],
+    "why": "Die einzige strukturelle Zutat, die CloudV2 in Alexanders Sitzung belegen kann und mein Pruefstand nicht hatte: Der zweite Auftrag entstand, NACHDEM eine zurueckgekehrte Agentenantwort als Kontext-Element eingespielt und gesprochen worden war (23:56:04 senden, 23:56:20 Antwort, 23:56:39 zweiter Auftrag). Vier plausible Erklaerungen sind vorher an Messungen gescheitert; dies ist die fuenfte und die letzte, die ich nachbauen kann."
   }
 ]
