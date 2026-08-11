@@ -85,11 +85,29 @@ def test_contract_version_is_the_frozen_one():
     needs a fresh approval, because the v1 sign-off was bound to its
     revision, not to the contract name.
     """
-    assert SUPPORTED_ARCTURIAN_RESOLVERS == {
-        ARCTURIAN_RESOLVER_V1, ARCTURIAN_RESOLVER_V2,
-    }
+    # Enthaltensein statt Gleichheit. Der Zweck dieses Tests ist, eine
+    # AENDERUNG an genehmigten Fassungen zu bemerken — nicht, das
+    # Hinzufuegen einer neuen zu verhindern. Die Gleichheitsfassung ging
+    # rot, als v3 dazukam, obwohl v1 und v2 unveraendert blieben.
+    #
+    # Am selben Tag legte dieselbe Denkweise auf der Client-Seite jede
+    # Arcturian-Sitzung still (CloudV2, 2026-08-11 15:46): Eine
+    # Vertragspruefung verglich meine Adapter-Kinds auf Gleichheit und
+    # warf, als die Menge um zwei erlaubte Eintraege wuchs. Eine
+    # fail-closed Pruefung darf nur pinnen, was schuetzenswert ist.
+    assert {ARCTURIAN_RESOLVER_V1, ARCTURIAN_RESOLVER_V2} <= SUPPORTED_ARCTURIAN_RESOLVERS
     # Which one an un-asking client gets is the migration-critical half.
     assert DEFAULT_ARCTURIAN_RESOLVER == ARCTURIAN_RESOLVER_V1
+    # Das eigentlich Schuetzenswerte: Die genehmigten Fassungen duerfen
+    # sich nicht ausweiten. Eine neue Art gehoert in eine neue Fassung.
+    from ai.routes.realtime_routes import _arcturian_resolver_tools
+    for rev, erwartet in (
+        (ARCTURIAN_RESOLVER_V1, 4), (ARCTURIAN_RESOLVER_V2, 5),
+    ):
+        felder = _arcturian_resolver_tools(rev)[0]["parameters"]["required"]
+        assert len(felder) == erwartet, f"{rev} hat sich ausgeweitet: {felder}"
+        arten = _arcturian_resolver_tools(rev)[0]["parameters"]["properties"]["kind"]["enum"]
+        assert "query_status" not in arten, f"{rev} darf query_status nicht kennen"
 
 
 def test_tool_is_named_resolve_arcturian_turn():
