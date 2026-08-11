@@ -374,7 +374,12 @@ async def main():
     cases = CASES + _load_extra_cases()
     variants = _variants()
     only = os.environ.get("BENCH_ONLY", "")
-    cases = [c for c in cases if not only or only in c["id"]]
+    # Mehrere Faelle mit Komma: Eine Regel muss gegen ALLE Faelle
+    # geprueft werden, die sie beruehren koennte — nicht nur gegen den,
+    # fuer den sie gedacht ist. Eine Namensregel etwa beruehrt jeden
+    # Fall, in dem ein Name faellt.
+    wanted = [w.strip() for w in only.split(",") if w.strip()]
+    cases = [c for c in cases if not wanted or any(w in c["id"] for w in wanted)]
     print(f"Fälle            : {len(cases)} × {REPS} Läufe")
     if len(variants) > 1:
         print(f"Varianten        : {', '.join(variants)}")

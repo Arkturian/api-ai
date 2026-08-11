@@ -313,6 +313,15 @@ class RealtimeTokenRequest(BaseModel):
             "server-side because only the mint decides turn_detection."
         ),
     )
+    name_resolution: bool = Field(
+        default=False,
+        description=(
+            "Opt-in fuer `resolve_agent_name`. Getrennt von `read_tools`, "
+            "weil der cloud-api-Endpunkt (#1037) erst nach dem Client "
+            "kommt. Wer es setzt, bevor beide Seiten stehen, bekommt ein "
+            "Werkzeug, das ins Leere ruft."
+        ),
+    )
     read_tools: bool = Field(
         default=False,
         description=(
@@ -1081,7 +1090,7 @@ def _session_tools(
     return tools
 
 
-def _arcturian_read_tools() -> List[dict]:
+def _arcturian_read_tools(name_resolution: bool = False) -> List[dict]:
     """Lesende Werkzeuge für `arcturian` — Alex' Entscheidung, 2026-08-09.
 
     Vorgeschichte, damit niemand sie für eine Unachtsamkeit hält: Die
@@ -1100,7 +1109,7 @@ def _arcturian_read_tools() -> List[dict]:
     Aufrufers (der Proxy reicht dessen Bearer durch), niemals mit einer
     erweiterten Identität. Er sieht, was ER sehen darf.
     """
-    return [
+    tools = [
         {
             "type": "function",
             "name": "agent_status",
@@ -1135,6 +1144,46 @@ def _arcturian_read_tools() -> List[dict]:
             },
         },
     ]
+    if name_resolution:
+        # Eigenes Opt-in, NICHT an `read_tools` gehaengt — Reihenfolge.
+        # Cloud baut den Endpunkt, CloudV2 die Annahme, dann erst ich.
+        # Haenge ich es an das bestehende Opt-in, erscheint es in jeder
+        # Sitzung, sobald ich ausliefere, und ruft ins Leere. Am
+        # 2026-08-11 hat genau die umgekehrte Reihenfolge Arcturian eine
+        # Stunde stillgelegt.
+        tools.append({
+            "type": "function",
+            "name": "resolve_agent_name",
+            "description": (
+                "Einen gehoerten Agentennamen auf den registrierten "
+                "Namen aufloesen. Gesprochene Namen kommen in "
+                "ungewohnter Form an — Zahlwoerter statt Ziffern "
+                "('drei D API'), buchstabiert ('S W F M E'), getrennt "
+                "('Cloud V zwei'). Das ist normal und braucht keine "
+                "Entschuldigung. Die Antwort traegt `decision`: bei "
+                "`unique` nimm `match.name`; bei `ambiguous` FRAG "
+                "ZURUECK und nenne die Kandidaten, waehle NICHT selbst; "
+                "bei `none` sag, dass du den Namen nicht zuordnen "
+                "kannst. Die Aufloesung ist deterministisch, kein "
+                "Modell — dieselbe Eingabe ergibt immer dasselbe."
+            ),
+            "parameters": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["spoken"],
+                "properties": {
+                    "spoken": {
+                        "type": "string",
+                        "description": (
+                            "Der Name genau so, wie du ihn gehoert "
+                            "hast. Nicht normalisieren, nicht raten — "
+                            "das Falten macht der Server."
+                        ),
+                    },
+                },
+            },
+        })
+    return tools
 
 
 def _arcturian_resolver_tools(
@@ -1445,7 +1494,8 @@ def _affect_followup_payload() -> dict:
 
 
 
-def _arcturian_primary_audio_payload(read_tools: bool = False) -> dict:
+def _arcturian_primary_audio_payload(read_tools: bool = False,
+                                    name_resolution: bool = False) -> dict:
     """Template for the ONE spoken answer — with an explicit no-tool gate.
 
     MEASURED, and the reason this template exists at all (#886):
@@ -1497,7 +1547,7 @@ def _arcturian_primary_audio_payload(read_tools: bool = False) -> dict:
             # Der Griff, den AppDevV2 auf dem Geraet reproduziert hat
             # (`tool_misrouted got=report_affect`), bleibt strukturell
             # unmoeglich — nur Lesen kommt dazu.
-            "tools": _arcturian_read_tools() if read_tools else [],
+            "tools": _arcturian_read_tools(name_resolution) if read_tools else [],
             "tool_choice": "auto" if read_tools else "none",
             "metadata": {ARCTURIAN_RESPONSE_KIND_FIELD: "arcturian.primary_audio"},
         },
@@ -2611,6 +2661,15 @@ def _companion_arcturian_prompt(language: str = "de") -> str:
         "Ursache, kein Trost, kein 'ich versuche es gleich nochmal'.\n"
         "  * Eine hoefliche Unwahrheit ist hier der teuerste Fehler: "
         "Der Operator handelt danach.\n\n"
+        "NAMEN, DIE DU HOERST:\n"
+        "  * Gesprochene Namen kommen oft in ungewohnter Form an — "
+        "Zahlwoerter statt Ziffern, buchstabiert, getrennt. Das ist "
+        "normal und kein Grund fuer eine Entschuldigung.\n"
+        "  * Triffst du einen Namen nicht sicher, gibt es einen Weg, "
+        "ihn aufzuloesen. Rate nicht.\n"
+        "  * Ist das Ergebnis mehrdeutig, frag zurueck ('Meinst du "
+        "Kitt oder K.I.T.T.?') statt zu waehlen. Ein stiller Fehlgriff "
+        "schickt eine Nachricht an den falschen Agenten.\n\n"
         "WANN DU FRAGST — GENAU EINMAL, KURZ:\n"
         "  * Nur wenn der Operator gar keinen Empfaenger genannt hat "
         "oder die Absicht wirklich mehrdeutig ist. Einen Namen, den du "
@@ -3496,7 +3555,7 @@ async def mint_realtime_token(
         # Die Schreib-/Handlungsseite bleibt unverändert beim erzwungenen
         # Resolver-Zug — hier kommt ausschliesslich Lesen dazu.
         companion_tools_override = (
-            _arcturian_read_tools() if request.read_tools else []
+            _arcturian_read_tools(request.name_resolution) if request.read_tools else []
         )
         logger.info(
             f"Realtime: companion_mode=arcturian "
@@ -3947,7 +4006,7 @@ async def mint_realtime_token(
         # inherits the session tools, and omitting the fields produced a
         # voluntary resolver call in 2 of 2 measured runs.
         "primary_audio_response": (
-            _arcturian_primary_audio_payload(request.read_tools)
+            _arcturian_primary_audio_payload(request.read_tools, request.name_resolution)
             if companion_mode == "arcturian" else None
         ),
         # Fuer Alex' Muster #1035: Schlaegt ein Zug fehl, schickt der
@@ -4515,6 +4574,7 @@ async def realtime_config_health(
 # surfaces fast instead of silently going to OpenAI's expensive
 # fail-mode of "model thinks it called the tool, never got an answer".
 READ_TOOL_NAMES = {"knowledge_query", "pois_near", "narration_near", "osm_nearby",
+                   "resolve_agent_name",
                    "agent_status"}
 
 
@@ -4631,6 +4691,47 @@ def _condense_for_speech(text: str) -> str:
     return (cut[: stop + 1] if stop > 200 else cut).strip() + " …"
 
 
+async def _tool_resolve_agent_name(args: dict, authorization: Optional[str]) -> Any:
+    """Gehoerten Namen aufloesen — deterministisch, kein Modell (#1037).
+
+    Alex' Vorgabe woertlich: "aber nicht ueber eine KI, sondern ueber
+    eine semantische Aehnlichkeitssuche vom Namen her." Der Grund ist
+    Reproduzierbarkeit: Eine Namensaufloesung, die bei gleicher Eingabe
+    zweimal Verschiedenes liefert, ist schlimmer als eine, die zugibt,
+    dass sie es nicht weiss.
+
+    Serverseitig, weil nur cloud-api den vollstaendigen Bestand, den
+    Zustand und den Eigentuemer kennt: `Kitt` und `K.I.T.T.` falten
+    beide auf `kitt`, und nur der Zustand trennt sie.
+
+    Wie ueberall hier: unter der Kennung des Aufrufers, nie mit einer
+    erweiterten Identitaet.
+    """
+    if not authorization:
+        return {"ok": False, "error": "no_caller_identity",
+                "hint": "Der Client muss den Bearer des Operators durchreichen."}
+    spoken = (args.get("spoken") or "").strip()
+    if not spoken:
+        return {"ok": False, "error": "empty_spoken_name"}
+    base = os.getenv("CLOUD_API_URL", "https://cloud-api.arkserver.arkturian.com")
+    try:
+        async with httpx.AsyncClient(timeout=6.0) as client:
+            r = await client.post(
+                f"{base}/api/agents/resolve-name",
+                headers={"Authorization": authorization},
+                json={"spoken": spoken, "limit": 5, "authorized_only": False},
+            )
+    except Exception as e:
+        return {"ok": False, "error": "resolver_unreachable", "detail": str(e)[:120]}
+    if r.status_code == 404:
+        # Der Endpunkt existiert noch nicht auf jedem Knoten. Ein
+        # ehrliches "kann ich nicht" ist hier richtig — nicht raten.
+        return {"ok": False, "error": "name_resolution_unavailable"}
+    if r.status_code != 200:
+        return {"ok": False, "status": r.status_code, "error": r.text[:200]}
+    return {"ok": True, **r.json()}
+
+
 @router.post("/realtime/tool/{tool_name}")
 async def realtime_tool_call(
     tool_name: str = Path(..., description="Function name from the model"),
@@ -4687,6 +4788,8 @@ async def realtime_tool_call(
             result = await _tool_osm_nearby(args)
         elif tool_name == "agent_status":
             result = await _tool_agent_status(args, authorization)
+        elif tool_name == "resolve_agent_name":
+            result = await _tool_resolve_agent_name(args, authorization)
         else:
             # Defensive: should be caught by READ_TOOL_NAMES check above.
             raise HTTPException(status_code=400, detail="unknown tool")
