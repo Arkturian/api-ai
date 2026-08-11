@@ -1317,7 +1317,18 @@ def _arcturian_resolver_tools(
             },
         }
     ]
-    if resolver != ARCTURIAN_RESOLVER_V2:
+    if resolver not in (ARCTURIAN_RESOLVER_V2, ARCTURIAN_RESOLVER_V3):
+        # v3 MUSS hier mitgenannt sein. Beim Anlegen von v3 habe ich die
+        # Pflichtliste um die Fassung erweitert und diese Zeile
+        # uebersehen — Ergebnis: `target_kind` stand in `required`, war
+        # aber nicht in `properties`. Ein Pflichtfeld, das es im Schema
+        # nicht gibt, kann das Modell nicht setzen.
+        #
+        # Das ist die tatsaechliche Ursache von #1040 (Alexanders erste
+        # Sitzung nach der 500er-Reparatur, verworfen mit
+        # `invalid_resolver_payload_missing_target_kind`). Mein eigener
+        # Test verglich `v3.required == v2.required` und war gruen — er
+        # pruefte die Liste, nicht ihre Einloesung.
         # Keep the v1 schema bit-identical to what every shipped client
         # already decodes. Leaving `target_kind` in `properties` while
         # dropping it from `required` would still be a wider schema than
