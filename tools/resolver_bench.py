@@ -211,7 +211,12 @@ def _load_extra_cases():
 def _variants():
     raw = os.environ.get("BENCH_VARIANTS", "")
     out = {"live": {"persona_extra": "", "context_extra": ""}}
-    for part in [p for p in raw.split(";") if p.strip()]:
+    # Trenner ist `@@`, nicht `;`. Am 2026-08-11 enthielt ein
+    # Regelkandidat ein Semikolon und wurde mittendrin zerschnitten: Der
+    # Prueflauf fuhr eine halbe Regel als eigene Variante und meldete
+    # brav 8/8 fuer sie. Ein Trenner, der in gepruefter Prosa vorkommt,
+    # macht aus jeder Messung ein Ratespiel.
+    for part in [p for p in raw.split("@@") if p.strip()]:
         name, _, extra = part.partition("=")
         out[name.strip()] = {"persona_extra": extra, "context_extra": ""}
     return out
