@@ -3489,6 +3489,27 @@ async def mint_realtime_token(
         #     from #751: Arcturian never contacts an agent directly, and a
         #     tool that is not in the session cannot be called. That is
         #     the capability gate; the prompt is only the second line.
+        # Die Fassung MUSS vor den Anweisungen feststehen: Seit der
+        # Zusatz versionsabhaengig ist (v3 traegt `query_status`), liest
+        # er `arcturian_resolver`. Stand die Zuweisung weiter unten,
+        # scheiterte jeder Mint mit einem 500 auf
+        # use-before-assignment — so geschehen am 2026-08-11 zwischen
+        # 19:42 und dieser Zeile.
+        arcturian_resolver = request.arcturian_resolver or DEFAULT_ARCTURIAN_RESOLVER
+        if arcturian_resolver not in SUPPORTED_ARCTURIAN_RESOLVERS:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "error": "unsupported_arcturian_resolver",
+                    "requested": arcturian_resolver,
+                    "supported": sorted(SUPPORTED_ARCTURIAN_RESOLVERS),
+                    "hint": (
+                        "Omit the field for v1. An unknown revision is "
+                        "rejected rather than downgraded so a schema "
+                        "mismatch surfaces here and not three layers away."
+                    ),
+                },
+            )
         instructions = _companion_arcturian_prompt(request.language or "de")
         instructions += _arcturian_resolver_addendum(
             request.language or "de", arcturian_resolver)
@@ -3515,21 +3536,6 @@ async def mint_realtime_token(
         # shipped client compares the identifier for exact equality and
         # would die in `invalidTokenContract` if the server decided the
         # revision unilaterally.
-        arcturian_resolver = request.arcturian_resolver or DEFAULT_ARCTURIAN_RESOLVER
-        if arcturian_resolver not in SUPPORTED_ARCTURIAN_RESOLVERS:
-            raise HTTPException(
-                status_code=422,
-                detail={
-                    "error": "unsupported_arcturian_resolver",
-                    "requested": arcturian_resolver,
-                    "supported": sorted(SUPPORTED_ARCTURIAN_RESOLVERS),
-                    "hint": (
-                        "Omit the field for v1. An unknown revision is "
-                        "rejected rather than downgraded so a schema "
-                        "mismatch surfaces here and not three layers away."
-                    ),
-                },
-            )
         _resolver_defs = _arcturian_resolver_tools(arcturian_resolver)
         if not _resolver_defs:
             raise HTTPException(
