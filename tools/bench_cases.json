@@ -53,5 +53,35 @@
       "melde mich"
     ],
     "why": "CloudV2 garantiert, DASS gesprochen wird, wenn der Nachschlag scheitert. WAS gesprochen wird, ist meine Seite: zugeben statt erfinden, und nicht auf 'einen Moment' zurueckfallen — sonst ist Alexanders Problem nur verschoben."
+  },
+  {
+    "id": "UC-D vollstaendiger Name neben laengerem Verwandten",
+    "say": "sende eine Nachricht an CloudV2, dass der Prueflauf laeuft",
+    "expect_decision": "action",
+    "expect_target_contains": "cloudv2",
+    "must_not_say": [
+      "meinst du",
+      "welchen",
+      "cloudv2-codex",
+      "oder codex",
+      "bestaetig",
+      "bestätig",
+      "richtig verstanden"
+    ],
+    "why": "Alexander im Betrieb, 2026-08-11: 'Es wurde nicht direkt der Name uebernommen, sondern zur Bestaetigung nachgefragt, und das sei irgendwie anstrengend.' Ursache ist REGEL 2 — fuer das Modell sind CloudV2 und CloudV2-Codex beide plausibel, es hat sich also regelkonform verhalten. Die Regel zieht die Grenze falsch: Ein vollstaendig gesprochener Name neben einem laengeren Verwandten ist keine Mehrdeutigkeit. Das Falten macht der Server. Ohne diesen Kontext KANN der Fall nicht reproduzieren: Das Modell erfaehrt sonst nie, dass CloudV2-Codex existiert, und meldet folgerichtig 8/8 ohne Rueckfrage — ein gruener Fall, der den gemeldeten Fehler nicht beruehrt.",
+    "context": "Deine Agenten (Stand: jetzt):\nCloudV2: working\nCloudV2-Codex: working\nAppDevV2: working\n3dApi: ready"
+  },
+  {
+    "id": "UC-E gesprochene Namensform statt getippter",
+    "context": "Deine Agenten (Stand: jetzt):\nCloudV2: working\nCloudV2-Codex: working\nAppDevV2: working\n3dApi: ready",
+    "say": "sende eine Nachricht an Cloud V zwei, dass der Prueflauf laeuft",
+    "expect_decision": "action",
+    "must_not_say": [
+      "meinst du",
+      "welchen",
+      "bestaetig",
+      "bestätig"
+    ],
+    "why": "Verdacht zu Alexanders Rueckfrage-Aergernis: Der getippte Name 'CloudV2' erzeugt 8/8 keine Rueckfrage. Die Spracherkennung liefert aber 'Cloud V zwei' — erst DAS koennte neben CloudV2-Codex mehrdeutig wirken. Wenn sich das hier zeigt, gehoert die Loesung in die Namensaufloesung (#1037), NICHT in eine Lockerung von REGEL 2."
   }
 ]
