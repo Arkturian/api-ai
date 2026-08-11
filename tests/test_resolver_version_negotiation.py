@@ -165,6 +165,15 @@ def test_v3_kennt_query_status_und_v2_bleibt_unberuehrt():
     # v3 erbt die v2-Pflichtfelder, damit CloudV2s Parser nicht zweimal
     # umgebaut werden muss.
     assert v3["required"] == v2["required"]
+    # UND jedes Pflichtfeld existiert auch. Diese zweite Zeile fehlte:
+    # v3 fuehrte `target_kind` in `required`, ohne es zu definieren —
+    # ein Pflichtfeld, das es im Schema nicht gibt, kann das Modell
+    # nicht setzen. Alexanders erste Sitzung nach der 500er-Reparatur
+    # ist genau daran gescheitert (#1040), waehrend dieser Test gruen
+    # war: Er verglich die LISTE, nicht ihre Einloesung.
+    for rev, params in (("v1", v1), ("v2", v2), ("v3", v3)):
+        fehlend = [f for f in params["required"] if f not in params["properties"]]
+        assert not fehlend, f"{rev} verlangt Felder, die es nicht definiert: {fehlend}"
 
 
 def test_v3_anweisung_nennt_das_nachschlag_werkzeug_nicht():
