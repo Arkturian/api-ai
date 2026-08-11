@@ -442,7 +442,17 @@ async def main():
             if r["tool"] != "resolve_arcturian_turn":
                 notes.append(f"falsches Werkzeug: {r['tool']}"); continue
             a = r["args"]
-            seen.append(f"{a.get('decision')}/{a.get('kind')}/{a.get('target')!r}")
+            # `target_kind` gehoert in die Anzeige, seit v2 es zur
+            # Pflicht macht. Es fehlte hier — und am 2026-08-11 hat
+            # CloudV2 mir daraufhin eine Messung zugeschrieben, die ich
+            # nie gemacht hatte ("8 von 8 mit target_kind"). Ich hatte
+            # das SCHEMA zitiert, nicht die Ausgabe. Was der Pruefstand
+            # nicht zeigt, darf niemand als gemessen lesen.
+            tk = a.get("target_kind")
+            seen.append(
+                f"{a.get('decision')}/{a.get('kind')}/{a.get('target')!r}"
+                f"/tk={tk!r}"
+            )
             passed = c["expect"](a)
             if c.get("check_text"):
                 txt = (r.get("spoken") or "").lower()

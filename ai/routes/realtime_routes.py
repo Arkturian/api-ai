@@ -1451,11 +1451,23 @@ def _arcturian_resolver_addendum(language: str = "de",
             # danach beantwortet wird. Das Nachschlagen loest der Client
             # in einem eigenen erzwungenen Zug aus.
             "FRAGEN NACH EINEM AGENTEN:\n"
+            # `target_kind` stand hier bis 2026-08-11 als "agent" — und
+            # widersprach damit der Feldbeschreibung dreissig Zeilen
+            # weiter oben ("Only for kind='navigate_ui', otherwise
+            # null"). Das Modell folgte der Feldbeschreibung und setzte
+            # null; CloudV2s Parser verlangte es und verwarf den Zug.
+            # Alexanders erste Sitzung nach der Reparatur endete daran.
+            #
+            # Dieselbe Fehlerklasse wie die Zwischenformulierungen am
+            # selben Tag: zwei Stellen desselben Prompts sagten
+            # Verschiedenes, und ich hielt das Ergebnis fuer einen
+            # Modellfehler.
             "  * Will der Operator WISSEN, wie es um einen Agenten "
             "steht — woran er arbeitet, was er zuletzt gesagt hat, ob "
             "er weiterkommt —, dann `decision: action` mit "
-            "`kind: query_status`, `target` = der genannte Name, "
-            "`target_kind: agent`.\n"
+            "`kind: query_status` und `target` = der genannte Name. "
+            "`target_kind` bleibt null: Es trennt Navigationsziele, "
+            "und bei einer Frage gibt es nichts zu trennen.\n"
             "  * Das ist etwas anderes als `navigate_ui`: Dort will er "
             "etwas SEHEN, hier will er es WISSEN. 'Zeig mir 3dApi' ist "
             "navigate_ui, 'was macht 3dApi' ist query_status.\n"
