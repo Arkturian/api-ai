@@ -731,7 +731,19 @@ SUPPORTED_AFFECT_PROJECTIONS = {"agentos.avatar-runtime.v1"}
 # The model never calls the executor and never sees an action id.
 ARCTURIAN_RESOLVER_V1 = "agentos.arcturian-action.v1"
 ARCTURIAN_RESOLVER_V2 = "agentos.arcturian-action.v2"
-SUPPORTED_ARCTURIAN_RESOLVERS = {ARCTURIAN_RESOLVER_V1, ARCTURIAN_RESOLVER_V2}
+# v3 fuegt `query_status` hinzu. Eigene Fassung statt Erweiterung von
+# v2, weil der Client fail-closed auf unbekannte Arten prueft: Ein
+# ausgeliefertes v2-Geraet wuerde `query_status` mit
+# `invalid_resolver_payload_unknown_kind` abweisen — also mit genau dem
+# Fehler, unter dem der Eigentuemer die ganze Woche gelitten hat.
+#
+# Die Reihenfolge ist damit erzwungen statt verabredet: Wer v3 nicht
+# anfordert, sieht die Art nie. CloudV2 liefert die Annahme zuerst und
+# fordert v3 erst danach an.
+ARCTURIAN_RESOLVER_V3 = "agentos.arcturian-action.v3"
+SUPPORTED_ARCTURIAN_RESOLVERS = {
+    ARCTURIAN_RESOLVER_V1, ARCTURIAN_RESOLVER_V2, ARCTURIAN_RESOLVER_V3,
+}
 
 # What a client gets when it asks for nothing. v1, deliberately.
 #
@@ -816,7 +828,21 @@ RESOLVER_EXECUTABLE_KINDS = [
 # beside the answer but BEFORE it. The owner would hear ~800 ms of
 # silence before every sentence, not just before navigation.
 RESOLVER_UI_KINDS = ["navigate_ui"]
+# Die sechste Art, ab v3. Sie verlaesst das Geraet ebenso wenig wie
+# navigate_ui, aber aus einem anderen Grund: Sie ist ein LESEN. Deshalb
+# verlangt sie keine Vollmacht — CloudV2 kuerzt sie vor der
+# Grant-Pruefung ab, sonst beantwortete eine fehlende Vollmacht eine
+# FRAGE mit `authority_missing_for_target`, was nach einem kaputten
+# Agenten aussieht statt nach einer fehlenden Erlaubnis.
+#
+# Warum ueberhaupt eine eigene Art: `navigate_ui` mit `target_kind:
+# agent` trennt "zeig mir 3dApi" nicht von "was macht 3dApi". Der
+# Resolver hat diese Unterscheidung bereits getroffen; sie im Client
+# aus dem Wortlaut zu raten hiesse deutsches Schluesselwort-Raten und
+# scheiterte an "wie steht's bei 3dApi" (CloudV2, 2026-08-11).
+RESOLVER_QUERY_KINDS = ["query_status"]
 RESOLVER_ACTION_KINDS = RESOLVER_EXECUTABLE_KINDS + RESOLVER_UI_KINDS
+RESOLVER_ACTION_KINDS_V3 = RESOLVER_ACTION_KINDS + RESOLVER_QUERY_KINDS
 AFFECT_VALUES = ["neutral", "pleased", "concerned"]
 AFFECT_INTENSITY_VALUES = ["low", "high"]
 
@@ -1163,7 +1189,7 @@ def _arcturian_resolver_tools(
                 "additionalProperties": False,
                 "required": (
                     ["decision", "kind", "target", "target_kind", "instruction"]
-                    if resolver == ARCTURIAN_RESOLVER_V2
+                    if resolver in (ARCTURIAN_RESOLVER_V2, ARCTURIAN_RESOLVER_V3)
                     else ["decision", "kind", "target", "instruction"]
                 ),
                 "properties": {
@@ -1179,7 +1205,9 @@ def _arcturian_resolver_tools(
                     "kind": {
                         "type": ["string", "null"],
                         "enum": (
-                            (RESOLVER_ACTION_KINDS
+                            (RESOLVER_ACTION_KINDS_V3
+                             if resolver == ARCTURIAN_RESOLVER_V3
+                             else RESOLVER_ACTION_KINDS
                              if resolver == ARCTURIAN_RESOLVER_V2
                              else RESOLVER_EXECUTABLE_KINDS) + [None]
                         ),
@@ -1301,7 +1329,8 @@ def _arcturian_resolver_followup_payload(
     }
 
 
-def _arcturian_resolver_addendum(language: str = "de") -> str:
+def _arcturian_resolver_addendum(language: str = "de",
+                                 resolver: str = DEFAULT_ARCTURIAN_RESOLVER) -> str:
     """Prompt paragraph for the resolver + the receipt gate.
 
     The hard rule at the end is the whole point of #837: without a
@@ -1348,7 +1377,32 @@ def _arcturian_resolver_addendum(language: str = "de") -> str:
         "Ergebnis hoeren, nicht den Apparat.\n"
         "  * Nach der Ausfuehrung genuegt ein kurzer Satz: was getan "
         "wurde, an wen. Keine Zusammenfassung deines Vorgehens.\n"
-        "SPRACHE DES GESPRAECHS: " + (language or "de") + ".\n"
+        + (
+            # v3, und NUR v3: Ein v2-Geraet, das diesen Absatz laese,
+            # emittierte eine Art, die es selbst fail-closed abweist.
+            #
+            # Bewusst OHNE den Namen des Nachschlag-Werkzeugs. Am
+            # 2026-08-11 gemessen: Jede Erwaehnung — auch als Verbot —
+            # laesst das Modell es im ENTSCHEIDUNGS-Zug greifen, wo nur
+            # `resolve_arcturian_turn` angeboten wird (Resolver 8/8 ohne
+            # Erwaehnung, 1/8 mit Aufforderung, 0/8 mit Verbot). Hier
+            # steht deshalb nur, WAS entschieden wird, nie WOMIT es
+            # danach beantwortet wird. Das Nachschlagen loest der Client
+            # in einem eigenen erzwungenen Zug aus.
+            "FRAGEN NACH EINEM AGENTEN:\n"
+            "  * Will der Operator WISSEN, wie es um einen Agenten "
+            "steht — woran er arbeitet, was er zuletzt gesagt hat, ob "
+            "er weiterkommt —, dann `decision: action` mit "
+            "`kind: query_status`, `target` = der genannte Name, "
+            "`target_kind: agent`.\n"
+            "  * Das ist etwas anderes als `navigate_ui`: Dort will er "
+            "etwas SEHEN, hier will er es WISSEN. 'Zeig mir 3dApi' ist "
+            "navigate_ui, 'was macht 3dApi' ist query_status.\n"
+            "  * Behaupte im selben Zug KEINEN Zustand. Du hast noch "
+            "keinen — die Antwort kommt erst danach.\n"
+            if resolver == ARCTURIAN_RESOLVER_V3 else ""
+        )
+        + "SPRACHE DES GESPRAECHS: " + (language or "de") + ".\n"
     )
 
 
@@ -3365,7 +3419,8 @@ async def mint_realtime_token(
         #     tool that is not in the session cannot be called. That is
         #     the capability gate; the prompt is only the second line.
         instructions = _companion_arcturian_prompt(request.language or "de")
-        instructions += _arcturian_resolver_addendum(request.language or "de")
+        instructions += _arcturian_resolver_addendum(
+            request.language or "de", arcturian_resolver)
         # NO detail_level addendum here — deliberately (#837).
         #
         # detail_level steers a NARRATOR: how densely to describe what

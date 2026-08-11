@@ -46,9 +46,17 @@ def test_omitting_the_field_means_v1():
 
 def test_both_revisions_are_supported_simultaneously():
     """Migration needs an overlap window; one-at-a-time is the break."""
-    assert SUPPORTED_ARCTURIAN_RESOLVERS == {
-        ARCTURIAN_RESOLVER_V1, ARCTURIAN_RESOLVER_V2,
-    }
+    # Enthaltensein, NICHT Gleichheit. Die Gleichheitsfassung dieses
+    # Tests ging am 2026-08-11 rot, als v3 dazukam — obwohl nichts
+    # kaputt war. Am selben Tag legte dieselbe Denkweise auf der
+    # Client-Seite Arcturian eine Stunde still: CloudV2s Vertragspruefung
+    # verglich die Adapter-Kinds auf Gleichheit und warf, als meine
+    # Menge um zwei erlaubte Eintraege wuchs.
+    #
+    # Eine Pruefung darf nur pinnen, was schuetzenswert ist. Hier ist das
+    # die fortgesetzte Unterstuetzung der ausgelieferten Fassungen — nicht
+    # die Abwesenheit kuenftiger.
+    assert {ARCTURIAN_RESOLVER_V1, ARCTURIAN_RESOLVER_V2} <= SUPPORTED_ARCTURIAN_RESOLVERS
 
 
 def test_v1_schema_is_exactly_what_shipped_clients_decode():
@@ -111,7 +119,7 @@ def test_request_model_accepts_an_explicit_revision():
 def test_unknown_revision_is_not_silently_downgraded():
     """Fail closed. A downgrade hands a v2 client a v1 schema, and the
     mismatch then surfaces three layers from its cause."""
-    for bogus in ("agentos.arcturian-action.v3", "v2", "", "latest"):
+    for bogus in ("agentos.arcturian-action.v99", "v2", "", "latest"):
         assert bogus not in SUPPORTED_ARCTURIAN_RESOLVERS
 
 
@@ -130,3 +138,46 @@ if __name__ == "__main__":
                 print(f"  ERROR {name}: {type(exc).__name__}: {exc}")
     print(f"\n{'all green' if not failures else str(failures) + ' FAILED'}")
     sys.exit(1 if failures else 0)
+
+
+# ------------------------------------------------------------------ v3
+
+def test_v3_kennt_query_status_und_v2_bleibt_unberuehrt():
+    """Eigene Fassung statt Erweiterung — sonst bricht jedes v2-Geraet.
+
+    Der Client prueft fail-closed auf unbekannte Arten. Haette ich
+    `query_status` in v2 gelegt, antwortete ein ausgeliefertes Geraet
+    auf JEDE Statusfrage mit `invalid_resolver_payload_unknown_kind` —
+    also mit genau dem Fehler, unter dem Alexander die Woche gelitten
+    hat. Die Versionierung erzwingt die Reihenfolge, statt sie zu
+    verabreden: Wer v3 nicht anfordert, sieht die Art nie.
+    """
+    from ai.routes.realtime_routes import (
+        _arcturian_resolver_tools, ARCTURIAN_RESOLVER_V2, ARCTURIAN_RESOLVER_V3,
+        ARCTURIAN_RESOLVER_V1,
+    )
+    v1 = _arcturian_resolver_tools(ARCTURIAN_RESOLVER_V1)[0]["parameters"]
+    v2 = _arcturian_resolver_tools(ARCTURIAN_RESOLVER_V2)[0]["parameters"]
+    v3 = _arcturian_resolver_tools(ARCTURIAN_RESOLVER_V3)[0]["parameters"]
+    assert "query_status" not in v1["properties"]["kind"]["enum"]
+    assert "query_status" not in v2["properties"]["kind"]["enum"]
+    assert "query_status" in v3["properties"]["kind"]["enum"]
+    # v3 erbt die v2-Pflichtfelder, damit CloudV2s Parser nicht zweimal
+    # umgebaut werden muss.
+    assert v3["required"] == v2["required"]
+
+
+def test_v3_anweisung_nennt_das_nachschlag_werkzeug_nicht():
+    """Der teuerste Befund des Tages, als Test an der v3-Anweisung.
+
+    Gemessen: Resolver 8/8 ohne Erwaehnung, 1/8 mit Aufforderung, 0/8
+    mit ausdruecklichem Verbot. Ein Verbot ist eine Erwaehnung.
+    """
+    from ai.routes.realtime_routes import (
+        _arcturian_resolver_addendum, ARCTURIAN_RESOLVER_V2, ARCTURIAN_RESOLVER_V3,
+    )
+    v3 = _arcturian_resolver_addendum("de", ARCTURIAN_RESOLVER_V3)
+    assert "query_status" in v3
+    assert "agent_status" not in v3
+    # Und der Absatz darf nicht in v2 lecken.
+    assert "query_status" not in _arcturian_resolver_addendum("de", ARCTURIAN_RESOLVER_V2)
