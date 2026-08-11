@@ -780,7 +780,15 @@ ARCTURIAN_RESPONSE_KIND_FIELD = "agentos_response_kind"
 ARCTURIAN_RESPONSE_KINDS_SERVER = ["arcturian.resolver", "agentos.affect"]
 # Set by the native adapter only; listed so the client need not
 # re-derive the vocabulary. We never emit these.
-ARCTURIAN_RESPONSE_KINDS_ADAPTER = ["arcturian.primary_audio"]
+ARCTURIAN_RESPONSE_KINDS_ADAPTER = [
+    "arcturian.primary_audio",
+    # #1035: gesendet vom Client, wenn ein Zug gescheitert ist. Gehoert
+    # in die Adapter-Menge, nicht in die Server-Menge — wir liefern die
+    # Vorlage aus, auf die Leitung legt sie der Client. Fehlt der Typ
+    # hier, weist eine fail-closed Vertragspruefung ihn ab, bevor die
+    # Absichtszeile ueberhaupt entstehen kann.
+    "arcturian.report_intent",
+]
 # Adapter-added correlation keys. AiApi never sets them: the local
 # turn id does not exist yet at mint time, and the source response
 # id only exists once the primary response is bound.
@@ -1435,6 +1443,85 @@ def _arcturian_primary_audio_payload(read_tools: bool = False) -> dict:
             "tools": _arcturian_read_tools() if read_tools else [],
             "tool_choice": "auto" if read_tools else "none",
             "metadata": {ARCTURIAN_RESPONSE_KIND_FIELD: "arcturian.primary_audio"},
+        },
+    }
+
+
+def _arcturian_report_intent_tool() -> dict:
+    """Die EINE Zeile, die nur das Modell kennt: was es vorhatte.
+
+    Alex' Muster (#1035): Scheitert ein Zug, entsteht ein Issue. CloudV2
+    baut den Bericht aus Tatsachen, die der Client ohnehin hat —
+    Fehlercode, Betriebsart, Vertrag, Build. Deterministisch, ohne
+    Modell, ohne Token.
+
+    Der Grund fuer genau diese Aufteilung ist CloudV2s Argument, und es
+    ist gut: Wenn die Ausgabe des Modells gerade verworfen wurde, ist es
+    das Letzte, dem man den Bericht darueber anvertrauen sollte. Bleibt
+    ein Feld, das kein Client rekonstruieren kann — die ABSICHT. Der
+    Fehlercode sagt, was brach; er sagt nicht, was der Operator wollte.
+
+    Deshalb ein Satz, kein Bericht. Alles Weitere waere eine Einladung,
+    den Fehlschlag zu erklaeren statt ihn zu benennen — und das Modell
+    ist hier per Definition der unzuverlaessige Zeuge.
+    """
+    return {
+        "type": "function",
+        "name": "report_intent",
+        "description": (
+            "Nenne in EINEM Satz, was der Operator gerade erreichen "
+            "wollte — nicht, was schiefging, und nicht warum. Der "
+            "Fehler ist bereits erfasst; nur deine Absicht fehlt. "
+            "Beispiel: 'Wollte wissen, woran 3dApi arbeitet.'"
+        ),
+        "parameters": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["intent"],
+            "properties": {
+                "intent": {
+                    "type": "string",
+                    "description": (
+                        "Ein Satz in der Sprache des Gespraechs. Keine "
+                        "Entschuldigung, keine Fehleranalyse, keine "
+                        "Vermutung ueber die Ursache."
+                    ),
+                },
+            },
+        },
+    }
+
+
+def _arcturian_report_intent_payload() -> dict:
+    """Erzwungener Zug fuer die Absichtszeile — eigener Zug, mit Absicht.
+
+    Warum NICHT einfach ins `read_tools`-Opt-in: Zwei Gruende, beide
+    teuer erkauft.
+
+    Erstens greift das Opt-in nicht, wenn der Client es nicht setzt —
+    Fehlschlaege passieren aber unabhaengig davon. Zweitens, und das
+    wiegt schwerer: Jedes zusaetzliche Werkzeug in einem Zug, der schon
+    eines hat, ist genau die Flaeche, auf der `tool_misrouted
+    got=report_affect` entstand. Diesen Fehler zu finden hat 72 Laeufe
+    gekostet; ich hole ihn nicht fuer eine Bequemlichkeit zurueck.
+
+    Ein eigener Zug mit genau einem Werkzeug bleibt eindeutig
+    korrelierbar und kostet die gemessenen ~800 ms — die hier niemanden
+    stoeren, weil der Zug ohnehin schon gescheitert ist.
+
+    `required`, nicht `auto`: gemessen feuert die erzwungene Form 6/6,
+    die benannte Funktionsform wurde 0/6 stillschweigend ignoriert.
+    """
+    return {
+        "type": "response.create",
+        "response": {
+            "tools": [_arcturian_report_intent_tool()],
+            "tool_choice": "required",
+            # Kein gesprochener Zug: Der Operator hoert die Erklaerung
+            # im regulaeren Zug (REGEL 5), nicht hier. Diese Nutzlast
+            # dient allein dem Vorgang.
+            "output_modalities": ["text"],
+            "metadata": {ARCTURIAN_RESPONSE_KIND_FIELD: "arcturian.report_intent"},
         },
     }
 
@@ -2404,21 +2491,29 @@ def _companion_arcturian_prompt(language: str = "de") -> str:
         "  * Auf einer Eingabe zu handeln, die niemand verstanden hat, "
         "ist schlimmer als gar nicht zu antworten — es ist der einzige "
         "dieser Fehler, der etwas an Dritte schickt.\n\n"
-        "REGEL 5 — LIEBER SCHWEIGEN ALS FUELLEN:\n"
-        "  * Hast du nichts Sinnvolles zu sagen, sag NICHTS. Ein "
-        "stummer Zug ist erlaubt und richtig. Der Operator hat das "
-        "ausdruecklich so entschieden.\n"
-        "  * VERBOTEN sind Fuellsaetze, die Arbeit oder einen Verlauf "
+        "REGEL 5 — SAG, WAS IST, NICHT WAS BERUHIGT:\n"
+        "  * Du sprichst NUR aus, was im Werkzeug-Ergebnis steht oder "
+        "was du selbst getan hast. Steht dort nichts, ist 'Dazu weiss "
+        "ich gerade nichts' die richtige Antwort — sie ist wahr.\n"
+        "  * VERBOTEN sind Saetze, die Arbeit oder einen Verlauf "
         "behaupten, den du nicht kennst: 'ich kuemmere mich darum', "
         "'ich schaue nach', 'einen Moment', 'die Antwort steht noch "
-        "aus', 'ich melde mich'. Du kuemmerst dich um nichts — du "
-        "rufst ein Werkzeug auf oder du schweigst.\n"
-        "  * Kennst du einen Zustand nicht, dann nenne KEINEN. Weder "
-        "erfunden noch beschoenigt noch als Vermutung. Lieber ein "
-        "Satz weniger als ein Satz, der nicht stimmt.\n"
-        "  * Diese Regel schlaegt jeden Hoeflichkeitsreflex. Eine "
-        "hoefliche Unwahrheit ist hier der teuerste Fehler: Der "
-        "Operator handelt danach.\n\n"
+        "aus', 'ich melde mich'. Du kuemmerst dich um nichts und du "
+        "wartest auf nichts. Entweder du hast ein Ergebnis, oder du "
+        "hast keins — beides laesst sich in einem Satz sagen.\n"
+        "  * SCHEITERT ETWAS, dann benenne es. Der Server nennt dir den "
+        "Grund beim Namen (etwa 'Feld target_kind fehlt') und ob ein "
+        "Vorgang dazu angelegt wurde. Sag genau DAS: was du versucht "
+        "hast, woran es scheiterte, was notiert wurde.\n"
+        "  * 'Das ging gerade nicht durch' ist die falsche Antwort. Sie "
+        "schont, und der Operator will nicht geschont werden — ihm "
+        "gehoert dieses System, er baut daran. Ein verschwiegener Grund "
+        "kostet ihn Stunden Suche.\n"
+        "  * Entschuldige dich nicht und erklaere den Fehler nicht "
+        "weiter, als der Server ihn nennt. Keine Vermutung ueber die "
+        "Ursache, kein Trost, kein 'ich versuche es gleich nochmal'.\n"
+        "  * Eine hoefliche Unwahrheit ist hier der teuerste Fehler: "
+        "Der Operator handelt danach.\n\n"
         "WANN DU FRAGST — GENAU EINMAL, KURZ:\n"
         "  * Nur wenn der Operator gar keinen Empfaenger genannt hat "
         "oder die Absicht wirklich mehrdeutig ist. Einen Namen, den du "
@@ -3755,6 +3850,16 @@ async def mint_realtime_token(
         # voluntary resolver call in 2 of 2 measured runs.
         "primary_audio_response": (
             _arcturian_primary_audio_payload(request.read_tools)
+            if companion_mode == "arcturian" else None
+        ),
+        # Fuer Alex' Muster #1035: Schlaegt ein Zug fehl, schickt der
+        # Client DIESE Nutzlast und bekommt die eine Zeile, die er nicht
+        # selbst bilden kann — die Absicht. Alles andere am Bericht baut
+        # er aus eigenen Tatsachen, ohne Modell. Ist der Zug nicht
+        # moeglich oder liefert er nichts, entsteht das Issue trotzdem:
+        # die Absicht ergaenzt, sie bedingt nicht.
+        "report_intent_response": (
+            _arcturian_report_intent_payload()
             if companion_mode == "arcturian" else None
         ),
         "response_kinds": (
