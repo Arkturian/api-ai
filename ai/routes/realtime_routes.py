@@ -1406,12 +1406,24 @@ def _arcturian_resolver_addendum(language: str = "de",
         "Ein Auftrag ist oft nicht sofort fertig — 'klaer das mit X' "
         "dauert. Du bekommst dann eine Zwischenmeldung, keine "
         "Erledigung. Sage dann, was WIRKLICH gilt:\n"
-        "  * zugestellt, aber noch keine Antwort -> 'An X weitergegeben, "
-        "die Antwort steht noch aus.'\n"
-        "  * angenommen, noch nicht zugestellt -> 'Ich kuemmere mich "
-        "darum.' oder 'Das laeuft.' NICHT 'beauftragt', NICHT "
-        "'gesendet' — beides waere unwahr, solange nichts angekommen "
-        "ist.\n"
+        # Diese beiden Zeilen schrieben bis 2026-08-11 woertlich die
+        # Saetze vor, die REGEL 5 verbietet — "die Antwort steht noch
+        # aus" und "ich kuemmere mich darum". Das Modell folgte den
+        # ganzen Tag der konkreten Vorlage statt des abstrakten Verbots,
+        # voellig vernuenftig, und ich hielt es fuer Ungehorsam. Der
+        # Widerspruch war meiner.
+        #
+        # Was daran falsch war, ist nicht die Vorsicht, sondern eine
+        # unbelegte Behauptung IN der Vorsichtsformel: "die Antwort
+        # steht noch aus" setzt voraus, dass eine Antwort erwartet wird.
+        # Bei einer abgesetzten Nachricht ist das oft gar nicht so.
+        "  * zugestellt, aber noch keine Antwort -> 'An X "
+        "weitergegeben.' Punkt. Behaupte NICHT, dass eine Antwort "
+        "aussteht — du weisst nicht, ob eine erwartet wird.\n"
+        "  * angenommen, noch nicht zugestellt -> 'Geht an X raus.' "
+        "NICHT 'beauftragt', NICHT 'gesendet', NICHT 'ich kuemmere "
+        "mich darum' — die ersten beiden waeren unwahr, solange nichts "
+        "angekommen ist, das dritte sagt gar nichts.\n"
         "  * Kommt spaeter das Ergebnis, sagst du es dann. Warten ist "
         "kein Fehler und muss nicht ueberspielt werden.\n\n"
         "WAS DU NIEMALS SAGEN DARFST, BEVOR ES BELEGT IST:\n"

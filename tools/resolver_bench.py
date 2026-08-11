@@ -23,6 +23,7 @@ from ai.routes.realtime_routes import (
     _companion_arcturian_prompt, _arcturian_resolver_addendum,
     _arcturian_resolver_followup_payload, ARCTURIAN_RESOLVER_V2,
     _arcturian_primary_audio_payload, _arcturian_read_tools,
+    _arcturian_status_lookup_payload, ARCTURIAN_RESOLVER_V3,
 )
 
 MODEL = "gpt-realtime"
@@ -234,6 +235,16 @@ def _bench_tool_result(name: str, raw_args: str) -> dict:
         agent = ""
     if name != "agent_status":
         return {"ok": False, "error": "unbekanntes Werkzeug im Pruefstand"}
+    if os.getenv("BENCH_TOOL_FAILS"):
+        # Exakt die Form, die `_tool_agent_status` im Betrieb liefert,
+        # wenn keine der drei Quellen lesbar ist. CloudV2 garantiert
+        # clientseitig, DASS dann gesprochen wird — WAS gesprochen wird,
+        # entscheidet meine Seite, und genau das misst dieser Zweig.
+        return {"ok": False, "agent": agent or "3dApi",
+                "error": "nothing_readable",
+                "hint": ("Kein Zustand und keine Antwort lesbar — sag, dass "
+                         "du zu diesem Agenten gerade nichts weisst, und "
+                         "erfinde nichts.")}
     return {
         "ok": True, "scope": "one", "agent": agent or "3dApi",
         "state": "thinking",
@@ -244,10 +255,21 @@ def _bench_tool_result(name: str, raw_args: str) -> dict:
 
 
 async def one(key, case, variant=None):
-    persona = _companion_arcturian_prompt("de") + _arcturian_resolver_addendum("de")
+    persona = (_companion_arcturian_prompt("de")
+               + _arcturian_resolver_addendum(
+                   "de",
+                   ARCTURIAN_RESOLVER_V3 if os.getenv("BENCH_RESOLVER") == "v3"
+                   else ARCTURIAN_RESOLVER_V2))
     if variant and variant.get("persona_extra"):
         persona += "\n\n" + variant["persona_extra"]
-    followup = _arcturian_resolver_followup_payload(ARCTURIAN_RESOLVER_V2)
+    # BENCH_RESOLVER=v3 fahrt den vollstaendigen v3-Ablauf: Der Resolver
+    # darf `query_status` entscheiden, und darauf folgt der ERZWUNGENE
+    # Nachschlag-Zug statt des gesprochenen. Damit laesst sich der
+    # Entwurf messen, BEVOR CloudV2 die Annahmeseite baut.
+    resolver_rev = (ARCTURIAN_RESOLVER_V3
+                    if os.getenv("BENCH_RESOLVER") == "v3"
+                    else ARCTURIAN_RESOLVER_V2)
+    followup = _arcturian_resolver_followup_payload(resolver_rev)
     t0 = time.time()
     async with websockets.connect(
         URL, additional_headers={"Authorization": f"Bearer {key}"}, max_size=None
@@ -314,7 +336,19 @@ async def one(key, case, variant=None):
             # decision=none und damit gruen — der teuerste Fehler des
             # Tages, unsichtbar (AppDevV2, 2026-08-09).
             read = bool(os.getenv("BENCH_READ_TOOLS"))
-            await ws.send(json.dumps(_arcturian_primary_audio_payload(read)))
+            # Der Kern des v3-Entwurfs: Hat der Resolver eine FRAGE nach
+            # einem Agenten erkannt, schickt der Client den erzwungenen
+            # Nachschlag-Zug — nicht den gesprochenen. Das Nachschlagen
+            # ist damit Pflicht statt Angebot; `auto` schlug in 1 von 8
+            # Laeufen nach (2026-08-11).
+            try:
+                erste_args = json.loads(args) if args else {}
+            except Exception:
+                erste_args = {}
+            if read and erste_args.get("kind") == "query_status":
+                await ws.send(json.dumps(_arcturian_status_lookup_payload()))
+            else:
+                await ws.send(json.dumps(_arcturian_primary_audio_payload(read)))
             # Der gesprochene Zug darf nachschlagen — und wenn er es
             # tut, MUSS er eine Antwort bekommen, sonst bleibt der Zug
             # offen und das Modell redet aus dem Nichts weiter. Genau
@@ -369,7 +403,13 @@ async def main():
     run_id = f"rb-{int(time.time())}"
     print(f"Run-ID           : {run_id}")
     print(f"Modell           : {MODEL}")
-    print(f"Resolver-Vertrag : {ARCTURIAN_RESOLVER_V2}")
+    # Die tatsaechlich gefahrene Fassung, nicht die Konstante. Der Lauf
+    # rb-1786465xxx meldete "v2", waehrend er v3 fuhr — eine Kopfzeile,
+    # die luegt, ist genau die Art Messinstrument, die diesen Tag
+    # mehrfach teuer gemacht hat.
+    print(f"Resolver-Vertrag : "
+          f"{ARCTURIAN_RESOLVER_V3 if os.getenv('BENCH_RESOLVER') == 'v3' else ARCTURIAN_RESOLVER_V2}"
+          f"{'  · Lesewerkzeuge an' if os.getenv('BENCH_READ_TOOLS') else ''}")
     print(f"Persona-Revision : {sha} · {len(persona)} Zeichen · sha256 {hashlib.sha256(persona.encode()).hexdigest()[:12]}")
     cases = CASES + _load_extra_cases()
     variants = _variants()

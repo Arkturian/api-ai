@@ -25,5 +25,33 @@
       "welchen agent"
     ],
     "why": "Muss ohne Rueckfrage abgehen, Ziel korrekt, Thema im Auftrag."
+  },
+  {
+    "id": "UC-C Nachschlag scheitert — was sagt er dann",
+    "say": "hey, was ist der Status von 3dApi?",
+    "must_call": "agent_status",
+    "must_say": [
+      "weiss ich nicht",
+      "weiß ich nicht",
+      "nichts",
+      "kein",
+      "nicht sehen",
+      "nicht sagen",
+      "nicht lesen",
+      "keine information",
+      "nicht heraus"
+    ],
+    "must_not_say": [
+      "import",
+      "3 von 7",
+      "laeuft gerade",
+      "arbeitet gerade an",
+      "einen moment",
+      "kuemmere mich",
+      "kümmere mich",
+      "schaue nach",
+      "melde mich"
+    ],
+    "why": "CloudV2 garantiert, DASS gesprochen wird, wenn der Nachschlag scheitert. WAS gesprochen wird, ist meine Seite: zugeben statt erfinden, und nicht auf 'einen Moment' zurueckfallen — sonst ist Alexanders Problem nur verschoben."
   }
 ]
