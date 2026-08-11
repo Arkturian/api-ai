@@ -22,7 +22,7 @@ import websockets
 from ai.routes.realtime_routes import (
     _companion_arcturian_prompt, _arcturian_resolver_addendum,
     _arcturian_resolver_followup_payload, ARCTURIAN_RESOLVER_V2,
-    _arcturian_primary_audio_payload,
+    _arcturian_primary_audio_payload, _arcturian_read_tools,
 )
 
 MODEL = "gpt-realtime"
@@ -161,7 +161,7 @@ CASES = [
 # braucht. Format je Eintrag:
 #   {"id","say","context"?,"history"?[[rolle,text]],
 #    "expect_decision"?, "expect_target_contains"?, "must_say"?[...],
-#    "must_not_say"?[...], "why"}
+#    "must_not_say"?[...], "must_call"?"agent_status", "why"}
 CASES_FILE = Path(os.environ.get(
     "BENCH_CASES", "/var/code/api-ai/tools/bench_cases.json"))
 
@@ -189,6 +189,13 @@ def _load_extra_cases():
                 "history": [tuple(h) for h in (c.get("history") or [])]}
         if c.get("context"):
             case["context"] = c["context"]
+        # Ohne diese Zeile ist UC-A gruen, waehrend genau das passiert,
+        # worueber Alexander sich beschwert: 8/8 bestanden, KEIN einziger
+        # Nachschlag, achtmal "einen Moment". Ein Fall, der die Faehigkeit
+        # meint, muss ihren Gebrauch verlangen — sonst ist er das gruene
+        # Haekchen, gegen das dieser Pruefstand gebaut wurde.
+        if c.get("must_call"):
+            case["must_call"] = c["must_call"]
         if c.get("must_say") or forbid:
             case["check_text"] = True
             case["admit"] = tuple(w.lower() for w in (c.get("must_say") or ()))
@@ -209,6 +216,33 @@ def _variants():
     return out
 
 
+def _bench_tool_result(name: str, raw_args: str) -> dict:
+    """Feste Werkzeug-Antwort — bewusst erfunden, bewusst realistisch.
+
+    Der echte Aufruf gegen cloud-api wuerde die Messung an den
+    Tageszustand fremder Agenten binden: Heute sagt 3dApi etwas, morgen
+    nichts, und derselbe Prompt bekaeme eine andere Note. Gemessen wird
+    hier die SPRACHE des Modells auf ein gegebenes Ergebnis, nicht die
+    Verfuegbarkeit eines Peers.
+
+    Die Form folgt exakt der echten Rueckgabe von `_tool_agent_status`,
+    damit der Prueflauf nicht an einer Huelle vorbeimisst.
+    """
+    try:
+        agent = (json.loads(raw_args or "{}").get("agent") or "").strip()
+    except Exception:
+        agent = ""
+    if name != "agent_status":
+        return {"ok": False, "error": "unbekanntes Werkzeug im Pruefstand"}
+    return {
+        "ok": True, "scope": "one", "agent": agent or "3dApi",
+        "state": "thinking",
+        "board": {"state": "working", "summary": "Import laeuft"},
+        "last_reply": "Der Import laeuft, 3 von 7 Dateien sind durch.",
+        "last_reply_at": "2026-08-11T15:02:00Z",
+    }
+
+
 async def one(key, case, variant=None):
     persona = _companion_arcturian_prompt("de") + _arcturian_resolver_addendum("de")
     if variant and variant.get("persona_extra"):
@@ -218,9 +252,20 @@ async def one(key, case, variant=None):
     async with websockets.connect(
         URL, additional_headers={"Authorization": f"Bearer {key}"}, max_size=None
     ) as ws:
+        # BENCH_READ_TOOLS=1 bildet den PRODUKTIVEN Zustand seit dem
+        # read_tools-Opt-in nach: Die Sitzung fuehrt `agent_status`, der
+        # Resolver-Zug ueberschreibt sie mit seinem einen Werkzeug.
+        #
+        # Ohne das mass der Pruefstand eine Welt, die es nicht mehr gibt
+        # — und genau in der Luecke sitzt der Verdacht, den CloudV2 am
+        # 2026-08-11 aufgebracht hat: Seit beide Vokabulare gleichzeitig
+        # existieren, koennte das Modell den WERKZEUGNAMEN in das Feld
+        # `kind` schreiben, das nur die fuenf Federation-Arten annimmt.
+        session_tools = _arcturian_read_tools() if os.getenv("BENCH_READ_TOOLS") else []
         await ws.send(json.dumps({"type": "session.update", "session": {
             "type": "realtime", "model": MODEL, "instructions": persona,
-            "tools": [], "tool_choice": "none",
+            "tools": session_tools,
+            "tool_choice": "auto" if session_tools else "none",
             "audio": {"input": {"turn_detection": None}},
         }}))
         # Vorgeschichte als echte Zuege mit Rollen. Ohne sie kann kein
@@ -248,6 +293,7 @@ async def one(key, case, variant=None):
                 "content": [{"type": ctype, "text": text}]}}))
         await ws.send(json.dumps(followup))
         args, name = "", None
+        tool_calls = []
         while True:
             ev = json.loads(await asyncio.wait_for(ws.recv(), timeout=45))
             t = ev.get("type", "")
@@ -267,22 +313,51 @@ async def one(key, case, variant=None):
             # ausliefert. Ohne sie waere ein ERFUNDENER Status
             # decision=none und damit gruen — der teuerste Fehler des
             # Tages, unsichtbar (AppDevV2, 2026-08-09).
-            await ws.send(json.dumps(_arcturian_primary_audio_payload()))
+            read = bool(os.getenv("BENCH_READ_TOOLS"))
+            await ws.send(json.dumps(_arcturian_primary_audio_payload(read)))
+            # Der gesprochene Zug darf nachschlagen — und wenn er es
+            # tut, MUSS er eine Antwort bekommen, sonst bleibt der Zug
+            # offen und das Modell redet aus dem Nichts weiter. Genau
+            # das mass der Pruefstand bis 2026-08-11 nicht: Er bot kein
+            # Werkzeug an, also blieb dem Modell nur der Fuellsatz, und
+            # ich habe REGEL 5 zweimal fuer wirkungslos erklaert,
+            # obwohl die Faehigkeit im Versuchsaufbau fehlte.
+            call_id = fn_name = None
+            fn_args = ""
             while True:
                 ev = json.loads(await asyncio.wait_for(ws.recv(), timeout=45))
                 t = ev.get("type", "")
                 if t.endswith("output_audio_transcript.delta") or t.endswith("output_text.delta"):
                     spoken += ev.get("delta", "")
+                elif t == "response.output_item.added":
+                    item = ev.get("item") or {}
+                    if item.get("type") == "function_call":
+                        fn_name = item.get("name")
+                        call_id = item.get("call_id")
+                elif t.endswith("function_call_arguments.done"):
+                    fn_args = ev.get("arguments", "")
                 elif t == "response.done":
-                    break
+                    if not (call_id and fn_name):
+                        break
+                    tool_calls.append({"name": fn_name, "args": fn_args})
+                    await ws.send(json.dumps({
+                        "type": "conversation.item.create",
+                        "item": {"type": "function_call_output",
+                                 "call_id": call_id,
+                                 "output": json.dumps(_bench_tool_result(fn_name, fn_args))},
+                    }))
+                    call_id = fn_name = None
+                    await ws.send(json.dumps(_arcturian_primary_audio_payload(read)))
                 elif t == "error":
                     break
     ms = int((time.time() - t0) * 1000)
     try:
         parsed = json.loads(args) if args else {}
     except Exception:
-        return {"ok": False, "err": f"unparsbar: {args[:80]}", "ms": ms, "tool": name, "spoken": spoken}
-    return {"ok": True, "args": parsed, "ms": ms, "tool": name, "spoken": spoken}
+        return {"ok": False, "err": f"unparsbar: {args[:80]}", "ms": ms, "tool": name, "spoken": spoken,
+                "tool_calls": tool_calls}
+    return {"ok": True, "args": parsed, "ms": ms, "tool": name, "spoken": spoken,
+            "tool_calls": tool_calls}
 
 
 async def main():
@@ -313,6 +388,7 @@ async def main():
         print(f"── Variante: {vname} " + "─" * 40)
       for c in cases:
         oks, lat, notes, seen, spoken_log = 0, [], [], [], []
+        tool_log = []
         for _ in range(REPS):
             r = await one(key, c, variant)
             if not r["ok"]:
@@ -327,6 +403,11 @@ async def main():
                 txt = (r.get("spoken") or "").lower()
                 admits = any(m in txt for m in c.get("admit", ()))
                 spoken_log.append(r.get("spoken", "").strip()[:180] or "(kein Text)")
+                gerufen = [t["name"] for t in (r.get("tool_calls") or [])]
+                tool_log.extend(gerufen)
+                if c.get("must_call") and c["must_call"] not in gerufen:
+                    passed = False
+                    notes.append(f"nicht nachgeschlagen ({c['must_call']} nie gerufen)")
                 if c.get("admit") and not admits:
                     passed = False
                     notes.append("erwartete Formulierung fehlt")
@@ -348,6 +429,14 @@ async def main():
         for v, n in sorted(((v, seen.count(v)) for v in dict.fromkeys(seen)),
                            key=lambda x: -x[1]):
             print(f"               {n}× {v}")
+        # Ob im gesprochenen Zug nachgeschlagen wurde. Ohne diese Zeile
+        # sah der Lauf vom 2026-08-11 wie ein Regelversagen aus, obwohl
+        # dem Modell schlicht das Werkzeug fehlte.
+        for tc, n in sorted(((t, tool_log.count(t)) for t in dict.fromkeys(tool_log)),
+                            key=lambda x: -x[1]):
+            print(f"               [Werkzeug] {n}× {tc}")
+        if not tool_log:
+            print("               [Werkzeug] keiner")
         for sp in spoken_log:
             print(f"               » {sp}")
         for n in dict.fromkeys(notes):
