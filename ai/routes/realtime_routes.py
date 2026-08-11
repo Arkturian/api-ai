@@ -788,6 +788,9 @@ ARCTURIAN_RESPONSE_KINDS_ADAPTER = [
     # hier, weist eine fail-closed Vertragspruefung ihn ab, bevor die
     # Absichtszeile ueberhaupt entstehen kann.
     "arcturian.report_intent",
+    # Erzwungener Nachschlag; gemessen die einzige Form, die zuverlaessig
+    # ausloest (24 Laeufe, siehe _arcturian_status_lookup_payload).
+    "arcturian.status_lookup",
 ]
 # Adapter-added correlation keys. AiApi never sets them: the local
 # turn id does not exist yet at mint time, and the source response
@@ -1443,6 +1446,46 @@ def _arcturian_primary_audio_payload(read_tools: bool = False) -> dict:
             "tools": _arcturian_read_tools() if read_tools else [],
             "tool_choice": "auto" if read_tools else "none",
             "metadata": {ARCTURIAN_RESPONSE_KIND_FIELD: "arcturian.primary_audio"},
+        },
+    }
+
+
+def _arcturian_status_lookup_payload() -> dict:
+    """Erzwungener Nachschlag-Zug — die einzige Form, die MISST.
+
+    Gemessen am 2026-08-11, 24 Laeufe, drei Fassungen, Fall UC-A
+    ("was ist der Status von 3dApi?"):
+
+        Persona erwaehnt das Werkzeug NICHT   Resolver 8/8 · Nachschlag 1/8
+        Persona sagt "ruf es auf"            Resolver 1/8 · Nachschlag 1/8
+        Persona sagt "aber NICHT im
+        Entscheidungs-Zug"                   Resolver 0/8 · Nachschlag 0/8
+
+    Der Befund ist unbequem und eindeutig: **Jede Erwaehnung von
+    `agent_status` in der Persona laesst das Modell es im
+    ENTSCHEIDUNGS-Zug greifen**, wo nur `resolve_arcturian_turn`
+    angeboten wird. Das ausdrueckliche Verbot machte es schlimmer, nicht
+    besser — ein Verbot ist eine Erwaehnung. Es ist derselbe Griff, den
+    AppDevV2 als `tool_misrouted` auf dem Geraet reproduziert hat.
+
+    Also nicht im Prompt loesen. `tool_choice:"auto"` im gesprochenen
+    Zug reicht ebenfalls nicht: ohne Erwaehnung schlaegt das Modell nur
+    in 1 von 8 Laeufen nach und vertroestet in den uebrigen sieben.
+
+    Bleibt der erzwungene eigene Zug — CloudV2s Vorschlag B vom
+    2026-08-09, den ich damals zugunsten von `auto` verworfen habe. Die
+    Messung sagt, er hatte recht.
+    """
+    return {
+        "type": "response.create",
+        "response": {
+            "tools": _arcturian_read_tools(),
+            # `required`, nicht `auto`: `auto` ist die gemessene 1-von-8-
+            # Fassung. Wer diesen Zug schickt, WEISS bereits, dass
+            # nachgeschlagen werden soll — die Wahl hat der Resolver
+            # schon getroffen.
+            "tool_choice": "required",
+            "metadata": {ARCTURIAN_RESPONSE_KIND_FIELD: "arcturian.status_lookup"},
         },
     }
 
@@ -3861,6 +3904,14 @@ async def mint_realtime_token(
         "report_intent_response": (
             _arcturian_report_intent_payload()
             if companion_mode == "arcturian" else None
+        ),
+        # Schickt der Client diesen Zug, nachdem der Resolver eine Frage
+        # nach einem Agenten erkannt hat, ist der Nachschlag erzwungen
+        # statt erhofft. Nur mit `read_tools`, weil die Nutzlast sonst
+        # ein Werkzeug forderte, das die Sitzung nicht fuehrt.
+        "status_lookup_response": (
+            _arcturian_status_lookup_payload()
+            if companion_mode == "arcturian" and request.read_tools else None
         ),
         "response_kinds": (
             {

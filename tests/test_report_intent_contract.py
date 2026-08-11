@@ -136,3 +136,51 @@ def test_mint_liefert_den_zug_nur_fuer_arcturian(monkeypatch):
     fenster = quelle[stelle:stelle + 260]
     assert 'companion_mode == "arcturian"' in fenster
     assert "else None" in fenster
+
+
+# ------------------------------------------------------- erzwungener Nachschlag
+
+def test_nachschlag_zug_erzwingt_statt_anzubieten():
+    """`auto` ist die gemessene 1-von-8-Fassung — hier gilt `required`.
+
+    24 Laeufe am 2026-08-11, Fall UC-A: ohne Erwaehnung in der Persona
+    schlug das Modell 1/8 nach; mit Erwaehnung brach der Resolver-Zug
+    (1/8 bzw. 0/8), weil es `agent_status` dort greift, wo nur
+    `resolve_arcturian_turn` angeboten wird.
+    """
+    r = rr._arcturian_status_lookup_payload()["response"]
+    assert r["tool_choice"] == "required"
+    assert "agent_status" in [t["name"] for t in r["tools"]]
+    assert r["metadata"][rr.ARCTURIAN_RESPONSE_KIND_FIELD] == "arcturian.status_lookup"
+
+
+def test_nachschlag_zug_bringt_den_resolver_nicht_zurueck():
+    namen = [t["name"] for t in rr._arcturian_status_lookup_payload()["response"]["tools"]]
+    assert "resolve_arcturian_turn" not in namen
+    assert "report_affect" not in namen
+
+
+def test_persona_erwaehnt_das_werkzeug_NICHT():
+    """Die teuerste Zeile dieses Tages, als Test.
+
+    Jede Erwaehnung von `agent_status` in der Persona laesst das Modell
+    es im Entscheidungs-Zug greifen — auch ein ausdrueckliches Verbot,
+    denn ein Verbot ist eine Erwaehnung. Gemessen: Resolver 8/8 ohne
+    Erwaehnung, 1/8 mit Aufforderung, 0/8 mit Verbot.
+    """
+    text = rr._companion_arcturian_prompt("de") + rr._arcturian_resolver_addendum("de")
+    assert "agent_status" not in text, (
+        "Der Werkzeugname steht in der Persona — gemessen bricht das den "
+        "Entscheidungs-Zug. Der Nachschlag gehoert in den erzwungenen Zug."
+    )
+
+
+def test_nachschlag_zug_nur_mit_opt_in():
+    import inspect
+    quelle = inspect.getsource(rr)
+    stelle = quelle.index('"status_lookup_response": (')
+    fenster = quelle[stelle:stelle + 220]
+    assert "request.read_tools" in fenster, (
+        "Ohne Opt-in forderte die Nutzlast ein Werkzeug, das die Sitzung "
+        "nicht fuehrt."
+    )
