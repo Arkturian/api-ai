@@ -434,8 +434,20 @@ def test_resolver_addendum_offers_wording_for_work_in_progress():
     """
     text = _arcturian_resolver_addendum("de")
     assert "WAEHREND ETWAS LAEUFT" in text
-    assert "die Antwort steht noch aus" in text
+    # Eine erlaubte Formulierung muss ES GEBEN — das ist das Prinzip
+    # dieses Tests und es gilt unveraendert. Sie darf aber nicht selbst
+    # etwas Unbelegtes behaupten.
+    assert "An X weitergegeben." in text
+    assert "Geht an X raus." in text
     assert "Warten ist" in text, "waiting must be framed as normal, not as failure"
+    # 2026-08-11: Die alte Fassung schrieb woertlich die Saetze vor, die
+    # REGEL 5 verbietet. Das Modell folgte den ganzen Tag der konkreten
+    # Vorlage statt des abstrakten Verbots — 5/5 in UC-B — und ich hielt
+    # es fuer Ungehorsam. Ein Prompt darf nicht beides sagen.
+    assert "die Antwort steht noch aus.'" not in text, (
+        "Der Zusatz schreibt wieder einen Satz vor, den REGEL 5 verbietet"
+    )
+    assert "'Ich kuemmere mich darum.'" not in text
     # The ban must still be there — the wording is an alternative, not a licence.
     for claim in ("gesendet", "beauftragt", "erledigt"):
         assert claim in text

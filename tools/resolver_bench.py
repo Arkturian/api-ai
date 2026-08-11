@@ -235,6 +235,16 @@ def _bench_tool_result(name: str, raw_args: str) -> dict:
         agent = ""
     if name != "agent_status":
         return {"ok": False, "error": "unbekanntes Werkzeug im Pruefstand"}
+    if os.getenv("BENCH_TOOL_FAILS"):
+        # Exakt die Form, die `_tool_agent_status` im Betrieb liefert,
+        # wenn keine der drei Quellen lesbar ist. CloudV2 garantiert
+        # clientseitig, DASS dann gesprochen wird — WAS gesprochen wird,
+        # entscheidet meine Seite, und genau das misst dieser Zweig.
+        return {"ok": False, "agent": agent or "3dApi",
+                "error": "nothing_readable",
+                "hint": ("Kein Zustand und keine Antwort lesbar — sag, dass "
+                         "du zu diesem Agenten gerade nichts weisst, und "
+                         "erfinde nichts.")}
     return {
         "ok": True, "scope": "one", "agent": agent or "3dApi",
         "state": "thinking",
