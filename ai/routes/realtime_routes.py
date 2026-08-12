@@ -1133,9 +1133,12 @@ def _arcturian_read_tools(name_resolution: bool = False) -> List[dict]:
                 "Arbeit, sag auch das. Erfinde NIE einen Zustand oder "
                 "eine Aussage, die das Ergebnis nicht nennt; steht dort "
                 "nichts Brauchbares, sag genau das — schweigen darfst "
-                "du nicht. Steht `resolved_from` im Ergebnis, hat der "
-                "Server den gehoerten Namen aufgeloest — sag das dazu "
-                "('ich habe das als 3dApi verstanden'). Kommt "
+                "du nicht. NUR falls das Feld `resolved_from` einen "
+                "Wert TRAEGT, hat der Server einen falsch gehoerten "
+                "Namen umgedeutet — dann sag es dazu ('ich habe das als "
+                "3dApi verstanden'). Fehlt das Feld oder ist es null, "
+                "war der Name richtig: dann sag NICHTS ueber "
+                "Verstehen, denn es gab nichts umzudeuten. Kommt "
                 "`ambiguous_agent_name`, FRAG ZURUECK mit den "
                 "Kandidaten und waehle NICHT selbst."
             ),
@@ -4801,8 +4804,20 @@ async def _tool_agent_status(args: dict, authorization: Optional[str]) -> Any:
     # trifft keinen Agenten.
     #
     # Nur EIN Nachversuch, nur bei exakter Faltung, nie geraten.
+    # Ein UNBEKANNTER Agent liefert `state: "dead"`, nicht etwa nichts.
+    # Die erste Fassung dieser Bedingung fragte `if not any([board,
+    # state, last_reply])` — und `"dead"` ist wahr, also lief die
+    # Aufloesung nie an. Gemessen am 2026-08-12 mit einem echten Aufruf
+    # (`agent="drei D API"` -> `resolved_from: None`); alle Unit-Tests
+    # waren gruen, weil die Doubles dort 500 liefern statt „dead".
+    #
+    # Es zaehlt also nicht „irgendetwas kam zurueck", sondern „etwas
+    # BRAUCHBARES kam zurueck".
+    _brauchbar = bool(board) or bool(last_reply) or (
+        state not in (None, "", "dead", "unknown")
+    )
     resolved_from: Optional[str] = None
-    if not any([board, state, last_reply]):
+    if not _brauchbar:
         # Clouds Endpunkt ZUERST — er kennt Bestand, Zustand und
         # Eigentuemer aller Agenten und entscheidet Gleichstaende
         # danach. Verifiziert 2026-08-12 gegen die Tabelle aus #1037,
@@ -4864,7 +4879,8 @@ async def _tool_agent_status(args: dict, authorization: Optional[str]) -> Any:
                     last_reply, last_reply_at = recent[0]["said"], wann
             age_days = _age_in_days(last_reply_at)
 
-    if not any([board, state, last_reply]):
+    if not (bool(board) or bool(last_reply)
+            or state not in (None, "", "dead", "unknown")):
         return {"ok": False, "agent": agent, "error": "nothing_readable",
                 "hint": "Kein Zustand und keine Antwort lesbar — sag, dass "
                         "du zu diesem Agenten gerade nichts weisst, und "

@@ -148,3 +148,77 @@ def test_umlaute_werden_vor_der_normalisierung_ersetzt():
     assert rr._fold_agent_name("Förderungen") == "foerderungen"
     assert rr._fold_agent_name("Über-Agent") == "ueberagent"
     assert rr._fold_agent_name("Straße") == "strasse"
+
+
+@pytest.mark.asyncio
+async def test_toter_agent_zaehlt_nicht_als_gefunden(monkeypatch):
+    """`state: "dead"` darf die Namensaufloesung nicht verhindern.
+
+    Ein unbekannter Agent liefert von `/agent-state` **200 mit
+    `{"state": "dead"}`** — nicht 404. Die erste Fassung der Bedingung
+    fragte `if not any([board, state, last_reply])`, und `"dead"` ist
+    wahr; die Aufloesung lief deshalb nie an.
+
+    **Alle Unit-Tests waren gruen**, weil die Doubles dort 500 liefern
+    statt „dead". Gefunden hat es erst ein echter Aufruf gegen den
+    ausgelieferten Dienst: `agent="drei D API"` kam mit
+    `resolved_from: None` zurueck, der Name blieb unaufgeloest.
+    """
+    aufgerufen = []
+
+    class _Antwort:
+        def __init__(self, code, payload):
+            self.status_code, self._p = code, payload
+        def json(self):
+            return self._p
+
+    class _Client:
+        def __init__(self, *a, **k): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return False
+        async def get(self, url, headers=None):
+            aufgerufen.append(url)
+            if "/agent-state" in url:
+                # Der gehoerte Name ist tot, der aufgeloeste lebt —
+                # sonst prueft der Fall nur die halbe Kette.
+                return _Antwort(200, {"state": "dead" if "drei" in url else "ready"})
+            if "/api/sessions" in url and "history" not in url:
+                return _Antwort(200, {"sessions": [{"name": "3dApi"}]})
+            return _Antwort(404, {})
+        async def post(self, url, headers=None, json=None):
+            aufgerufen.append(url)
+            return _Antwort(404, {})   # Clouds Endpunkt nicht da -> Rueckfall
+
+    monkeypatch.setattr(rr.httpx, "AsyncClient", _Client)
+    res = await rr._tool_agent_status({"agent": "drei D API"}, "Bearer x")
+
+    assert any("/api/agents/resolve-name" in u for u in aufgerufen), (
+        "Clouds Aufloesung wurde nicht einmal versucht — `state: dead` "
+        "wurde als Treffer gewertet"
+    )
+    assert res.get("resolved_from") == "drei D API", (
+        "Die Umdeutung wird verschwiegen — der Operator hoert einen "
+        "Namen, den er nicht gesagt hat"
+    )
+    assert res.get("agent") == "3dApi"
+
+
+def test_beschreibung_bindet_die_umdeutung_an_einen_wert():
+    """„sag das dazu" allein erzeugte eine Erfindung.
+
+    Gemessen 2026-08-12, P4-2/P4-4: Auf „woran arbeitet 3dApi gerade" —
+    ein exakt richtiger Name — sagte das Modell in 3 von 4 bzw. 4 von 4
+    Laeufen „Ich habe das als 3dApi verstanden", obwohl `resolved_from`
+    im Ergebnis gar nicht vorkam. Es hat eine Umdeutung behauptet, die
+    nie stattfand.
+
+    Die Anweisung muss also die ABWESENHEIT des Feldes genauso klar
+    regeln wie seine Anwesenheit — sonst fuellt das Modell die Luecke.
+    Dieselbe Klasse wie REGEL 5: Ein Hinweis ohne Gegenfall wird zur
+    Gewohnheit.
+    """
+    t = [x for x in rr._arcturian_read_tools() if x["name"] == "agent_status"][0]
+    d = t["description"]
+    assert "resolved_from" in d
+    assert "Fehlt das Feld" in d, "der Gegenfall fehlt"
+    assert "sag NICHTS ueber" in d
