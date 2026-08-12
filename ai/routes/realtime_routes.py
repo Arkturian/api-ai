@@ -4803,7 +4803,34 @@ async def _tool_agent_status(args: dict, authorization: Optional[str]) -> Any:
     # Nur EIN Nachversuch, nur bei exakter Faltung, nie geraten.
     resolved_from: Optional[str] = None
     if not any([board, state, last_reply]):
-        kanonisch, kandidaten = await _resolve_agent_by_fold(agent, base, hdrs)
+        # Clouds Endpunkt ZUERST — er kennt Bestand, Zustand und
+        # Eigentuemer aller Agenten und entscheidet Gleichstaende
+        # danach. Verifiziert 2026-08-12 gegen die Tabelle aus #1037,
+        # 11 von 11: „drei D API" -> 3dApi, „Foerderungen" korrekt
+        # gefaltet, „K I T T" ehrlich `ambiguous`. Er trennt sogar
+        # `3dApi` von `3DApi`, was meine reine Faltung NICHT kann.
+        #
+        # Meine lokale Faltung bleibt nur als Rueckfall, wenn er nicht
+        # antwortet — zwei Implementierungen derselben Heuristik driften
+        # sonst auseinander (#1037).
+        kanonisch, kandidaten = None, []
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                rr_ = await client.post(
+                    f"{base}/api/agents/resolve-name", headers=hdrs,
+                    json={"spoken": agent, "limit": 5, "authorized_only": False},
+                )
+            if rr_.status_code == 200:
+                d = rr_.json() or {}
+                if d.get("decision") == "unique":
+                    kanonisch = ((d.get("match") or {}).get("name")) or None
+                elif d.get("decision") == "ambiguous":
+                    kandidaten = [c.get("name") for c in (d.get("candidates") or [])
+                                  if c.get("name")]
+        except Exception:
+            pass
+        if not kanonisch and not kandidaten:
+            kanonisch, kandidaten = await _resolve_agent_by_fold(agent, base, hdrs)
         if len(kandidaten) > 1:
             # `3DApi` und `3dApi` falten beide auf `3dapi`. Hier wird
             # zurueckgefragt, nicht gewaehlt — ein stiller Fehlgriff
