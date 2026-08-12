@@ -1133,7 +1133,11 @@ def _arcturian_read_tools(name_resolution: bool = False) -> List[dict]:
                 "Arbeit, sag auch das. Erfinde NIE einen Zustand oder "
                 "eine Aussage, die das Ergebnis nicht nennt; steht dort "
                 "nichts Brauchbares, sag genau das — schweigen darfst "
-                "du nicht."
+                "du nicht. Steht `resolved_from` im Ergebnis, hat der "
+                "Server den gehoerten Namen aufgeloest — sag das dazu "
+                "('ich habe das als 3dApi verstanden'). Kommt "
+                "`ambiguous_agent_name`, FRAG ZURUECK mit den "
+                "Kandidaten und waehle NICHT selbst."
             ),
             "parameters": {
                 "type": "object",
@@ -4632,6 +4636,77 @@ READ_TOOL_NAMES = {"knowledge_query", "pois_near", "narration_near", "osm_nearby
                    "agent_status"}
 
 
+# Zahlwoerter aus #1037, deutsch und englisch. Die Faltung muss auf
+# BEIDEN Seiten identisch sein, sonst findet sie nichts — deshalb steht
+# die Tabelle hier vollstaendig statt „sinngemaess".
+_ZAHLWOERTER = {
+    "null": "0", "zero": "0", "eins": "1", "ein": "1", "one": "1",
+    "zwei": "2", "two": "2", "drei": "3", "three": "3", "vier": "4",
+    "four": "4", "fuenf": "5", "five": "5", "sechs": "6", "six": "6",
+    "sieben": "7", "seven": "7", "acht": "8", "eight": "8",
+    "neun": "9", "nine": "9", "zehn": "10", "ten": "10",
+}
+
+
+def _fold_agent_name(name: str) -> str:
+    """Gesprochenen Namen auf die Vergleichsform falten (#1037).
+
+    NFKD, Kleinschreibung, Umlaute ausgeschrieben, Zahlwoerter zu
+    Ziffern, dann alles ausser [a-z0-9] entfernen. „drei D API" wird
+    `3dapi`, „Cloud V zwei" wird `cloudv2`, „S W F M E" wird `swfme`.
+
+    Bewusst NUR Faltung, keine Aehnlichkeit: Jaro-Winkler und Phonetik
+    gehoeren nach cloud-api, wo Bestand, Zustand und Eigentuemer aller
+    ~200 Agenten liegen. Zwei Implementierungen derselben Heuristik
+    driften garantiert auseinander — die exakte Faltung dagegen ist
+    reproduzierbar und laesst sich gegen dieselbe Tabelle pruefen.
+    """
+    import unicodedata
+    # Umlaute ZUERST, dann NFKD. Die Reihenfolge in #1037 ist andersherum
+    # notiert und funktioniert so nicht: NFKD zerlegt „ö" in „o" + ein
+    # kombinierendes Zeichen, und danach findet `.replace("ö","oe")`
+    # nichts mehr. Gemessen 2026-08-12: „Förderungen" faltete auf
+    # `forderungen`, waehrend die Tabelle `foerderungen` verlangt — ein
+    # Unterschied, der genau den Agenten unauffindbar macht, der in der
+    # Tabelle als Beispiel steht.
+    t = (name or "").lower()
+    for a, b in (("ä", "ae"), ("ö", "oe"), ("ü", "ue"), ("ß", "ss")):
+        t = t.replace(a, b)
+    t = unicodedata.normalize("NFKD", t)
+    t = re.sub(r"[^a-z0-9 ]+", " ", t)
+    woerter = [_ZAHLWOERTER.get(w, w) for w in t.split()]
+    return "".join(woerter)
+
+
+async def _resolve_agent_by_fold(
+    gehoert: str, base: str, hdrs: dict
+) -> tuple[Optional[str], List[str]]:
+    """Gefalteten Namen gegen die Sitzungsliste aufloesen.
+
+    Liefert (eindeutiger Name, Kandidaten). Bei mehreren Treffern ist
+    der erste Wert None und die Kandidaten sind gefuellt — dann wird
+    NICHT geraten, sondern zurueckgefragt. `3DApi` und `3dApi`
+    existieren beide und falten auf `3dapi`; genau dafuer ist der Fall
+    da (#1037 nennt `Kitt` / `K.I.T.T.` als dasselbe Muster).
+    """
+    ziel = _fold_agent_name(gehoert)
+    if not ziel:
+        return None, []
+    try:
+        async with httpx.AsyncClient(timeout=6.0) as client:
+            r = await client.get(f"{base}/api/sessions", headers=hdrs)
+        namen = [
+            (x.get("name") or x.get("session_name") or "")
+            for x in ((r.json() or {}).get("sessions") or [])
+        ] if r.status_code == 200 else []
+    except Exception:
+        return None, []
+    treffer = [n for n in namen if n and _fold_agent_name(n) == ziel]
+    if len(treffer) == 1:
+        return treffer[0], treffer
+    return None, treffer
+
+
 async def _tool_agent_status(args: dict, authorization: Optional[str]) -> Any:
     """Agentenzustände lesen — UNTER DER KENNUNG DES AUFRUFERS.
 
@@ -4718,6 +4793,50 @@ async def _tool_agent_status(args: dict, authorization: Optional[str]) -> Any:
     age_days = _age_in_days(last_reply_at)
 
     state = (live or {}).get("state")
+
+    # Nichts gefunden? Dann lag es vielleicht am gehoerten Namen. Alex,
+    # 2026-08-12: „Teilweise durch die Spracherkennung stimmt der Name
+    # nicht ganz und dann checkt er nicht." Er hatte recht — bis hierher
+    # ging der Name unveraendert in drei Abfragen, und „drei D API"
+    # trifft keinen Agenten.
+    #
+    # Nur EIN Nachversuch, nur bei exakter Faltung, nie geraten.
+    resolved_from: Optional[str] = None
+    if not any([board, state, last_reply]):
+        kanonisch, kandidaten = await _resolve_agent_by_fold(agent, base, hdrs)
+        if len(kandidaten) > 1:
+            # `3DApi` und `3dApi` falten beide auf `3dapi`. Hier wird
+            # zurueckgefragt, nicht gewaehlt — ein stiller Fehlgriff
+            # liest den falschen Agenten vor.
+            return {"ok": False, "agent": agent,
+                    "error": "ambiguous_agent_name",
+                    "candidates": kandidaten,
+                    "hint": ("Mehrere Agenten passen auf diesen Namen. FRAG "
+                             "ZURUECK und nenne die Kandidaten, waehle NICHT "
+                             "selbst.")}
+        if kanonisch and kanonisch != agent:
+            resolved_from, agent = agent, kanonisch
+            board, live, hist = await asyncio.gather(
+                _get(f"/api/agents/{agent}/status", 5.0),
+                _get(f"/api/sessions/{agent}/agent-state", 5.0),
+                _get(f"/api/sessions/{agent}/history?limit=5", 8.0),
+            )
+            state = (live or {}).get("state")
+            recent = []
+            last_reply = last_reply_at = None
+            for turn in reversed((hist or {}).get("turns") or []):
+                texts = [(sec.get("content") or "").strip()
+                         for sec in (turn.get("sections") or [])
+                         if sec.get("kind") == "text"]
+                texts = [t for t in texts if t]
+                if not texts:
+                    continue
+                wann = turn.get("ended_at") or turn.get("timestamp")
+                recent.append({"at": wann, "said": _condense_for_speech(texts[-1])})
+                if last_reply is None:
+                    last_reply, last_reply_at = recent[0]["said"], wann
+            age_days = _age_in_days(last_reply_at)
+
     if not any([board, state, last_reply]):
         return {"ok": False, "agent": agent, "error": "nothing_readable",
                 "hint": "Kein Zustand und keine Antwort lesbar — sag, dass "
@@ -4733,6 +4852,11 @@ async def _tool_agent_status(args: dict, authorization: Optional[str]) -> Any:
         "last_reply": last_reply,
         "last_reply_at": last_reply_at,
         "last_reply_age_days": age_days,
+        # Gesetzt, wenn der gehoerte Name nicht traf und ueber die
+        # Faltung aufgeloest wurde. Der Agent SOLL das sagen — „ich habe
+        # das als 3dApi verstanden" ist eine ehrliche Auskunft, ein
+        # stilles Umdeuten waere es nicht.
+        "resolved_from": resolved_from,
         # Bis zu fuenf Zuege, neueste zuerst. `last_reply` bleibt als
         # Bequemlichkeit erhalten, damit CloudV2s Client nichts umbauen
         # muss — es ist immer `recent[0]["said"]`.

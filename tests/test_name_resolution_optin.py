@@ -120,3 +120,31 @@ def test_fokusregel_trennt_name_von_taetigkeit():
     assert "WAS dieser Agent tut" in text
     # Und kein Werkzeugname, sonst greift das Modell im Entscheidungs-Zug.
     assert "agent_status" not in text
+
+
+# ------------------------------------------------------------ Faltung (#1037)
+
+def test_faltung_trifft_die_tabelle_aus_1037():
+    """Beide Seiten muessen identisch falten, sonst findet sie nichts."""
+    faelle = [
+        ("drei D API", "3dapi"), ("3D API", "3dapi"),
+        ("Cloud V zwei", "cloudv2"), ("App Dev V zwei", "appdevv2"),
+        ("Auth API", "authapi"), ("AI API", "aiapi"),
+        ("S W F M E", "swfme"), ("K I T T", "kitt"),
+        ("Förderungen", "foerderungen"),
+    ]
+    for gehoert, erwartet in faelle:
+        assert rr._fold_agent_name(gehoert) == erwartet, gehoert
+
+
+def test_umlaute_werden_vor_der_normalisierung_ersetzt():
+    """Die in #1037 notierte Reihenfolge funktioniert nicht.
+
+    NFKD zerlegt „ö" in „o" + kombinierendes Zeichen; danach findet
+    `.replace("ö","oe")` nichts mehr, und „Förderungen" faltet auf
+    `forderungen` statt `foerderungen`. Ausgerechnet der Agent, der in
+    der Tabelle als Beispiel steht, waere damit unauffindbar.
+    """
+    assert rr._fold_agent_name("Förderungen") == "foerderungen"
+    assert rr._fold_agent_name("Über-Agent") == "ueberagent"
+    assert rr._fold_agent_name("Straße") == "strasse"
