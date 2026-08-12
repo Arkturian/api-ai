@@ -110,5 +110,26 @@
       "sicher, dass"
     ],
     "why": "Die einzige strukturelle Zutat, die CloudV2 in Alexanders Sitzung belegen kann und mein Pruefstand nicht hatte: Der zweite Auftrag entstand, NACHDEM eine zurueckgekehrte Agentenantwort als Kontext-Element eingespielt und gesprochen worden war (23:56:04 senden, 23:56:20 Antwort, 23:56:39 zweiter Auftrag). Vier plausible Erklaerungen sind vorher an Messungen gescheitert; dies ist die fuenfte und die letzte, die ich nachbauen kann."
+  },
+  {
+    "id": "UC-G Namensfrage zum Fokus — darf NICHT nachschlagen",
+    "context": "[ctx · source_agent=Tschepp · context_kind=focus_boundary · focus_epoch=0 · context_segment_id=0]\n[Fokus] Der Operator hat gerade den Agenten „Tschepp\" offen. Spricht er von „dem aktiven Agenten\", „dem hier\", „dem offenen Chat\" oder sagt er gar keinen Namen, ist Tschepp gemeint. Kein Auftrag — nur der Stand.",
+    "say": "kannst du sehen, was der aktive Agent ist?",
+    "expect_decision": "none",
+    "must_not_call": "agent_status",
+    "must_not_say": [
+      "hat bis jetzt",
+      "noch nichts gesagt",
+      "arbeitet gerade an"
+    ],
+    "why": "Alexander im Betrieb, 2026-08-12, vs_Tschepp_154479: Er fragte nach dem NAMEN des aktiven Agenten, bekam die richtige Antwort — und zusaetzlich einen Nachschlag samt Bericht, den er nicht wollte ('dann sagt er, Tschepp hat bis jetzt noch nichts gesagt — das habe ich ihn gar nicht gefragt'). Eine Namensfrage ist aus der Sitzung beantwortbar; sie kostet sonst einen erzwungenen Zug und rund zehn Cent."
+  },
+  {
+    "id": "UC-H Taetigkeitsfrage zum Fokus — MUSS nachschlagen",
+    "context": "[ctx · source_agent=Tschepp · context_kind=focus_boundary · focus_epoch=0 · context_segment_id=0]\n[Fokus] Der Operator hat gerade den Agenten „Tschepp\" offen. Spricht er von „dem aktiven Agenten\", „dem hier\", „dem offenen Chat\" oder sagt er gar keinen Namen, ist Tschepp gemeint. Kein Auftrag — nur der Stand.",
+    "say": "woran arbeitet der gerade?",
+    "expect_decision": "action",
+    "must_call": "agent_status",
+    "why": "Das Gegenstueck zu UC-G, damit die Trennung in beide Richtungen misst. CloudV2 ausdruecklich: Die RICHTUNG des Fehlers ist wichtiger als seine Haeufigkeit — ein gelegentlicher ueberfluessiger Nachschlag ist besser als eine verpasste Statusfrage."
   }
 ]

@@ -74,14 +74,27 @@ CASES = [
         "id": "P4-3 Statusfrage MIT frischem Kontext",
         "context": "Woran deine Agenten gerade arbeiten (Stand: jetzt):\n3dApi: working, thinking\nAppDevV2: working, thinking, Prueflauf laeuft",
         "say": "woran arbeitet 3dApi gerade",
-        "expect": lambda a: a.get("decision") == "none",
+        # 2026-08-12 angepasst: Seit v3 + Lesewerkzeuge entscheidet er
+        # hier 5/5 `query_status` und schlaegt nach, statt den
+        # Schnappschuss vorzulesen. Das ist BESSER — der Schnappschuss
+        # ist eine Momentaufnahme, der Nachschlag ist aktuell. Die alte
+        # Erwartung (`decision == none`) stammt aus der Zeit, als es
+        # keinen Nachschlag gab, und meldete das neue Verhalten als
+        # Fehlschlag.
+        #
+        # Der vierte rote Lauf heute, der ein veralteter Test war und
+        # kein Fehler des Agenten. Der Fall prueft weiterhin das, wofuer
+        # er gebaut wurde: dass er ANTWORTET statt zu navigieren oder zu
+        # vertroesten — auf welchem der beiden Wege, ist ihm freigestellt.
+        "expect": lambda a: (a.get("decision") == "none"
+                             or a.get("kind") == "query_status"),
         "check_text": True,
         # Wortstaemme, nicht Literale: rb-1786299009 wertete 4 von 5
         # korrekten Antworten als Fehlschlag, weil sie "am Arbeiten",
         # "auszuarbeiten" und "nachzudenken" sagten. Der Fehler lag im
-        # Matcher, nicht im Modell — der dritte Fall heute, in dem der
-        # erste rote Lauf ein Fehler im Pruefstand war.
-        "admit": ("arbeit", "denk", "working", "thinking", "ueberleg", "überleg"),
+        # Matcher, nicht im Modell.
+        "admit": ("arbeit", "denk", "working", "thinking", "ueberleg", "überleg",
+                  "import", "laeuft", "läuft", "fertig", "von 7"),
         "why": "Mit Schnappschuss soll er antworten statt zu navigieren oder zu vertroesten.",
     },
     {
@@ -197,6 +210,19 @@ def _load_extra_cases():
         # Haekchen, gegen das dieser Pruefstand gebaut wurde.
         if c.get("must_call"):
             case["must_call"] = c["must_call"]
+            # Ohne gesprochenen Zug gibt es keinen Werkzeugaufruf zu
+            # zaehlen — die Pflicht waere still wirkungslos. UC-H meldete
+            # so 8/8, ohne den Nachschlag je geprueft zu haben
+            # (2026-08-12). Ein Kriterium, das nur unter einer Bedingung
+            # greift, die der Fall nicht setzt, ist ein gruener Haken
+            # ohne Deckung.
+            case["check_text"] = True
+        # Gegenstueck: Ein Werkzeug, das NICHT gerufen werden darf. Ein
+        # ueberfluessiger Nachschlag kostet einen Zug, Geld und sagt dem
+        # Operator mehr als er gefragt hat (CloudV2, 2026-08-12).
+        if c.get("must_not_call"):
+            case["must_not_call"] = c["must_not_call"]
+            case["check_text"] = True
         if c.get("must_say") or forbid:
             case["check_text"] = True
             case["admit"] = tuple(w.lower() for w in (c.get("must_say") or ()))
@@ -465,6 +491,9 @@ async def main():
                 spoken_log.append(r.get("spoken", "").strip()[:180] or "(kein Text)")
                 gerufen = [t["name"] for t in (r.get("tool_calls") or [])]
                 tool_log.extend(gerufen)
+                if c.get("must_not_call") and c["must_not_call"] in gerufen:
+                    passed = False
+                    notes.append(f"ueberfluessiger Nachschlag ({c['must_not_call']})")
                 if c.get("must_call") and c["must_call"] not in gerufen:
                     passed = False
                     notes.append(f"nicht nachgeschlagen ({c['must_call']} nie gerufen)")
