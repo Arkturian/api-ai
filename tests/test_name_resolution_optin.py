@@ -94,3 +94,29 @@ def test_persona_regel_nennt_kein_werkzeug():
     assert "Rate nicht" in text
     assert "resolve_agent_name" not in text
     assert "agent_status" not in text
+
+
+def test_fokusregel_trennt_name_von_taetigkeit():
+    """Gemessen 2026-08-12: 4/8 auf 8/8, ohne die Gegenrichtung zu brechen.
+
+    Anlass war Alexanders Sitzung `vs_Tschepp_154479`: Er fragte nach
+    dem NAMEN des aktiven Agenten, bekam die richtige Antwort — und
+    zusaetzlich einen Nachschlag samt Bericht, den er nicht wollte.
+    Ein erzwungener Zug und rund zehn Cent fuer eine Frage, die aus der
+    Sitzung beantwortbar war.
+
+    | Fall | live | mit Regel |
+    |---|---|---|
+    | UC-G Namensfrage (darf NICHT nachschlagen) | 4/8 | 8/8 |
+    | UC-H Taetigkeitsfrage (MUSS nachschlagen)  | 8/8 | 8/8 |
+
+    Und ohne Rueckschritt auf UC-A, UC-B, P0-3, P4-1.
+    """
+    text = rr._companion_arcturian_prompt("de")
+    assert "NAME ODER TAETIGKEIT" in text
+    # Beide Richtungen muessen benannt sein — eine Regel, die nur das
+    # Unterlassen kennt, verschiebt den Fehler auf die andere Seite.
+    assert "WER gerade offen ist" in text
+    assert "WAS dieser Agent tut" in text
+    # Und kein Werkzeugname, sonst greift das Modell im Entscheidungs-Zug.
+    assert "agent_status" not in text
