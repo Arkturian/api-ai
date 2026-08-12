@@ -220,6 +220,14 @@ def _load_extra_cases():
         # Gegenstueck: Ein Werkzeug, das NICHT gerufen werden darf. Ein
         # ueberfluessiger Nachschlag kostet einen Zug, Geld und sagt dem
         # Operator mehr als er gefragt hat (CloudV2, 2026-08-12).
+        # Der Werkzeug-Modus gehoert IN den Fall, nicht in eine
+        # Umgebungsvariable, die der Aufrufer kennen muss. UC-C mass am
+        # 2026-08-12 in einem Sammellauf das Falsche und meldete 0/6 —
+        # der Fehlerfall war schlicht nicht eingeschaltet. Ein Fall, der
+        # ohne ein Zutun von aussen etwas anderes prueft als er
+        # behauptet, ist eine Falle mit Wiederholungsgarantie.
+        if c.get("tool_result"):
+            case["tool_result"] = c["tool_result"]
         if c.get("must_not_call"):
             case["must_not_call"] = c["must_not_call"]
             case["check_text"] = True
@@ -248,7 +256,7 @@ def _variants():
     return out
 
 
-def _bench_tool_result(name: str, raw_args: str) -> dict:
+def _bench_tool_result(name: str, raw_args: str, modus: str = "ok") -> dict:
     """Feste Werkzeug-Antwort — bewusst erfunden, bewusst realistisch.
 
     Der echte Aufruf gegen cloud-api wuerde die Messung an den
@@ -266,7 +274,7 @@ def _bench_tool_result(name: str, raw_args: str) -> dict:
         agent = ""
     if name != "agent_status":
         return {"ok": False, "error": "unbekanntes Werkzeug im Pruefstand"}
-    if os.getenv("BENCH_TOOL_THIN"):
+    if modus == "thin" or os.getenv("BENCH_TOOL_THIN"):
         # Der Fall, an dem Alexander am 2026-08-12 nichts hoerte: Das
         # Werkzeug antwortete formal korrekt, inhaltlich aber wertlos —
         # der juengste Eintrag fuenf Tage alt und eine Systemzustellung,
@@ -281,7 +289,7 @@ def _bench_tool_result(name: str, raw_args: str) -> dict:
             "recent": [{"at": "2026-08-07T09:14:00Z",
                         "said": "[IACP:0188b153:Tschepp] Ergebnis wie versprochen."}],
         }
-    if os.getenv("BENCH_TOOL_FAILS"):
+    if modus == "fails" or os.getenv("BENCH_TOOL_FAILS"):
         # Exakt die Form, die `_tool_agent_status` im Betrieb liefert,
         # wenn keine der drei Quellen lesbar ist. CloudV2 garantiert
         # clientseitig, DASS dann gesprochen wird — WAS gesprochen wird,
@@ -424,7 +432,8 @@ async def one(key, case, variant=None):
                         "type": "conversation.item.create",
                         "item": {"type": "function_call_output",
                                  "call_id": call_id,
-                                 "output": json.dumps(_bench_tool_result(fn_name, fn_args))},
+                                 "output": json.dumps(_bench_tool_result(
+                                     fn_name, fn_args, case.get("tool_result", "ok")))},
                     }))
                     call_id = fn_name = None
                     await ws.send(json.dumps(_arcturian_primary_audio_payload(read)))

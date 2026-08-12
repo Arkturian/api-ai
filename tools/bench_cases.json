@@ -52,7 +52,8 @@
       "schaue nach",
       "melde mich"
     ],
-    "why": "CloudV2 garantiert, DASS gesprochen wird, wenn der Nachschlag scheitert. WAS gesprochen wird, ist meine Seite: zugeben statt erfinden, und nicht auf 'einen Moment' zurueckfallen — sonst ist Alexanders Problem nur verschoben."
+    "why": "CloudV2 garantiert, DASS gesprochen wird, wenn der Nachschlag scheitert. WAS gesprochen wird, ist meine Seite: zugeben statt erfinden, und nicht auf 'einen Moment' zurueckfallen — sonst ist Alexanders Problem nur verschoben.",
+    "tool_result": "fails"
   },
   {
     "id": "UC-D vollstaendiger Name neben laengerem Verwandten",
@@ -154,6 +155,7 @@
       "arbeitet gerade an",
       "laeuft gerade"
     ],
-    "why": "Alexander, 2026-08-12, 08:35:47: Klassifikation stimmte, Nachschlag lief mit HTTP 200 — und er bekam gar keine Antwort ('er hat nicht geantwortet, das war's'). Das Werkzeug lieferte formal etwas, inhaltlich nichts: juengster Eintrag fuenf Tage alt und eine IACP-Zustellung statt Arbeit. `nothing_readable` greift hier nicht, denn lesbar WAR es. Gemessen wird, ob er das Alter benennt statt zu verstummen."
+    "why": "Alexander, 2026-08-12, 08:35:47: Klassifikation stimmte, Nachschlag lief mit HTTP 200 — und er bekam gar keine Antwort ('er hat nicht geantwortet, das war's'). Das Werkzeug lieferte formal etwas, inhaltlich nichts: juengster Eintrag fuenf Tage alt und eine IACP-Zustellung statt Arbeit. `nothing_readable` greift hier nicht, denn lesbar WAR es. Gemessen wird, ob er das Alter benennt statt zu verstummen.",
+    "tool_result": "thin"
   }
 ]
