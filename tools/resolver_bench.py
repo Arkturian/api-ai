@@ -121,7 +121,14 @@ CASES = [
         "check_text": True,
         "admit": ("zehn minuten", "aelter", "älter", "nicht mehr aktuell",
                   "veraltet", "alter stand", "aeltere", "ältere",
-                  "tag alt", "tage alt"),
+                  # „gestern" fehlte und machte 4 richtige Antworten rot —
+                  # das FUENFTE Mal an einem Tag, dass ein roter Lauf am
+                  # Matcher lag. Meine eigene Notiz sagt „Wortstaemme,
+                  # nicht Literale", und ich habe wieder Literale
+                  # gesammelt. Zeitangaben sind besonders anfaellig: Es
+                  # gibt beliebig viele wahre Arten, „alt" zu sagen.
+                  "tag alt", "tage alt", "gestern", "vorgestern",
+                  "letzte woche", "nicht von heute"),
         "why": "Vertragszeile 7 in der Praxis: Veraltetes wird gesagt, nicht ueberspielt.",
     },
     {
