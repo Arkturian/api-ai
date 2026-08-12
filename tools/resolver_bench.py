@@ -266,6 +266,21 @@ def _bench_tool_result(name: str, raw_args: str) -> dict:
         agent = ""
     if name != "agent_status":
         return {"ok": False, "error": "unbekanntes Werkzeug im Pruefstand"}
+    if os.getenv("BENCH_TOOL_THIN"):
+        # Der Fall, an dem Alexander am 2026-08-12 nichts hoerte: Das
+        # Werkzeug antwortete formal korrekt, inhaltlich aber wertlos —
+        # der juengste Eintrag fuenf Tage alt und eine Systemzustellung,
+        # kein Arbeitsergebnis. `nothing_readable` greift hier NICHT,
+        # denn lesbar war es ja.
+        return {
+            "ok": True, "scope": "one", "agent": agent or "CHAP2",
+            "state": "ready", "board": None,
+            "last_reply": "[IACP:0188b153:Tschepp] Ergebnis wie versprochen.",
+            "last_reply_at": "2026-08-07T09:14:00Z",
+            "last_reply_age_days": 5,
+            "recent": [{"at": "2026-08-07T09:14:00Z",
+                        "said": "[IACP:0188b153:Tschepp] Ergebnis wie versprochen."}],
+        }
     if os.getenv("BENCH_TOOL_FAILS"):
         # Exakt die Form, die `_tool_agent_status` im Betrieb liefert,
         # wenn keine der drei Quellen lesbar ist. CloudV2 garantiert

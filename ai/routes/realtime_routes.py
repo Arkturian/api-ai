@@ -1123,9 +1123,17 @@ def _arcturian_read_tools(name_resolution: bool = False) -> List[dict]:
                 "gesagt hat. Antworte danach in EINEM Satz aus "
                 "`last_reply`, denn das ist der Inhalt, den er hoeren "
                 "will — `state` allein ('ready', 'thinking') ist keine "
-                "Auskunft. Erfinde NIE einen Zustand oder eine Aussage, "
-                "die das Ergebnis nicht nennt; steht dort nichts, sag "
-                "genau das."
+                "Auskunft. `recent` traegt bis zu fuenf Zuege, neueste "
+                "zuerst, wenn EIN Satz die Frage nicht traegt. "
+                "PRUEFE `last_reply_age_days`: Ist der juengste Eintrag "
+                "aelter als einen Tag, SAG DAS ('das Letzte von ihm ist "
+                "fuenf Tage alt'). Ein alter Stand als frischer "
+                "ausgegeben ist schlimmer als keine Auskunft. Sieht das "
+                "Ergebnis nach einer Systemzustellung aus statt nach "
+                "Arbeit, sag auch das. Erfinde NIE einen Zustand oder "
+                "eine Aussage, die das Ergebnis nicht nennt; steht dort "
+                "nichts Brauchbares, sag genau das — schweigen darfst "
+                "du nicht."
             ),
             "parameters": {
                 "type": "object",
@@ -4679,23 +4687,35 @@ async def _tool_agent_status(args: dict, authorization: Optional[str]) -> Any:
     board, live, hist = await asyncio.gather(
         _get(f"/api/agents/{agent}/status", 5.0),
         _get(f"/api/sessions/{agent}/agent-state", 5.0),
-        _get(f"/api/sessions/{agent}/history?limit=1", 6.0),
+        # Fuenf statt einem Zug: Ein einzelner letzter Zug ist zu wenig
+        # fuer „was hat er gemacht" — und wenn dieser Zug zufaellig eine
+        # Systemzustellung war, ist er schlechter als nichts. Alexander
+        # am 2026-08-12 zu CHAP: Werkzeug lief, Antwort blieb aus.
+        _get(f"/api/sessions/{agent}/history?limit=5", 8.0),
     )
 
     last_reply: Optional[str] = None
     last_reply_at: Optional[str] = None
+    recent: List[dict] = []
     turns = (hist or {}).get("turns") or []
-    if turns:
-        turn = turns[-1]
-        last_reply_at = turn.get("ended_at") or turn.get("timestamp")
+    for turn in reversed(turns):  # neueste zuerst
         texts = [
-            (s.get("content") or "").strip()
-            for s in (turn.get("sections") or [])
-            if s.get("kind") == "text"
+            (sec.get("content") or "").strip()
+            for sec in (turn.get("sections") or [])
+            if sec.get("kind") == "text"
         ]
         texts = [t for t in texts if t]
-        if texts:
-            last_reply = _condense_for_speech(texts[-1])
+        if not texts:
+            continue
+        wann = turn.get("ended_at") or turn.get("timestamp")
+        recent.append({"at": wann, "said": _condense_for_speech(texts[-1])})
+        if last_reply is None:
+            last_reply, last_reply_at = recent[0]["said"], wann
+
+    # Das ALTER ist der Teil, der die Ehrlichkeit ueberhaupt erst
+    # moeglich macht: Ohne es kann er „das Letzte ist fuenf Tage alt"
+    # nicht sagen und schweigt stattdessen.
+    age_days = _age_in_days(last_reply_at)
 
     state = (live or {}).get("state")
     if not any([board, state, last_reply]):
@@ -4712,7 +4732,32 @@ async def _tool_agent_status(args: dict, authorization: Optional[str]) -> Any:
         "board": board,
         "last_reply": last_reply,
         "last_reply_at": last_reply_at,
+        "last_reply_age_days": age_days,
+        # Bis zu fuenf Zuege, neueste zuerst. `last_reply` bleibt als
+        # Bequemlichkeit erhalten, damit CloudV2s Client nichts umbauen
+        # muss — es ist immer `recent[0]["said"]`.
+        "recent": recent,
     }
+
+
+def _age_in_days(stamp: Optional[str]) -> Optional[int]:
+    """Alter eines ISO-Zeitstempels in ganzen Tagen, oder None.
+
+    Bewusst grob: Der Agent soll „vor fuenf Tagen" sagen koennen, nicht
+    „vor 4 Tagen, 18 Stunden und 12 Minuten". Eine Genauigkeit, die
+    niemand hoert, ist nur eine weitere Stelle, an der etwas falsch
+    sein kann.
+    """
+    if not stamp:
+        return None
+    try:
+        from datetime import datetime, timezone
+        t = datetime.fromisoformat(str(stamp).replace("Z", "+00:00"))
+        if t.tzinfo is None:
+            t = t.replace(tzinfo=timezone.utc)
+        return max(0, (datetime.now(timezone.utc) - t).days)
+    except Exception:
+        return None
 
 
 _SPEECH_MAX_CHARS = 700

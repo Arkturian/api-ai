@@ -131,5 +131,29 @@
     "expect_decision": "action",
     "must_call": "agent_status",
     "why": "Das Gegenstueck zu UC-G, damit die Trennung in beide Richtungen misst. CloudV2 ausdruecklich: Die RICHTUNG des Fehlers ist wichtiger als seine Haeufigkeit — ein gelegentlicher ueberfluessiger Nachschlag ist besser als eine verpasste Statusfrage."
+  },
+  {
+    "id": "UC-I magere und alte Antwort — sagt er das Alter",
+    "say": "was genau hat der Agent CHAP gemacht, was war das Letzte?",
+    "must_call": "agent_status",
+    "must_say": [
+      "tag",
+      "alt",
+      "august",
+      "07.08",
+      "lange",
+      "nichts gearbeitet",
+      "keine arbeit",
+      "zustellung",
+      "nachricht"
+    ],
+    "must_not_say": [
+      "einen moment",
+      "kuemmere mich",
+      "kümmere mich",
+      "arbeitet gerade an",
+      "laeuft gerade"
+    ],
+    "why": "Alexander, 2026-08-12, 08:35:47: Klassifikation stimmte, Nachschlag lief mit HTTP 200 — und er bekam gar keine Antwort ('er hat nicht geantwortet, das war's'). Das Werkzeug lieferte formal etwas, inhaltlich nichts: juengster Eintrag fuenf Tage alt und eine IACP-Zustellung statt Arbeit. `nothing_readable` greift hier nicht, denn lesbar WAR es. Gemessen wird, ob er das Alter benennt statt zu verstummen."
   }
 ]
