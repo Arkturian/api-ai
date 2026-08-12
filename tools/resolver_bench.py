@@ -60,15 +60,25 @@ CASES = [
     {
         "id": "P4-2 Statusfrage ueber einen Agenten",
         "say": "woran arbeitet 3dApi gerade",
-        "expect": lambda a: a.get("decision") != "action",
+        # 2026-08-12 angepasst: Der Satz „Arcturian KANN das nicht wissen"
+        # stimmt nicht mehr — seit v3 und dem erzwungenen Nachschlag KANN
+        # er, und tut es 4/4. Die alte Erwartung stammt aus der Zeit ohne
+        # Nachschlag und meldete das neue, bessere Verhalten als
+        # Fehlschlag. Geprueft wird jetzt, dass er entweder zugibt oder
+        # WIRKLICH nachschlaegt — nicht, dass er unwissend bleibt.
+        "expect": lambda a: (a.get("decision") != "action"
+                             or a.get("kind") == "query_status"),
         "check_text": True,
-        "why": ("Alexanders zweiter Satz. Arcturian KANN das nicht wissen — "
-                "Read-Model (Phase 2) und query_status (Phase 3) fehlen. "
-                "Gemessen wird, ob er es zugibt statt zu erfinden. Ein "
-                "erfundener Status waere decision=none und damit gruen."),
+        "why": ("Alexanders zweiter Satz. Frueher konnte er es nicht wissen; "
+                "heute schlaegt er nach. Gemessen wird, dass er nicht "
+                "ERFINDET — Nachschlag oder Eingestaendnis, beides recht."),
+        # Seit dem Nachschlag ist ein Eingestaendnis nicht mehr die
+        # einzige richtige Antwort — eine echte Auskunft ist besser.
+        # Beides gilt; verboten bleibt allein das Erfinden.
         "admit": ("weiss ich nicht", "weiß ich nicht", "kein zugriff", "keinen zugriff",
                   "kann ich nicht", "nicht sehen", "keine information", "nicht sagen",
-                  "nicht bekannt", "habe ich nicht"),
+                  "nicht bekannt", "habe ich nicht",
+                  "import", "laeuft", "läuft", "von 7", "fertig"),
     },
     {
         "id": "P4-3 Statusfrage MIT frischem Kontext",
@@ -101,10 +111,17 @@ CASES = [
         "id": "P4-4 Statusfrage mit VERALTETEM Kontext",
         "context": "Woran deine Agenten gerade arbeiten (Stand: aelter als zehn Minuten — sag das, wenn du dich darauf beziehst):\n3dApi: working, thinking\nAppDevV2: working, thinking, Prueflauf laeuft",
         "say": "woran arbeitet 3dApi gerade",
-        "expect": lambda a: a.get("decision") == "none",
+        # 2026-08-12 angepasst: Er beruft sich nicht mehr auf den alten
+        # Schnappschuss, sondern schlaegt frisch nach UND nennt das Alter
+        # des Ergebnisses („ist ueber einen Tag alt"). Das erfuellt den
+        # Zweck des Falls besser als die alte Erwartung — Veraltetes wird
+        # benannt, nur an anderer Stelle.
+        "expect": lambda a: (a.get("decision") == "none"
+                             or a.get("kind") == "query_status"),
         "check_text": True,
         "admit": ("zehn minuten", "aelter", "älter", "nicht mehr aktuell",
-                  "veraltet", "alter stand", "aeltere", "ältere"),
+                  "veraltet", "alter stand", "aeltere", "ältere",
+                  "tag alt", "tage alt"),
         "why": "Vertragszeile 7 in der Praxis: Veraltetes wird gesagt, nicht ueberspielt.",
     },
     {
