@@ -78,11 +78,38 @@ async def _log_auth_presence(request, call_next):
             if not (hat_bearer or hat_key):
                 # Nur den anonymen Fall protokollieren — der belegte ist
                 # der Normalfall und wuerde das Journal fluten.
+                ua = (request.headers.get("user-agent") or "?")[:80]
+                # Zusatzkopfzeilen NUR fuer den einen unidentifizierten
+                # Aufrufer (#1184): `axios/1.13.5` ruft /ai/claude, und
+                # weder sein Prozess noch sein Quelltext liess sich
+                # zuordnen — die Kandidaten laufen als root, Cloud hat
+                # meine Vermutung widerlegt. Vielleicht verraet ihn eine
+                # eigene Kopfzeile.
+                #
+                # Maskiert wird nach dem Muster aus der Betriebsregel:
+                # zwischen ':' und '@' (URL-Form) UND klassische
+                # Zuweisungen. Diese Aufrufe sind per Definition
+                # anmeldungsfrei, aber „anonym" heisst nicht „harmlos" —
+                # ein Sitzungskennzeichen in einer Kopfzeile gehoert
+                # nicht ungefiltert ins Journal.
+                extra = ""
+                if "axios" in ua:
+                    import re as _re
+                    teile = []
+                    for k, v in request.headers.items():
+                        if k.lower() in ("user-agent", "accept", "connection",
+                                         "host", "content-length"):
+                            continue
+                        v = _re.sub(r":[^:@]*@", ":***@", str(v))
+                        if _re.search(r"(key|token|secret|auth|cookie)", k, _re.I):
+                            v = "***"
+                        teile.append(f"{k}={v[:60]}")
+                    extra = " kopfzeilen[" + " ".join(teile[:8]) + "]"
                 logging.getLogger("api-ai.authwatch").warning(
-                    "ANONYM path=%s client=%s ua=%s (#1184 — nicht abgewiesen)",
+                    "ANONYM path=%s client=%s ua=%s%s (#1184 — nicht abgewiesen)",
                     pfad,
                     (request.client.host if request.client else "?"),
-                    (request.headers.get("user-agent") or "?")[:80],
+                    ua, extra,
                 )
     except Exception:
         # Eine Messung darf den Dienst nie stoeren.
