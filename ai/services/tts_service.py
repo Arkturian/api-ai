@@ -457,6 +457,13 @@ class GeminiTTSConfig(BaseModel):
 
 class ElevenLabsTTSConfig(BaseModel):
     model_id: str = Field("eleven_multilingual_v2", description="The model to use, e.g., 'eleven_multilingual_v2'")
+    language_code: Optional[str] = Field(
+        None,
+        description=("ISO-Code, der die Sprache ERZWINGT (z.B. 'sl'). "
+                     "None = wie bisher, das Modell detektiert selbst. "
+                     "Wirkt nur mit Modellen, die den Parameter kennen "
+                     "(turbo_v2_5 / flash_v2_5), nicht mit multilingual_v2."),
+    )
     voice_id: str = Field("JBFqnCBsd6RMkjVDRZzb", description="The ID of the voice to use")
     stability: float = Field(0.5, ge=0.0, le=1.0, description="Voice stability, from 0.0 to 1.0")
     clarity: float = Field(0.75, ge=0.0, le=1.0, description="Voice clarity/similarity, from 0.0 to 1.0")
@@ -544,11 +551,17 @@ async def generate_elevenlabs_tts(text: str, config: ElevenLabsTTSConfig, with_t
                     resp = await http.post(
                         f"https://api.elevenlabs.io/v1/text-to-speech/{config.voice_id}/with-timestamps",
                         headers={"xi-api-key": api_key, "Content-Type": "application/json"},
-                        json={
+                        json={k: v for k, v in {
                             "text": chunk_text_str,
                             "model_id": config.model_id,
-                            "voice_settings": {"stability": config.stability, "similarity_boost": config.clarity}
-                        }
+                            "voice_settings": {"stability": config.stability,
+                                               "similarity_boost": config.clarity},
+                            # Nur wenn gesetzt — siehe narration_service:
+                            # dieselbe Luecke, dieselbe Begruendung. Ein
+                            # stiller Zwang wuerde den Klang bestehender
+                            # Bestaende aendern.
+                            "language_code": config.language_code,
+                        }.items() if v is not None}
                     )
                     resp.raise_for_status()
                     data = resp.json()
@@ -597,12 +610,16 @@ async def generate_elevenlabs_tts(text: str, config: ElevenLabsTTSConfig, with_t
                 except ModuleNotFoundError as e:
                     raise RuntimeError("ElevenLabs support requires the 'elevenlabs' package.") from e
                 client = AsyncElevenLabs(api_key=api_key)
-                audio_stream = client.text_to_speech.convert(
-                    text=chunk_text_str,
-                    voice_id=config.voice_id,
-                    model_id=config.model_id,
-                    voice_settings={"stability": config.stability, "similarity_boost": config.clarity}
-                )
+                _args = {
+                    "text": chunk_text_str,
+                    "voice_id": config.voice_id,
+                    "model_id": config.model_id,
+                    "voice_settings": {"stability": config.stability,
+                                       "similarity_boost": config.clarity},
+                }
+                if config.language_code:
+                    _args["language_code"] = config.language_code
+                audio_stream = client.text_to_speech.convert(**_args)
                 chunk_audio = b""
                 async for audio_chunk in audio_stream:
                     chunk_audio += audio_chunk
