@@ -52,6 +52,44 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# ---------------------------------------------------------------- #1184
+# NUR MESSEN, NICHTS ABWEISEN.
+#
+# Befund vom 2026-08-17: Text- und Medien-Endpunkte sind ohne jede
+# Anmeldung aus dem Internet erreichbar — `get_api_key()` ist ein
+# Platzhalter, und der nginx davor prueft nichts.
+#
+# Einen Schluesselzwang einzuschalten braeche jeden bestehenden
+# Aufrufer auf einen Schlag (guide-api, automation-api, knowledge-api,
+# swfme, die MCP-Werkzeuge). Deshalb ZUERST die Frage beantworten, die
+# die Entscheidung ueberhaupt erst treffbar macht: **Wer ruft heute
+# ohne Schluessel?**
+#
+# Diese Middleware weist NICHTS ab und aendert KEINE Antwort. Sie
+# schreibt eine Zeile, damit die Migration auf Zahlen steht statt auf
+# Vermutungen. Der Zwang kommt spaeter und ist Alexanders Entscheidung.
+@app.middleware("http")
+async def _log_auth_presence(request, call_next):
+    try:
+        pfad = request.url.path
+        if pfad.startswith("/ai/") and request.method == "POST":
+            hat_bearer = bool(request.headers.get("authorization"))
+            hat_key = bool(request.headers.get("x-api-key"))
+            if not (hat_bearer or hat_key):
+                # Nur den anonymen Fall protokollieren — der belegte ist
+                # der Normalfall und wuerde das Journal fluten.
+                logging.getLogger("api-ai.authwatch").warning(
+                    "ANONYM path=%s client=%s ua=%s (#1184 — nicht abgewiesen)",
+                    pfad,
+                    (request.client.host if request.client else "?"),
+                    (request.headers.get("user-agent") or "?")[:80],
+                )
+    except Exception:
+        # Eine Messung darf den Dienst nie stoeren.
+        pass
+    return await call_next(request)
+
+
 # Include routers
 app.include_router(text_ai_routes.router, prefix="/ai", tags=["Text AI"])
 app.include_router(image_ai_routes.router, prefix="/ai", tags=["Image AI"])
