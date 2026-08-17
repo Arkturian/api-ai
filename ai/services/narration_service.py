@@ -58,6 +58,14 @@ class NarrationConfig(BaseModel):
     stability: float = Field(default=0.3, description="ElevenLabs stability (lower = more expressive)")
     clarity: float = Field(default=0.75, description="ElevenLabs similarity boost")
     model_id: str = Field(default="eleven_multilingual_v2", description="ElevenLabs model")
+    language_code: Optional[str] = Field(
+        default=None,
+        description=(
+            "ISO-Sprachcode, der die Sprache bei ElevenLabs ERZWINGT "
+            "(z.B. 'sl'). Standard None = wie bisher, das Modell "
+            "detektiert selbst."
+        ),
+    )
     speed: float = Field(default=1.0, description="Speaking speed")
     preprocessing: bool = Field(default=True, description="Enable AI dramatic preprocessing")
     output_format: str = Field(default="mp3", description="Audio format")
@@ -224,15 +232,32 @@ class NarrationService:
 
         client = AsyncElevenLabs(api_key=os.getenv("ELEVENLABS_API_KEY"))
 
-        audio_stream = client.text_to_speech.convert(
-            text=text,
-            voice_id=request.character.voice_id,
-            model_id=request.config.model_id,
-            voice_settings={
+        # `language_code` NUR, wenn der Aufrufer ihn ausdruecklich setzt.
+        #
+        # Nicht automatisch aus `context.language` ableiten, obwohl es
+        # naheliegt: Der Zwang wirkt nur mit den neueren Modellen, und
+        # ein stiller Modellwechsel wuerde den KLANG des bestehenden
+        # Bestands aendern — mitten in einer laufenden Vertonung. Alex'
+        # ~70 slowenische Toene sind mit dem heutigen Klang aufgenommen;
+        # wer sie neu erzeugt, soll das entscheiden, nicht erleiden.
+        #
+        # Hintergrund (Knowledge, 2026-08-16): Alexanders slowenische
+        # Aufnahmen klingen kroatisch. `context.language='sl'` kommt bis
+        # zu dieser Funktion — und wurde hier bisher fallen gelassen.
+        # `eleven_multilingual_v2` kennt ohnehin keinen `language_code`
+        # und raet die Sprache aus dem Text; bei SL-Text liegt HR nahe.
+        _tts_args = {
+            "text": text,
+            "voice_id": request.character.voice_id,
+            "model_id": request.config.model_id,
+            "voice_settings": {
                 "stability": request.config.stability,
                 "similarity_boost": request.config.clarity,
-            }
-        )
+            },
+        }
+        if request.config.language_code:
+            _tts_args["language_code"] = request.config.language_code
+        audio_stream = client.text_to_speech.convert(**_tts_args)
 
         audio_bytes = b""
         async for chunk in audio_stream:
