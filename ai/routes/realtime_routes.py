@@ -3886,9 +3886,17 @@ async def mint_realtime_token(
             "realtime mint deny code=%s detail=%s",
             exc.error_code, exc.audit_detail,
         )
+        # `public_fields` gehen MIT auf die Leitung: Fenster, Zahlen und
+        # Reset-Zeitpunkt. Ohne sie kann ein Portal nur den Fehlercode
+        # uebersetzen — und der heisst „daily", auch wenn das Fenster
+        # monatlich ist. Genau daran hat Alexander fuenf Tage lang
+        # geglaubt, es sei morgen wieder da (2026-08-18).
+        #
+        # `audit_detail` bleibt draussen: Profil und Rohwerte gehoeren
+        # ins Protokoll, nicht in eine Antwort an den Browser.
         raise HTTPException(
             status_code=exc.status_code,
-            detail={"error": exc.error_code},
+            detail={"error": exc.error_code, **(exc.public_fields or {})},
         ) from exc
     logger.info(
         "realtime mint: profile=%s tenant=%s vid=%s budget=%.2f max_parallel=%d",
