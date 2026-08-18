@@ -21,6 +21,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
+import hmac
 import logging
 import os
 
@@ -68,6 +69,72 @@ app.add_middleware(
 # Diese Middleware weist NICHTS ab und aendert KEINE Antwort. Sie
 # schreibt eine Zeile, damit die Migration auf Zahlen steht statt auf
 # Vermutungen. Der Zwang kommt spaeter und ist Alexanders Entscheidung.
+# ---------------------------------------------------------------- #1184
+# ZUGANGSSPERRE — Alexanders Entscheidung vom 2026-08-18.
+#
+# Statischer `X-API-KEY`. Wer ihn nicht traegt, kommt nicht durch.
+# Legitime Traeger: die MCP-Server, KIs die Alexander den Schluessel
+# direkt gibt, und das admin-Dashboard.
+#
+# ZWEI Dinge, die hier bewusst so sind:
+#
+# 1. **Ohne gesetzten Schluessel wird NICHT gesperrt.** Sonst waere der
+#    Dienst in der Sekunde des Ausrollens tot — bevor irgendein
+#    Aufrufer den Schluessel hat. Der Start warnt dann laut. Scharf
+#    wird es, sobald `API_ACCESS_KEY` je Host gesetzt ist; das ist ein
+#    Konfigurationsschritt, kein Deploy.
+#
+# 2. **Der GCP-Budget-Webhook ist ausgenommen.** Google kann keinen
+#    Schluessel von uns tragen. Gemessen am 2026-08-18: 30 Aufrufe in
+#    sieben Tagen, zuletzt 08:58 — er feuert, die Ausnahme ist NICHT
+#    gegenstandslos. Wuerde er gesperrt, verstummten die
+#    Kostenwarnungen, die es nur gibt, weil im Mai 209,56 EUR
+#    unbemerkt abflossen.
+_API_KEY_ENV = "API_ACCESS_KEY"
+_KEY_HEADER = "x-api-key"
+# Pfade, die per Bauart keinen Schluessel tragen koennen.
+_OFFENE_PFADE = ("/ai/gemini/gcp-budget-webhook",)
+
+if not os.getenv(_API_KEY_ENV):
+    # Laut, nicht still: Eine Sperre, die mangels Konfiguration nicht
+    # greift, ist genau die Art Luecke, die man fuer geschlossen haelt.
+    logging.getLogger("api-ai.authwatch").warning(
+        "%s ist NICHT gesetzt — die Zugangssperre (#1184) ist AUS, "
+        "alle /ai/*-Endpunkte sind offen erreichbar. Schluessel setzen, "
+        "um sie scharf zu schalten.", _API_KEY_ENV,
+    )
+
+
+@app.middleware("http")
+async def _require_api_key(request, call_next):
+    erwartet = os.getenv(_API_KEY_ENV)
+    if not erwartet:
+        return await call_next(request)
+    pfad = request.url.path
+    if not pfad.startswith("/ai/") or pfad in _OFFENE_PFADE:
+        return await call_next(request)
+    geliefert = request.headers.get(_KEY_HEADER) or ""
+    # `compare_digest` statt `==`: gleiche Laufzeit unabhaengig davon,
+    # an welcher Stelle zwei Schluessel sich unterscheiden.
+    if not (geliefert and hmac.compare_digest(geliefert, erwartet)):
+        logging.getLogger("api-ai.authwatch").warning(
+            "GESPERRT path=%s client=%s ua=%s (#1184 — %s)",
+            pfad,
+            (request.client.host if request.client else "?"),
+            (request.headers.get("user-agent") or "?")[:60],
+            "kein Schluessel" if not geliefert else "falscher Schluessel",
+        )
+        return JSONResponse(
+            status_code=401,
+            content={"detail": {
+                "error": "api_key_required",
+                "hint": ("Dieser Dienst verlangt den Kopf `X-API-KEY`. "
+                         "Den Schluessel vergibt Alexander."),
+            }},
+        )
+    return await call_next(request)
+
+
 @app.middleware("http")
 async def _log_auth_presence(request, call_next):
     try:
