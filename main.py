@@ -93,7 +93,24 @@ app.add_middleware(
 _API_KEY_ENV = "API_ACCESS_KEY"
 _KEY_HEADER = "x-api-key"
 # Pfade, die per Bauart keinen Schluessel tragen koennen.
-_OFFENE_PFADE = ("/ai/gemini/gcp-budget-webhook",)
+# Pfade ohne X-API-KEY-Zwang. Zwei sehr verschiedene Gruende:
+#
+# * Der GCP-Webhook KANN keinen Schluessel tragen (fremder Absender).
+# * `/ai/realtime/token` hat eine STAERKERE eigene Pruefung — Nutzer-JWT
+#   gegen den Aussteller plus Vollmacht. Ein zusaetzlicher statischer
+#   Schluessel wuerde dort nichts sichern, sondern nur den Browser
+#   aussperren: Der schickt zurecht keinen API-Schluessel, denn ein
+#   Schluessel im Browser ist oeffentlich.
+#
+#   Gemessen auf Davids Kundeninstanz am 2026-08-19: Der Browser bekam
+#   `401 api_key_required`, bevor mein JWT-Pfad ueberhaupt lief. Meine
+#   Sperre von gestern haette den Realtime-Zugang jeder Instanz
+#   erschlagen, sobald jemand `API_ACCESS_KEY` setzt — auch unseren,
+#   beim Scharfschalten.
+_OFFENE_PFADE = (
+    "/ai/gemini/gcp-budget-webhook",
+    "/ai/realtime/token",
+)
 
 if not os.getenv(_API_KEY_ENV):
     # Laut, nicht still: Eine Sperre, die mangels Konfiguration nicht

@@ -117,3 +117,42 @@ def test_webhook_kommt_auch_ohne_schluessel_durch(monkeypatch):
 def test_health_bleibt_erreichbar(monkeypatch):
     c = _client(monkeypatch, "geheim-test")
     assert c.get("/health").status_code != 401
+
+
+def test_realtime_token_ist_ausgenommen():
+    """Der Browser schickt zurecht keinen API-Schluessel.
+
+    `/ai/realtime/token` prueft den Nutzer-JWT gegen den Aussteller und
+    zieht eine Vollmacht — das ist staerker als ein statischer
+    Schluessel, nicht schwaecher. Ein Schluessel im Browser waere
+    oeffentlich und damit keiner.
+
+    Gemessen auf einer Kundeninstanz am 2026-08-19: Dort war
+    `API_ACCESS_KEY` gesetzt, und der Browser bekam `401
+    api_key_required`, bevor die JWT-Pruefung ueberhaupt lief. Beim
+    Scharfschalten auf der Foederation waere derselbe Ausfall passiert.
+    """
+    assert "/ai/realtime/token" in main._OFFENE_PFADE
+
+
+def test_realtime_token_kommt_ohne_schluessel_durch(monkeypatch):
+    """Nicht 401 wegen fehlendem API-Schluessel — die eigene Pruefung
+    des Endpunkts darf danach sehr wohl 401 sagen."""
+    c = _client(monkeypatch, "geheim-test")
+    r = c.post("/ai/realtime/token", json={"companion_mode": "arcturian"})
+    if r.status_code == 401:
+        assert r.json().get("detail", {}).get("error") != "api_key_required"
+
+
+def test_aussteller_und_schluesselquelle_sind_konfigurierbar():
+    """Eine eigene Instanz muss gegen ihren eigenen Aussteller pruefen
+    koennen — vorher waren beide feste Konstanten, und eine gesetzte
+    Umgebungsvariable haette lautlos nichts bewirkt."""
+    import inspect
+    from ai.services import realtime_grant_verifier as v
+    quelle = inspect.getsource(v)
+    assert 'os.getenv(\n    "REALTIME_AUTH_ISSUER"' in quelle or \
+           'os.getenv("REALTIME_AUTH_ISSUER"' in quelle
+    assert "REALTIME_AUTH_JWKS_URL" in quelle
+    # Vorgabe unveraendert — die Foederation merkt nichts.
+    assert v.AUTH_ISSUER == "auth-api.arkturian.com"

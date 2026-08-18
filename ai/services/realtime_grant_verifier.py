@@ -92,8 +92,27 @@ except Exception as _exc:  # pragma: no cover — only if certifi is broken
 # ── Configuration ─────────────────────────────────────────────────────
 
 
-AUTH_ISSUER = "auth-api.arkturian.com"  # schemeless — AuthAPI's frozen iss
-JWKS_URL = "https://auth-api.arkturian.com/api/v1/auth/.well-known/jwks.json"
+# Konfigurierbar seit 2026-08-19, Vorgabe unveraendert — die Foederation
+# merkt nichts davon.
+#
+# Anlass: Eine isolierte Kundeninstanz (David, eigener Linode) soll
+# Realtime mit IHREM eigenen Nutzer-JWT anbieten. Bis hierher waren
+# Aussteller und Schluesselquelle **feste Konstanten**; Cloud hatte
+# `AUTH_JWKS_URL`/`AUTH_ISSUER` in der Umgebung gesetzt vermutet und
+# haette sie auf der Kundenmaschine gesetzt, ohne dass irgendetwas
+# passiert waere — es gab kein einziges `getenv` dafuer.
+#
+# Wer die Vorgabe nicht ueberschreibt, prueft weiter gegen
+# auth-api.arkturian.com. Wer eine eigene Instanz betreibt, setzt beide
+# Werte gemeinsam: Ein fremder Aussteller mit unserer Schluesselquelle
+# (oder umgekehrt) waere eine Pruefung, die nur so aussieht.
+AUTH_ISSUER = os.getenv(
+    "REALTIME_AUTH_ISSUER", "auth-api.arkturian.com"
+)  # schemeless — AuthAPI's frozen iss
+JWKS_URL = os.getenv(
+    "REALTIME_AUTH_JWKS_URL",
+    "https://auth-api.arkturian.com/api/v1/auth/.well-known/jwks.json",
+)
 GRANT_URL = "https://auth-api.arkturian.com/api/v1/auth/realtime-grant"
 ALG_ALLOWLIST = ("RS256",)
 AUD_PREFIX = "ai-realtime:"
