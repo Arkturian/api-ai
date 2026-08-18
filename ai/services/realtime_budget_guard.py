@@ -104,18 +104,37 @@ class BudgetGuardError(Exception):
     enum on the wire); ``audit_detail`` is logger-only.
     """
 
-    def __init__(self, error_code: str, audit_detail: str = "", status_code: int = 403):
+    def __init__(self, error_code: str, audit_detail: str = "", status_code: int = 403,
+                 public_fields: dict | None = None):
         super().__init__(error_code)
         self.error_code = error_code
         self.audit_detail = audit_detail
         self.status_code = status_code
+        # Felder, die der Client SEHEN darf. `audit_detail` bleibt
+        # protokoll-intern; diese hier gehen auf die Leitung.
+        self.public_fields = public_fields or {}
 
 
 class DailyBudgetExceeded(BudgetGuardError):
+    """Fenster-Grenze erreicht.
+
+    Der Fehlercode bleibt vorerst `daily_budget_exceeded`, obwohl er
+    beim Monatsfenster luegt: Er ist ein geschlossenes Enum auf der
+    Leitung, und ein ausgeliefertes iOS-Geraet prueft darauf. Die
+    Umbenennung braucht AppDevs Zustimmung — die Zahlen daneben
+    brauchen sie nicht und beheben das Problem heute.
+    """
+
     def __init__(self, profile_id: str, daily_total: float, cap: float):
         super().__init__(
             "daily_budget_exceeded",
             f"profile={profile_id} total_eur={daily_total:.2f} cap={cap:.2f}",
+            public_fields={
+                "window": BUDGET_WINDOW,
+                "used_eur": round(daily_total, 2),
+                "limit_eur": round(cap, 2),
+                "resets_at": _window_reset_at(),
+            },
         )
 
 
@@ -141,6 +160,36 @@ class Reservation:
 
 
 # ── Storage helpers ───────────────────────────────────────────────────
+
+
+def _window_reset_at() -> str:
+    """Wann sich das aktuelle Budgetfenster oeffnet — als ISO-Zeitpunkt.
+
+    Anlass (2026-08-18): Alexanders Stimme startete fuenf Tage lang
+    nicht, und die Meldung sagte „Tageslimit erreicht — morgen wieder
+    verfuegbar". Das Fenster stand aber auf `monthly`; „morgen" kam nie.
+    Der Fehlercode heisst bis heute `daily_budget_exceeded`, egal wie
+    das Fenster konfiguriert ist — der Kommentar an `_today_str` sagt
+    sogar ausdruecklich „name kept for compat".
+
+    **Eine Beschriftung, die eine Umstellung nicht mitgemacht hat,
+    altert lautlos.** Deshalb nennt der Fehler ab jetzt das echte
+    Fenster UND den Zeitpunkt, statt einen Namen zu tragen, der einmal
+    gestimmt hat.
+    """
+    import datetime as _dt   # lokal, wie in `_now_local` — kein Modul-Import
+    jetzt = _now_local()
+    if BUDGET_WINDOW == "monthly":
+        if jetzt.month == 12:
+            naechstes = jetzt.replace(year=jetzt.year + 1, month=1, day=1,
+                                      hour=0, minute=0, second=0, microsecond=0)
+        else:
+            naechstes = jetzt.replace(month=jetzt.month + 1, day=1,
+                                      hour=0, minute=0, second=0, microsecond=0)
+    else:
+        naechstes = (jetzt + _dt.timedelta(days=1)).replace(
+            hour=0, minute=0, second=0, microsecond=0)
+    return naechstes.isoformat()
 
 
 def _today_str() -> str:
