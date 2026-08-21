@@ -4469,12 +4469,12 @@ async def realtime_devlog_upsert(
     os.replace(tmp_path, path)
     logger.info(
         "Devlog upsert: voice_session_id=%s owner=%s lines=%d",
-        body.voice_session_id, owner or "anonymous", len(body.lines),
+        body.voice_session_id, owner_key, len(body.lines),
     )
     return {
         "accepted": True,
         "voice_session_id": body.voice_session_id,
-        "owner": owner,
+        "owner": owner_key,
         "line_count": len(body.lines),
     }
 
