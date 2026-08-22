@@ -39,6 +39,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
+from urllib.parse import urlsplit
+
 import httpx
 
 logger = logging.getLogger(__name__)
@@ -516,7 +518,56 @@ class OpenAIRealtimeCostTracker:
             )
 
     def get_status(self) -> dict:
+        """Zustandsbericht — mit Herkunft der Sperrentscheidung.
+
+        Der Grund für die Herkunftsangabe (Issue #1283): Auf einem
+        Nicht-Master zeigte dieser Bericht die EIGENEN Zahlen — etwa
+        „0,20 von 30,00 EUR, budget_exceeded: false" — daneben aber
+        „requests_blocked: true", weil die Sperre vom Master kommt. Das
+        liest sich wie ein Widerspruch und hat CloudV2 bei der Suche
+        zuerst in die falsche Richtung geschickt.
+
+        Die lokalen Felder bleiben unverändert stehen; wer sie liest,
+        liest weiter dasselbe. Dazu kommt, WER entschieden hat und mit
+        welchen Zahlen.
+        """
         self._maybe_reload_from_file()
+        gesperrt = self.should_block_request()
+        hart = bool(self._usage_data.get("openai_realtime_hard_cap_active"))
+        if hart:
+            herkunft = "hard_cap"
+        elif self.master_url and self.shared_secret:
+            herkunft = "master"
+        else:
+            herkunft = "local"
+        master_sicht = None
+        if herkunft == "master":
+            # Ausdrücklich abrufen statt auf den Zwischenspeicher zu
+            # hoffen, den `should_block_request` nebenbei füllt: Nimmt
+            # der Aufruf den Kurzschluss über die harte Sperre oder
+            # scheitert er, bliebe hier ein leeres oder veraltetes Bild
+            # stehen — und der Bericht behauptete eine Herkunft, deren
+            # Zahlen er nicht zeigt. Der Abruf ist 10 s zwischen-
+            # gespeichert, kostet also keine zweite Anfrage.
+            try:
+                m = self._fetch_master_status() or {}
+            except Exception as exc:
+                m = {}
+                logger.warning(
+                    "cost-status: Master nicht erreichbar (%s) — Herkunft "
+                    "wird als unbekannt ausgewiesen", exc,
+                )
+            master_sicht = {
+                # Nur der Host, nicht die volle URL: Sie kann
+                # Zugangsdaten tragen, und für das Verstehen genügt der
+                # Name der Maschine.
+                "host": urlsplit(self.master_url).hostname or "",
+                "total_cost_eur": m.get("total_cost_eur"),
+                "monthly_budget_eur": m.get("monthly_budget_eur"),
+                "would_block": m.get("would_block"),
+                "month": m.get("month"),
+                "reachable": bool(m),
+            }
         with self._data_lock:
             cost_eur = self._usage_data.get("total_cost_eur", 0)
             return {
@@ -535,7 +586,16 @@ class OpenAIRealtimeCostTracker:
                 "session_count": self._usage_data.get("session_count", 0),
                 "by_model": self._usage_data.get("by_model", {}),
                 "budget_exceeded": self.is_budget_exceeded(),
-                "requests_blocked": self.should_block_request(),
+                "requests_blocked": gesperrt,
+                # Wer hat gesperrt, und womit? Auf einem Nicht-Master
+                # sind die lokalen Zahlen darüber nur Anzeige.
+                "decision_source": herkunft,
+                "master": master_sicht,
+                "note": (
+                    "Sperrentscheidung stammt vom Master; die lokalen "
+                    "Kosten- und Budgetzahlen dieses Hosts sind nur "
+                    "Anzeige und nicht massgeblich."
+                ) if herkunft == "master" else None,
                 "openai_realtime_hard_cap_active": bool(
                     self._usage_data.get("openai_realtime_hard_cap_active")
                 ),
