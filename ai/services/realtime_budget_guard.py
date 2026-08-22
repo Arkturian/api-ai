@@ -192,6 +192,32 @@ def _window_reset_at() -> str:
     return naechstes.isoformat()
 
 
+SESSION_BUDGET_ENV = "REALTIME_SESSION_BUDGET_EUR"
+
+
+def _session_budget_eur() -> float:
+    """Obergrenze je EINZELNER Sprachsitzung. 0/unbesetzt = keine.
+
+    Der Monatstopf merkt erst nach dem Schaden, dass eine Sitzung teuer
+    war — CloudV2s Punkt 3 in #1283. Die Zahl selbst ist Alex';
+    solange sie fehlt, wird nur GEZAEHLT und nichts abgeschnitten.
+    Zaehlen ohne Grenze ist die Vorbedingung, nicht der halbe Weg: Man
+    kann nicht deckeln, was man nicht misst.
+    """
+    roh = os.environ.get(SESSION_BUDGET_ENV, "").strip()
+    if not roh:
+        return 0.0
+    try:
+        wert = float(roh)
+    except ValueError:
+        logger.warning(
+            "%s=%r ist keine Zahl — Sitzungsgrenze bleibt AUS",
+            SESSION_BUDGET_ENV, roh,
+        )
+        return 0.0
+    return wert if wert > 0 else 0.0
+
+
 def _today_str() -> str:
     """Local window key in Europe/Vienna — DST-aware.
 
@@ -420,11 +446,21 @@ def confirm_usage_charge(
         uv = _user_view(pv, user_id)
         pv["daily_total_eur"] = float(pv.get("daily_total_eur") or 0.0) + cost_eur
         uv["daily_eur"] = float(uv.get("daily_eur") or 0.0) + cost_eur
+        # Je Sitzung mitfuehren. Der Schluessel ist die voice_session_id;
+        # ohne sie (Altaufrufer) wird nur der Tagestopf gefuehrt, damit
+        # kein Sammeleintrag "" entsteht, der mehrere Sitzungen vermengt.
+        sitzung_eur = None
+        if voice_session_id:
+            je_sitzung = uv.setdefault("session_eur", {})
+            sitzung_eur = float(je_sitzung.get(voice_session_id) or 0.0) + cost_eur
+            je_sitzung[voice_session_id] = sitzung_eur
         snapshot = {
             "profile_id": profile_id,
             "day": today,
             "daily_total_eur": pv["daily_total_eur"],
             "user_daily_eur": uv["daily_eur"],
+            "session_eur": sitzung_eur,
+            "session_budget_eur": _session_budget_eur() or None,
             "active_sessions": list(uv.get("active_sessions") or []),
         }
     logger.info(
@@ -467,6 +503,24 @@ def refresh_lease(
         active = uv.get("active_sessions") or []
         if voice_session_id not in active:
             return False
+        # Sitzungsgrenze — hier und nicht beim Verrechnen: Laufendes
+        # Audio laesst sich nicht hart abschneiden (Codex' v1-Regel,
+        # siehe confirm_usage_charge). Der Herzschlag ist die naechste
+        # Stelle, an der ein Nein ohne Abbruch mitten im Satz wirkt;
+        # der Client kennt `False` bereits als "Sitzung ist zu Ende".
+        grenze = _session_budget_eur()
+        if grenze > 0:
+            verbraucht = float(
+                (uv.get("session_eur") or {}).get(voice_session_id) or 0.0
+            )
+            if verbraucht >= grenze:
+                logger.warning(
+                    "realtime_session_cap profile=%s user=%s vid=%s "
+                    "eur=%.2f >= %.2f — Herzschlag verweigert",
+                    profile_id, user_id[:8], voice_session_id,
+                    verbraucht, grenze,
+                )
+                return False
         started = uv.setdefault("session_started", {})
         started[voice_session_id] = now
     logger.debug(
