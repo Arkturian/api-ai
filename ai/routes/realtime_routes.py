@@ -454,9 +454,20 @@ class DevlogUpsertRequest(BaseModel):
     growing transcript every ~2.5 s (debounced) and on stop. The server
     upserts by ``voice_session_id`` so the latest payload always wins.
 
-    Storage is dev-only, owner-scoped via the bearer-JWT email claim,
-    and purgeable via DELETE. The FE-toggle ships off-by-default; this
-    endpoint accepts whatever it gets without minting policy.
+    Storage is owner-scoped via the verified grant
+    (``sub:tenant:profile``) and purgeable via DELETE.
+
+    Der Satz, der hier bis 2026-08-22 stand — "the FE-toggle ships
+    off-by-default; this endpoint accepts whatever it gets without
+    minting policy" — beschrieb eine Arbeitsteilung, deren andere
+    Hälfte nie ausgeliefert wurde: Der Browser-Riegel ist nie auf
+    cloud-v2 `main` gelangt (Issue #1267). Übrig blieb ein Schreibweg
+    ohne jede Bedingung, der wörtliche Rede dauerhaft ablegt.
+
+    Deshalb gibt es jetzt ``retention_consent`` und den Schalter
+    ``REALTIME_DEVLOG_REQUIRE_CONSENT``. Der Schalter steht auf AUS —
+    das Verhalten ist unverändert, bis jemand ihn umlegt. Er existiert,
+    damit die Entscheidung eine Zeile ist und kein Umbau.
     """
 
     voice_session_id: str = Field(
@@ -474,6 +485,16 @@ class DevlogUpsertRequest(BaseModel):
     ended_at: Optional[Any] = Field(
         default=None,
         description="Epoch-ms or ISO when the capture finished (null mid-run).",
+    )
+    retention_consent: Optional[bool] = Field(
+        default=None,
+        description=(
+            "Hat der SPRECHER der dauerhaften Aufbewahrung dieses "
+            "Mitschnitts zugestimmt? Solange "
+            "REALTIME_DEVLOG_REQUIRE_CONSENT aus ist, wird das Feld "
+            "nur mitgeschrieben. Ist der Schalter an, ist alles ausser "
+            "`true` eine Ablehnung — auch das Fehlen des Feldes."
+        ),
     )
     lines: List[DevlogLine] = Field(
         default_factory=list,
@@ -4339,6 +4360,7 @@ async def realtime_session_end(
 
 DEVLOG_ROOT = "/var/lib/api-ai/devlogs"
 DEVLOG_SECRET_ENV = "DEVLOG_DEV_SECRET"
+DEVLOG_CONSENT_ENV = "REALTIME_DEVLOG_REQUIRE_CONSENT"
 
 
 def _extract_owner_from_jwt(authorization: Optional[str]) -> Optional[str]:
@@ -4425,6 +4447,47 @@ def _check_dev_secret(header_secret: Optional[str]) -> None:
         )
 
 
+def _devlog_consent_required() -> bool:
+    """Ist der Einwilligungsriegel scharf?
+
+    Default AUS. Das ist bewusst und nicht Bequemlichkeit: Der einzige
+    heutige Anrufer (CloudV2) sendet das Feld noch nicht, und ein
+    Riegel, der beim Ausrollen sofort greift, nimmt einem Gegenüber die
+    Funktion weg, statt sie ihm zu überlassen. Wer die Fähigkeit nutzt,
+    legt den Schalter um — nicht wer sie ausliefert.
+    """
+    return os.environ.get(DEVLOG_CONSENT_ENV, "").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
+
+
+def _pruefe_devlog_einwilligung(consent: Optional[bool]) -> None:
+    """Fail-closed, wenn der Riegel scharf ist.
+
+    Alles ausser ``True`` ist eine Ablehnung — auch ``None``. Ein
+    fehlendes Feld darf nicht als Zustimmung durchgehen, sonst ist der
+    Riegel genau für den Client offen, der von ihm nichts weiss.
+    """
+    if not _devlog_consent_required():
+        return
+    if consent is True:
+        return
+    raise HTTPException(
+        status_code=403,
+        detail={
+            "error": "devlog_retention_consent_required",
+            "hint": (
+                "Dauerhafte Aufbewahrung gesprochener Inhalte ist auf "
+                "dieser Instanz zustimmungspflichtig. Sende "
+                "retention_consent=true, wenn der SPRECHER zugestimmt "
+                "hat. Ohne Zustimmung nichts senden — ein Mitschnitt "
+                "ohne Einwilligung ist kein halber Mitschnitt."
+            ),
+            "field": "retention_consent",
+        },
+    )
+
+
 @router.post("/realtime/devlog")
 async def realtime_devlog_upsert(
     body: DevlogUpsertRequest,
@@ -4443,6 +4506,11 @@ async def realtime_devlog_upsert(
     inside the owner's bucket. CloudV2 re-POSTs the growing transcript
     every ~2.5 s and on stop; the latest payload always wins.
     """
+    # Vor jedem Schreiben, nicht danach: Der Fehler, den ich hier
+    # gerade repariert habe, lag NACH `os.replace` — geschrieben und
+    # trotzdem 500 gemeldet. Ein Riegel an derselben Stelle wäre ein
+    # Riegel, der die Tür erst hinter dem Gast zuzieht.
+    _pruefe_devlog_einwilligung(body.retention_consent)
     # Stable-id owner bucket — Codex Punkt 5 (no email-as-primary-key).
     owner_key = f"{grant.sub}:{grant.tenant_id}:{grant.profile_id}"
     path = _devlog_path(owner_key, body.voice_session_id)
@@ -4455,6 +4523,8 @@ async def realtime_devlog_upsert(
         "agent": body.agent,
         "started_at": body.started_at,
         "ended_at": body.ended_at,
+        "retention_consent": body.retention_consent,
+        "consent_enforced": _devlog_consent_required(),
         "line_count": len(body.lines),
         "lines": [line.dict(exclude_none=True) for line in body.lines],
         "received_at": time.time(),
