@@ -404,6 +404,21 @@ class RealtimeUsageReport(BaseModel):
     audio_output_tokens: int = 0
     text_input_tokens: int = 0
     text_output_tokens: int = 0
+    # Zwischengespeicherte Eingabe aus `response.done`:
+    # ``usage.input_token_details.cached_tokens_details.{text,audio}_tokens``.
+    # Es sind TEILMENGEN von text_input_tokens bzw. audio_input_tokens,
+    # keine zusaetzlichen Tokens — nicht aufaddieren.
+    #
+    # Warum das Feld nachtraeglich kam (Issue #1283): Die Realtime-API
+    # rechnet den ganzen Sitzungskontext bei jeder Antwort erneut als
+    # Eingabe ab. Der stabile Vorbau — Persona und Werkzeuge, gemessen
+    # 3.608 von 4.919 Tokens je Antwort — wird dabei aber
+    # zwischengespeichert und kostet ein Zehntel. Wer diese Zahl nicht
+    # meldet, laesst genau den groessten Posten zum vollen Preis
+    # verbuchen. Vorgabe 0 heisst: nichts als zwischengespeichert
+    # angenommen, also niemals zu WENIG gezaehlt.
+    cached_text_input_tokens: int = 0
+    cached_audio_input_tokens: int = 0
     duration_sec: float = 0.0
     # Idempotency keys (Codex IACP, Post #1215). Pre-existing callers
     # may not set these; we'll log a non-idempotent warning. New
@@ -4222,6 +4237,8 @@ async def realtime_usage_report(
         audio_output_tokens=report.audio_output_tokens,
         text_input_tokens=report.text_input_tokens,
         text_output_tokens=report.text_output_tokens,
+        cached_text_input_tokens=report.cached_text_input_tokens,
+        cached_audio_input_tokens=report.cached_audio_input_tokens,
         duration_sec=report.duration_sec,
         voice_session_id=report.voice_session_id or report.session_id,
         usage_event_id=report.usage_event_id,
@@ -4242,6 +4259,8 @@ async def realtime_usage_report(
                 audio_output_tokens=report.audio_output_tokens,
                 text_input_tokens=report.text_input_tokens,
                 text_output_tokens=report.text_output_tokens,
+                cached_text_input_tokens=report.cached_text_input_tokens,
+                cached_audio_input_tokens=report.cached_audio_input_tokens,
             )
             realtime_budget_guard.confirm_usage_charge(
                 profile_id=grant.profile_id,
