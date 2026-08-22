@@ -4380,6 +4380,12 @@ async def realtime_session_end(
 DEVLOG_ROOT = "/var/lib/api-ai/devlogs"
 DEVLOG_SECRET_ENV = "DEVLOG_DEV_SECRET"
 DEVLOG_CONSENT_ENV = "REALTIME_DEVLOG_REQUIRE_CONSENT"
+DEVLOG_RETENTION_ENV = "REALTIME_DEVLOG_RETENTION_DAYS"
+# Wie oft ein Arbeitsprozess hoechstens durchkehrt. Der Verfall
+# muss nicht auf die Minute genau greifen; er muss ueberhaupt
+# greifen, ohne bei jedem Schreibvorgang die Ablage abzugehen.
+_DEVLOG_SWEEP_INTERVAL_SEC = 3600.0
+_devlog_letzter_kehrgang = 0.0
 
 
 def _extract_owner_from_jwt(authorization: Optional[str]) -> Optional[str]:
@@ -4464,6 +4470,88 @@ def _check_dev_secret(header_secret: Optional[str]) -> None:
             status_code=403,
             detail={"error": "devlog_invalid_dev_secret"},
         )
+
+
+def _devlog_retention_days() -> float:
+    """Aufbewahrungsfrist in Tagen. 0 oder nicht gesetzt = kein Verfall.
+
+    Ohne Zahl passiert nichts — genau wie heute. Der Wert ist Alex'
+    Entscheidung (Issue #1267); hier steht nur die Mechanik, damit die
+    Entscheidung eine Zeile ist und kein Umbau.
+    """
+    roh = os.environ.get(DEVLOG_RETENTION_ENV, "").strip()
+    if not roh:
+        return 0.0
+    try:
+        tage = float(roh)
+    except ValueError:
+        logger.warning(
+            "%s=%r ist keine Zahl — Verfall bleibt AUS", DEVLOG_RETENTION_ENV, roh,
+        )
+        return 0.0
+    return tage if tage > 0 else 0.0
+
+
+def _devlog_kehre_aus(max_alter_tage: float) -> int:
+    """Loescht abgelaufene Mitschnitte. Gibt die Anzahl zurueck.
+
+    Das Alter kommt aus ``received_at`` IM Datensatz, nicht aus der
+    mtime der Datei: Ein Umzug, ein `cp -r` oder eine Sicherung setzt
+    Dateizeiten neu und wuerde die Frist stillschweigend verlaengern.
+    Faellt das Feld aus, zieht die mtime als Notbehelf nach.
+
+    Faellt hier etwas um, darf es den Schreibweg nicht mitreissen —
+    ein nicht gekehrter Mitschnitt ist ein Aufraeumproblem, ein
+    abgestuerzter Schreibvorgang ein Datenverlust.
+    """
+    if max_alter_tage <= 0 or not os.path.isdir(DEVLOG_ROOT):
+        return 0
+    grenze = time.time() - max_alter_tage * 86400.0
+    geloescht = 0
+    for eimer in os.listdir(DEVLOG_ROOT):
+        eimer_pfad = os.path.join(DEVLOG_ROOT, eimer)
+        if not os.path.isdir(eimer_pfad):
+            continue
+        for name in os.listdir(eimer_pfad):
+            if not name.endswith(".json"):
+                continue
+            pfad = os.path.join(eimer_pfad, name)
+            try:
+                with open(pfad, "r", encoding="utf-8") as f:
+                    alter = json.load(f).get("received_at")
+                if not isinstance(alter, (int, float)):
+                    alter = os.path.getmtime(pfad)
+                if alter < grenze:
+                    os.remove(pfad)
+                    geloescht += 1
+            except Exception as exc:
+                logger.warning("Devlog-Kehrgang: %s uebersprungen (%s)", pfad, exc)
+    if geloescht:
+        logger.info(
+            "Devlog-Kehrgang: %d Mitschnitte aelter als %.1f Tage geloescht",
+            geloescht, max_alter_tage,
+        )
+    return geloescht
+
+
+def _devlog_kehre_gedrosselt() -> None:
+    """Hoechstens einmal je Intervall und Arbeitsprozess.
+
+    Bei zwei uvicorn-Arbeitern kehrt jeder fuer sich — das Loeschen ist
+    idempotent, doppelte Laeufe schaden nicht.
+    """
+    global _devlog_letzter_kehrgang
+    tage = _devlog_retention_days()
+    if tage <= 0:
+        return
+    jetzt = time.time()
+    if jetzt - _devlog_letzter_kehrgang < _DEVLOG_SWEEP_INTERVAL_SEC:
+        return
+    _devlog_letzter_kehrgang = jetzt
+    try:
+        _devlog_kehre_aus(tage)
+    except Exception as exc:
+        logger.warning("Devlog-Kehrgang fehlgeschlagen: %s", exc)
 
 
 def _devlog_consent_required() -> bool:
@@ -4556,6 +4644,10 @@ async def realtime_devlog_upsert(
         finally:
             fcntl.flock(f.fileno(), fcntl.LOCK_UN)
     os.replace(tmp_path, path)
+    # Nach dem Schreiben, nicht davor: Der eigene Mitschnitt ist gerade
+    # frisch, kann also nie das Opfer sein — und ein Kehrgang, der
+    # klemmt, darf den Schreibvorgang nicht verzoegern.
+    _devlog_kehre_gedrosselt()
     logger.info(
         "Devlog upsert: voice_session_id=%s owner=%s lines=%d",
         body.voice_session_id, owner_key, len(body.lines),
