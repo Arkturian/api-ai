@@ -569,6 +569,10 @@ class AIResponse(BaseModel):
     model: str
     tokens_used: Optional[int] = None
     finish_reason: Optional[str] = None
+    # Gesetzt, wenn der Server einen Effort eingesetzt hat, den der
+    # Aufrufer nicht genannt hat. Damit die Vorgabe nicht STILL ist:
+    # Wer sie sieht, kann sie beim naechsten Mal selbst waehlen.
+    effort_applied: Optional[str] = None
 
     def __init__(self, **data):
         super().__init__(**data)
@@ -1389,6 +1393,68 @@ async def grok_endpoint(
         raise HTTPException(status_code=500, detail=error_msg)
 
 
+# ── Effort-Vorgabe fuer agy (Meldung Automation, 2026-08-22) ─────────
+
+_MODELS_JSON_PFAD = Path("/var/lib/api-ai/models.json")
+# Letzte Rueckfallebene, falls der Katalog fehlt oder unlesbar ist. EIN
+# Wert, keine Tabelle je Modell: Genau so eine Tabelle stand hier frueher,
+# driftete und schrieb unsupported Efforts still um (Post #4383). Passt
+# der Wert einem Modell nicht, scheitert agy laut und mit der gueltigen
+# Liste — das ist der richtige Ausgang, nur eben nicht der stille.
+_AGY_EFFORT_NOTFALL = "medium"
+
+
+def _agy_effort_vorgabe(model: str) -> Optional[str]:
+    """Welchen Effort setzen wir ein, wenn der Aufrufer keinen nennt?
+
+    `agy models` fuehrt AUSSCHLIESSLICH suffigierte Slugs
+    (`gemini-3.7-flash-high|-medium|-low`); einen blanken Modellnamen
+    gibt es dort nicht. Ein Aufruf ohne Effort kann also nie gueltig
+    werden — er endet zwangslaeufig in
+    `requires --effort (available: ...)`. Gemessen hat das
+    conversation-api rund 2.800-mal am Tag getroffen, seit mindestens
+    dem 15.08.; weil dieser Dienst keine Rueckfallkette hat (#1185),
+    fiel die Anreicherung still aus.
+
+    Der Einwand gegen eine Vorgabe — sie trifft eine Wahl, die der
+    Aufrufer nicht getroffen hat — stimmt, wiegt hier aber leichter:
+    Die Alternative ist nicht die Wahl des Aufrufers, sondern ein
+    sicherer Fehlschlag. Damit die Vorgabe nicht STILL bleibt, wird sie
+    protokolliert und in der Antwort ausgewiesen.
+
+    Quelle ist der taegliche Katalog, nicht eine Konstante hier: Die
+    Wahrheit ueber Modelle und ihre Efforts steht in `agy models` und
+    kommt ueber Automation nach `models.json`. `per_model` wird
+    beachtet — `gemini-3.1-pro` kann nur `low`/`high`, eine pauschale
+    `medium` waere dort wieder ein sicherer Fehlschlag.
+
+    Rueckgabe: der einzusetzende Effort, oder None — dann reichen wir
+    nichts nach und agy meldet sich selbst.
+    """
+    import json as _json
+
+    meta: dict = {}
+    try:
+        if _MODELS_JSON_PFAD.exists():
+            daten = _json.loads(_MODELS_JSON_PFAD.read_text())
+            meta = ((daten.get("providers") or {})
+                    .get("gemini") or {}).get("efforts") or {}
+    except Exception as exc:
+        logger.warning("Effort-Vorgabe: Katalog nicht lesbar (%s)", exc)
+
+    vorgabe = meta.get("default") or _AGY_EFFORT_NOTFALL
+    erlaubt = (meta.get("per_model") or {}).get(model.strip())
+    if erlaubt and vorgabe not in erlaubt:
+        # Nicht raten, welcher der erlaubten Werte gemeint waere — agy
+        # nennt dem Aufrufer die gueltige Liste besser als wir.
+        logger.info(
+            "Effort-Vorgabe %r gilt nicht fuer %s (erlaubt: %s) — "
+            "nichts nachgereicht", vorgabe, model, erlaubt,
+        )
+        return None
+    return vorgabe
+
+
 @router.post("/gemini", response_model=AIResponse)
 async def gemini_endpoint(
     prompt: Prompt,
@@ -1458,6 +1524,10 @@ async def gemini_endpoint(
         # all tool calls (replaces --no-sandbox + --yolo + --skip-trust
         # together). --output-format json is supported and returns a
         # cleaner flat schema than gemini (see usage parsing below).
+        # Vor jeder Verzweigung binden: Ein Name, der nur in einem Zweig
+        # zugewiesen und spaeter gelesen wird, ist ein NameError im
+        # Betrieb und beim Import unsichtbar.
+        _effort_nachgereicht: Optional[str] = None
         cmd = ["agy", "--output-format", "json",
                "--dangerously-skip-permissions"]
         # agy expects --model as a display-name STRING (e.g. "Gemini 3.5
@@ -1496,6 +1566,17 @@ async def gemini_endpoint(
             _preset = _m.endswith(_AGY_EFFORT_SUFFIXES) or "(" in _m
             if prompt.effort and not _preset:
                 cmd.extend(["--effort", prompt.effort.strip().lower()])
+            elif not prompt.effort and not _preset:
+                # Kein Effort genannt, keiner im Namen: ohne gueltigen
+                # Wert ist dieser Aufruf zwangslaeufig ein 502.
+                _vorgabe = _agy_effort_vorgabe(_m)
+                if _vorgabe:
+                    cmd.extend(["--effort", _vorgabe])
+                    _effort_nachgereicht = _vorgabe
+                    logger.info(
+                        "agy: kein effort im Aufruf — Katalog-Vorgabe %r "
+                        "fuer %s eingesetzt", _vorgabe, _m,
+                    )
             elif prompt.effort:
                 logger.info(
                     f"effort={prompt.effort!r} ignored — model {_m!r} "
@@ -1663,7 +1744,8 @@ async def gemini_endpoint(
             response=response_text,
             model=model_name,
             tokens_used=tokens_used,
-            finish_reason="stop"
+            finish_reason="stop",
+            effort_applied=_effort_nachgereicht,
         )
 
     except subprocess.TimeoutExpired:
