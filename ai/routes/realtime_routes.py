@@ -739,6 +739,7 @@ SUPPORTED_COMPANION_MODES = {
     "guide-ptt",
     "agent-transparent",
     "arcturian",
+    "product-finder",
 }
 SUPPORTED_DETAIL_LEVELS = {"brief", "balanced", "technical", "flowing"}
 
@@ -3394,6 +3395,132 @@ async def voice_clone(
     }
 
 
+# ── Produktfinder (Bauplan #4831 p-dabc0367a5d6, Phase 1d) ───────────
+
+# Was fest in den Vertrag darf, entscheidet die ANZAHL der Werte — nicht
+# die Wichtigkeit. Jeder Wert hier kostet Vorbau in JEDER Antwort, weil
+# die Realtime-API den ganzen Kontext je Antwort erneut abrechnet
+# (gemessen: 3.608 von 4.919 Tokens je Antwort sind fester Vorbau).
+# Marken (3) und Katalogstruktur passen; Farben (50) und Groessen (239,
+# mit Dubletten wie `One Size`/`ONE SIZE`) nicht — die gehoeren
+# nachgeschlagen. Zahlen von OnealServ-Codex, live gegen `/v1/facets`.
+PRODUCT_FINDER_BRANDS = ("O'Neal", "ONE", "KINI")
+
+
+def _product_finder_prompt(language: str = "de") -> str:
+    """Persona des sprechenden Produktfinders.
+
+    Drei Dinge stehen hier bewusst NICHT drin:
+
+    * **Kein Werkzeugname fuer etwas, das nicht passieren soll.** Am
+      Arcturian-Agenten gemessen: Die blosse Erwaehnung eines Werkzeugs
+      laesst das Modell danach greifen — ein ausdrueckliches Verbot
+      eingeschlossen, denn ein Verbot ist eine Erwaehnung (8/8 sauber
+      ohne Erwaehnung, 0/8 mit Verbot). Was nicht passieren darf, wird
+      im Code gesperrt, nicht hier formuliert.
+    * **Keine Farb- und Groessenlisten.** Siehe Kommentar oben: Vorbau,
+      jede Antwort, jedes Mal.
+    * **Keine Produktnamen.** Die erreichen das Modell nie; es weiss,
+      DASS zwoelf Helme gezeigt wurden, nicht WELCHE.
+    """
+    marken = ", ".join(PRODUCT_FINDER_BRANDS)
+    return (
+        "Du bist die Stimme im O'Neal-Produktfinder und beraetst den "
+        "Aussendienst beim Kunden.\n\n"
+        f"SORTIMENT: {marken}. Zwei Welten: MOTO und MTB.\n\n"
+        "WIE DU ARBEITEST\n"
+        "Du uebersetzt gesprochenen Bedarf in Filter und fragst nach dem "
+        "EINEN Kriterium, das die Treffermenge am staerksten teilt — "
+        "nicht nach allen auf einmal.\n\n"
+        "WAS DU SIEHST UND WAS NICHT\n"
+        "Du bekommst die ANZAHL der Treffer und ein paar Eckwerte "
+        "(Preisspanne, vorkommende Groessen). Du siehst weder "
+        "Produktnamen noch einzelne Preise. Der Kunde sieht die Karten "
+        "auf dem Bildschirm — du sprichst ueber das, was er sieht, ohne "
+        "es selbst zu kennen. Sag also 'vierunddreissig Stueck zwischen "
+        "49 und 210 Euro'. Erfinde niemals einen Produktnamen.\n\n"
+        "DREI ANTWORTEN, DIE NICHT VERWECHSELT WERDEN DUERFEN\n"
+        "- Es gibt Treffer: nenne Anzahl und Spanne.\n"
+        "- Es gibt nachweislich nichts: 'In L fuehren wir davon nichts. "
+        "Soll ich M mit anschauen?'\n"
+        "- Der Katalog antwortet nicht: 'Der Katalog antwortet gerade "
+        "nicht, ich kann das nicht nachsehen.'\n"
+        "Der Unterschied zwischen den letzten beiden entscheidet: "
+        "'Fuehren wir nicht' bei einer Stoerung ist eine FALSCHE "
+        "AUSKUNFT ueber das Sortiment.\n\n"
+        "GROESSE\n"
+        "Du kannst nach Groesse filtern und die Tabelle des Herstellers "
+        "zeigen lassen. Aus Koerpermassen eine Groesse zu empfehlen "
+        "kannst du NICHT — dazu fehlen die Messwerte im Katalog. Sag das "
+        "gerade heraus, weiche nicht aus: 'Groesse kann ich aus "
+        "Koerpermassen nicht bestimmen, dazu fehlen mir die Tabellen. "
+        "Ich zeig Ihnen, was der Hersteller angibt.'\n\n"
+        "TON\n"
+        "Kurze Saetze. Der Kunde steht daneben und schaut auf den "
+        "Bildschirm; du bist der Kollege, der die Zahlen kennt — nicht "
+        "der Katalog, der sich selbst vorliest."
+    )
+
+
+def _product_finder_tools() -> List[dict]:
+    """Genau zwei Werkzeuge, beide lesend, beide ohne Produktdaten.
+
+    Die Anzeige ist ABSICHTLICH kein Werkzeug. Korrektur von
+    Tschepp-Codex2 am ersten Entwurf: Ein Anzeigewerkzeug in der Hand
+    des Modells kann eine erfundene Artikelnummer oeffnen. Der
+    Anzeigebefehl reist stattdessen IM geprueften Serverresultat und
+    wird vom Browser herausgeloest, bevor das Resultat ins Modell geht —
+    das Modell kann dadurch nur zeigen, was der Server gefunden hat.
+    """
+    kriterien = {
+        "brand": {"type": "string", "enum": list(PRODUCT_FINDER_BRANDS)},
+        "sport": {"type": "string", "description": "moto oder mtb"},
+        "category": {"type": "string"},
+        "target_group": {"type": "string"},
+        "body_part": {"type": "string"},
+        "product_type": {"type": "string"},
+        "product_function": {"type": "string"},
+        "color": {"type": "string"},
+        "size": {"type": "string"},
+        "price_min": {"type": "number"},
+        "price_max": {"type": "number"},
+        "collection_year": {"type": "integer"},
+    }
+    ergebnis = (
+        "Zurueck kommen NUR Anzahl, Eckwerte und ein Auswahl-Token — "
+        "keine Produkt-IDs, keine Namen, keine Beschreibungen, keine "
+        "Einzelpreise. Die Karten erscheinen auf dem Bildschirm des "
+        "Kunden, nicht in deinem Kontext."
+    )
+    return [
+        {
+            "type": "function",
+            "name": "find_products",
+            "description": "Neue Suche aus dem gesprochenen Bedarf. " + ergebnis,
+            "parameters": {
+                "type": "object",
+                "properties": dict(kriterien),
+                "additionalProperties": False,
+            },
+        },
+        {
+            "type": "function",
+            "name": "refine_search",
+            "description": (
+                "Bestehende Trefferliste einschraenken, wenn der Kunde "
+                "nachschaerft ('nur O'Neal', 'in L', 'unter hundert'). "
+                "Braucht das Auswahl-Token der laufenden Suche. " + ergebnis
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {"selection_token": {"type": "string"}, **kriterien},
+                "required": ["selection_token"],
+                "additionalProperties": False,
+            },
+        },
+    ]
+
+
 @router.post("/realtime/token")
 async def mint_realtime_token(
     request: RealtimeTokenRequest,
@@ -3522,6 +3649,14 @@ async def mint_realtime_token(
             f"detail_level={detail_level} "
             f"companion_run_id={request.companion_run_id or 'none'} "
             f"({len(instructions)} chars, 0 tools)"
+        )
+    elif companion_mode == "product-finder":
+        instructions = _product_finder_prompt(request.language or "de")
+        companion_tools_override = _product_finder_tools()
+        logger.info(
+            f"Realtime: companion_mode=product-finder "
+            f"({len(instructions)} chars, "
+            f"{len(companion_tools_override)} tools)"
         )
     elif companion_mode == "agent-transparent":
         # Content-Post #1235 — first-person transparent relay.
