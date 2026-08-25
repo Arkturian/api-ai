@@ -115,19 +115,31 @@ class BudgetGuardError(Exception):
         self.public_fields = public_fields or {}
 
 
-class DailyBudgetExceeded(BudgetGuardError):
+class BudgetExceeded(BudgetGuardError):
     """Fenster-Grenze erreicht.
 
-    Der Fehlercode bleibt vorerst `daily_budget_exceeded`, obwohl er
-    beim Monatsfenster luegt: Er ist ein geschlossenes Enum auf der
-    Leitung, und ein ausgeliefertes iOS-Geraet prueft darauf. Die
-    Umbenennung braucht AppDevs Zustimmung — die Zahlen daneben
-    brauchen sie nicht und beheben das Problem heute.
+    Der Code heisst `budget_exceeded` und nennt das Fenster NICHT
+    (Issue #1314). Das ist AppDevs Empfehlung und die bessere: Das
+    Fenster steht im Feld `window`, und zwei Stellen fuer dieselbe
+    Aussage driften irgendwann gegeneinander. Ein `monthly_...`/
+    `daily_...` im Namen waere eine zweite Wahrheitsquelle, die beim
+    naechsten Umschalten wieder haengenbleibt — genau so ist der alte
+    Name entstanden.
+
+    Vorgeschichte: Er hiess `daily_budget_exceeded`, unabhaengig davon,
+    worauf `REALTIME_BUDGET_WINDOW` stand. Beide Clients uebersetzten
+    ihn woertlich, und Alexanders Stimme sagte fuenf Tage lang
+    „morgen wieder verfuegbar", waehrend das Fenster erst am Monats-
+    ersten aufging.
+
+    Was ein Client lesen soll, in dieser Reihenfolge: `window` fuer das
+    Fenster, `resets_at` fuer den Zeitpunkt, `used_eur`/`limit_eur` fuer
+    die Zahlen. Der Code sagt NUR, DASS das Budget erschoepft ist.
     """
 
     def __init__(self, profile_id: str, daily_total: float, cap: float):
         super().__init__(
-            "daily_budget_exceeded",
+            "budget_exceeded",
             f"profile={profile_id} total_eur={daily_total:.2f} cap={cap:.2f}",
             public_fields={
                 "window": BUDGET_WINDOW,
@@ -136,6 +148,13 @@ class DailyBudgetExceeded(BudgetGuardError):
                 "resets_at": _window_reset_at(),
             },
         )
+
+
+# Alter Name als Alias. Nicht aus Bequemlichkeit: Wer `except
+# DailyBudgetExceeded` schreibt, soll weiter fangen, was er meint —
+# ein umbenanntes Symbol, das still nicht mehr faengt, waere ein
+# Ausfall an genau der Stelle, die Geld begrenzt.
+DailyBudgetExceeded = BudgetExceeded
 
 
 class MaxParallelExceeded(BudgetGuardError):
@@ -168,9 +187,10 @@ def _window_reset_at() -> str:
     Anlass (2026-08-18): Alexanders Stimme startete fuenf Tage lang
     nicht, und die Meldung sagte „Tageslimit erreicht — morgen wieder
     verfuegbar". Das Fenster stand aber auf `monthly`; „morgen" kam nie.
-    Der Fehlercode heisst bis heute `daily_budget_exceeded`, egal wie
-    das Fenster konfiguriert ist — der Kommentar an `_today_str` sagt
-    sogar ausdruecklich „name kept for compat".
+    Der Fehlercode hiess bis 2026-08-25 `daily_budget_exceeded`, egal wie
+    das Fenster konfiguriert war — der Kommentar an `_today_str` sagt
+    bis heute ausdruecklich „name kept for compat". Seit #1314 heisst er
+    `budget_exceeded` und behauptet ueber das Fenster gar nichts mehr.
 
     **Eine Beschriftung, die eine Umstellung nicht mitgemacht hat,
     altert lautlos.** Deshalb nennt der Fehler ab jetzt das echte
@@ -342,7 +362,7 @@ def reserve_mint(
 ) -> Reservation:
     """Reserve a slot for an imminent mint.
 
-    Raises ``MaxParallelExceeded`` or ``DailyBudgetExceeded`` if the
+    Raises ``MaxParallelExceeded`` or ``BudgetExceeded`` if the
     grant's limits would be violated. Returns a ``Reservation`` handle
     that MUST be passed back to ``release_reservation()`` on mint
     failure or to ``confirm_usage_charge()`` to add real usage to the
@@ -374,7 +394,7 @@ def reserve_mint(
         # least one minimum-cost session beyond what is already booked.
         booked = float(pv.get("daily_total_eur") or 0.0)
         if booked + MIN_SESSION_RESERVE_EUR > daily_budget_eur:
-            raise DailyBudgetExceeded(
+            raise BudgetExceeded(
                 profile_id, booked, daily_budget_eur,
             )
 
