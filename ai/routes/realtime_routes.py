@@ -66,6 +66,7 @@ from ..services.realtime_grant_verifier import (
 )
 from ai.clients.storage_client import storage_api_key
 from ..services import realtime_budget_guard
+from ..services import realtime_session_scope
 from ..services.realtime_budget_guard import (
     BudgetGuardError,
     Reservation,
@@ -3739,6 +3740,24 @@ async def mint_realtime_token(
         jahr = request.collection_year or PRODUCT_FINDER_DEFAULT_YEAR
         instructions = _product_finder_prompt(request.language or "de", marke)
         companion_tools_override = _product_finder_tools(marke)
+        # Scope serverseitig ablegen — der Werkzeug-Dispatch bekommt
+        # spaeter nur eine Sitzungskennung und die Argumente des
+        # Modells. Weder Browser noch Modell duerfen Marke und Jahr
+        # behaupten; deshalb muss es der Server wissen.
+        try:
+            realtime_session_scope.merken(
+                session_id=request.session_id or request.voice_session_id or "",
+                brand=marke,
+                collection_year=jahr,
+                entry_selection=request.entry_selection,
+            )
+        except Exception as exc:
+            # Ein fehlgeschlagener Scope-Schreibvorgang darf den Mint
+            # nicht toeten — die Sitzung startet dann ohne Scope, und
+            # der erste Werkzeugaufruf faellt fail-closed aus. Das ist
+            # unangenehm und ehrlich; ein Mint, der stirbt, ist beides
+            # nicht.
+            logger.warning("Sitzungs-Scope nicht abgelegt: %s", exc)
         logger.info(
             f"Realtime: companion_mode=product-finder "
             f"brand={marke or 'markenoffen'} jahr={jahr} "
