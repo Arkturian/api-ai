@@ -224,3 +224,26 @@ def test_jahr_wird_im_mint_gesetzt_auch_ohne_angabe():
     import inspect
     quelle = inspect.getsource(rr.mint_realtime_token)
     assert "PRODUCT_FINDER_DEFAULT_YEAR" in quelle
+
+
+# ───────────────────── Form der Kriterien (committeter Vertrag c887a89)
+
+def test_sport_ist_eine_liste_mit_MX_und_MTB():
+    """Zweite geratene Schreibweise an derselben Stelle.
+
+    Ich hatte `{"type": "string", "description": "moto oder mtb"}`
+    geschrieben. Der committete Vertrag sagt: Liste, Werte `MX`/`MTB`.
+    Beide Male haette das Modell etwas geliefert, das die Route mit
+    `422` abweist — sichtbar erst im Gespraech.
+    """
+    t = {x["name"]: x for x in rr._product_finder_tools()}["find_products"]
+    sport = t["parameters"]["properties"]["sport"]
+    assert sport["type"] == "array"
+    assert sport["items"]["enum"] == ["MX", "MTB"]
+
+
+def test_kategorie_ist_eine_liste_von_slugs():
+    t = {x["name"]: x for x in rr._product_finder_tools()}["find_products"]
+    kat = t["parameters"]["properties"]["category"]
+    assert kat["type"] == "array"
+    assert kat["items"]["type"] == "string"

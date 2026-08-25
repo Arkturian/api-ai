@@ -3548,8 +3548,18 @@ def _product_finder_tools(brand: Optional[str] = None) -> List[dict]:
     """
     kriterien = {
         "brand": {"type": "string", "enum": list(PRODUCT_FINDER_BRANDS)},
-        "sport": {"type": "string", "description": "moto oder mtb"},
-        "category": {"type": "string"},
+        # Liste, nicht Zeichenkette — und die Werte heissen MX/MTB,
+        # nicht moto/mtb. Ich hatte hier zuerst `"moto oder mtb"` als
+        # freien Text stehen; der committete Vertrag (OnealServ-Codex,
+        # `c887a89`) sagt beides anders. Zweite geratene Schreibweise
+        # heute an derselben Stelle.
+        "sport": {
+            "type": "array",
+            "items": {"type": "string", "enum": ["MX", "MTB"]},
+        },
+        # Kanonische Slugs, nie frei geratene Anzeigenamen — und
+        # ebenfalls eine Liste.
+        "category": {"type": "array", "items": {"type": "string"}},
         "target_group": {"type": "string"},
         "body_part": {"type": "string"},
         "product_type": {"type": "string"},
