@@ -66,6 +66,7 @@ from ..services.realtime_grant_verifier import (
 )
 from ai.clients.storage_client import storage_api_key
 from ..services import realtime_budget_guard
+from ..services import realtime_session_scope
 from ..services.realtime_budget_guard import (
     BudgetGuardError,
     Reservation,
@@ -203,6 +204,39 @@ class RealtimeTokenRequest(BaseModel):
         description=(
             "Federation virtual-bot persona to layer into the system prompt "
             "(same scheme as /ai/{claude,chatgpt,gemini}). Optional."
+        ),
+    )
+    brand: Optional[str] = Field(
+        default=None,
+        description=(
+            "Nur fuer companion_mode='product-finder'. Die im "
+            "Katalogeinstieg gewaehlte Marke, exakter Facet-Name. Der "
+            "Browser schickt den bereits von seinem BrandSelectionGate "
+            "geprueften Wert; der Server prueft ihn ERNEUT gegen seine "
+            "bekannten Marken und bindet ihn unveraenderlich an die "
+            "Sitzung. Ein Markenwechsel beendet die Sitzung und mintet "
+            "eine neue — Marken werden nie unbemerkt gemischt "
+            "(Bauplan #4831, Scope-Regel OnealServ-Codex)."
+        ),
+    )
+    collection_year: Optional[int] = Field(
+        default=None,
+        description=(
+            "Nur fuer 'product-finder'. HARTER Sitzungs-Scope. Ohne "
+            "Angabe setzt der Katalog serverseitig sein eigenes Jahr — "
+            "fuehrt der Sprachpfad es nicht mit, kann seine Auswahl von "
+            "der sichtbaren Katalogmenge abweichen, ohne dass etwas "
+            "fehlschlaegt (OnealServ-Codex, Code-Recheck)."
+        ),
+    )
+    entry_selection: Optional[dict] = Field(
+        default=None,
+        description=(
+            "Nur fuer 'product-finder'. Typisiert und klein: "
+            "{sport_id, category_id|null}. BERATUNGSHINWEIS, keine "
+            "harte Suchgrenze — eine Sprachsuche muss ueber die "
+            "Einstiegskategorie hinaus zeigen koennen. Beeinflusst nur "
+            "die erste Rueckfrage und die Sortierung."
         ),
     )
     companion_mode: Optional[str] = Field(
@@ -739,6 +773,7 @@ SUPPORTED_COMPANION_MODES = {
     "guide-ptt",
     "agent-transparent",
     "arcturian",
+    "product-finder",
 }
 SUPPORTED_DETAIL_LEVELS = {"brief", "balanced", "technical", "flowing"}
 
@@ -3394,6 +3429,193 @@ async def voice_clone(
     }
 
 
+# ── Produktfinder (Bauplan #4831 p-dabc0367a5d6, Phase 1d) ───────────
+
+# Was fest in den Vertrag darf, entscheidet die ANZAHL der Werte — nicht
+# die Wichtigkeit. Jeder Wert hier kostet Vorbau in JEDER Antwort, weil
+# die Realtime-API den ganzen Kontext je Antwort erneut abrechnet
+# (gemessen: 3.608 von 4.919 Tokens je Antwort sind fester Vorbau).
+# Marken (3) und Katalogstruktur passen; Farben (50) und Groessen (239,
+# mit Dubletten wie `One Size`/`ONE SIZE`) nicht — die gehoeren
+# nachgeschlagen. Zahlen von OnealServ-Codex, live gegen `/v1/facets`.
+# EXAKTE Facet-Namen, von OnealServ-Codex am Code geprueft. Ich hatte
+# hier zuerst "ONE" und "KINI" stehen — abgeleitet aus Kurzlabels in
+# einer Zusammenfassung, nicht aus dem Katalog. Der Enum haette jeden
+# echten Wert abgewiesen. Wer Bezeichner aus Prosa ableitet, rechnet
+# mit einer Schreibweise, die nie jemand zugesagt hat.
+PRODUCT_FINDER_BRANDS = ("O'Neal", "ONE Industries", "Kini Red Bull")
+
+# Ohne Angabe setzt `fetchProducts` serverseitig CATALOG_ENTRY_CONFIG.year
+# (derzeit 2027). Fuehrt der Sprachpfad das Jahr NICHT mit, trifft seine
+# Auswahl womoeglich eine andere Menge als die sichtbare Oberflaeche —
+# und nichts schlaegt fehl dabei. Deshalb harter Sitzungs-Scope.
+PRODUCT_FINDER_DEFAULT_YEAR = 2027
+
+
+def _product_finder_prompt(language: str = "de",
+                           brand: Optional[str] = None) -> str:
+    """Persona des sprechenden Produktfinders.
+
+    Drei Dinge stehen hier bewusst NICHT drin:
+
+    * **Kein Werkzeugname fuer etwas, das nicht passieren soll.** Am
+      Arcturian-Agenten gemessen: Die blosse Erwaehnung eines Werkzeugs
+      laesst das Modell danach greifen — ein ausdrueckliches Verbot
+      eingeschlossen, denn ein Verbot ist eine Erwaehnung (8/8 sauber
+      ohne Erwaehnung, 0/8 mit Verbot). Was nicht passieren darf, wird
+      im Code gesperrt, nicht hier formuliert.
+    * **Keine Farb- und Groessenlisten.** Siehe Kommentar oben: Vorbau,
+      jede Antwort, jedes Mal.
+    * **Keine Produktnamen.** Die erreichen das Modell nie; es weiss,
+      DASS zwoelf Helme gezeigt wurden, nicht WELCHE.
+    """
+    # Ist die Sitzung an eine Marke gebunden, nennt die Persona NUR
+    # diese. Sonst wuerde das Modell dem Kunden Marken anbieten, die
+    # der Katalogeinstieg gerade ausgeschlossen hat.
+    marken = brand if brand else ", ".join(PRODUCT_FINDER_BRANDS)
+    return (
+        "Du bist die Stimme im O'Neal-Produktfinder und beraetst den "
+        "Aussendienst beim Kunden.\n\n"
+        f"SORTIMENT: {marken}. Zwei Welten: MOTO und MTB.\n\n"
+        "WIE DU ARBEITEST\n"
+        "Du uebersetzt gesprochenen Bedarf in Filter und fragst nach dem "
+        "EINEN Kriterium, das die Treffermenge am staerksten teilt — "
+        "nicht nach allen auf einmal.\n\n"
+        "WAS DU SIEHST UND WAS NICHT\n"
+        "Du bekommst die ANZAHL der Treffer und ein paar Eckwerte "
+        "(Preisspanne, vorkommende Groessen). Du siehst weder "
+        "Produktnamen noch einzelne Preise. Der Kunde sieht die Karten "
+        "auf dem Bildschirm — du sprichst ueber das, was er sieht, ohne "
+        "es selbst zu kennen. Sag also 'vierunddreissig Stueck zwischen "
+        "49 und 210 Euro'. Erfinde niemals einen Produktnamen.\n\n"
+        "DREI ANTWORTEN, DIE NICHT VERWECHSELT WERDEN DUERFEN\n"
+        "- Es gibt Treffer: nenne Anzahl und Spanne.\n"
+        "- Es gibt nachweislich nichts: 'In L fuehren wir davon nichts. "
+        "Soll ich M mit anschauen?'\n"
+        "- Der Katalog antwortet nicht: 'Der Katalog antwortet gerade "
+        "nicht, ich kann das nicht nachsehen.'\n"
+        "Der Unterschied zwischen den letzten beiden entscheidet: "
+        "'Fuehren wir nicht' bei einer Stoerung ist eine FALSCHE "
+        "AUSKUNFT ueber das Sortiment.\n\n"
+        "GROESSE\n"
+        "Du kannst nach Groesse filtern und die Tabelle des Herstellers "
+        "zeigen lassen. Aus Koerpermassen eine Groesse zu empfehlen "
+        "kannst du NICHT — dazu fehlen die Messwerte im Katalog. Sag das "
+        "gerade heraus, weiche nicht aus: 'Groesse kann ich aus "
+        "Koerpermassen nicht bestimmen, dazu fehlen mir die Tabellen. "
+        "Ich zeig Ihnen, was der Hersteller angibt.'\n\n"
+        "TON\n"
+        "Kurze Saetze. Der Kunde steht daneben und schaut auf den "
+        "Bildschirm; du bist der Kollege, der die Zahlen kennt — nicht "
+        "der Katalog, der sich selbst vorliest."
+    )
+
+
+def _product_finder_brand(roh: Optional[str]) -> Optional[str]:
+    """Marke der Sitzung pruefen. `None` heisst MARKENOFFEN.
+
+    Eigene Funktion statt inline im Mint, damit die Pruefung
+    aufrufbar — also pruefbar — ist. Ein Test, der nur die
+    Fehlermeldung im Quelltext sucht, bleibt gruen, wenn die
+    Bedingung nie zutrifft; genau das ist mir hier passiert.
+
+    Fail-closed: Eine unbekannte Marke hebt die Bindung NICHT
+    stillschweigend auf. Sonst liefe die Sitzung ueber den ganzen
+    Katalog, und niemand saehe es.
+    """
+    marke = (roh or "").strip() or None
+    if marke and marke not in PRODUCT_FINDER_BRANDS:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "error": "unknown_brand",
+                "brand": marke,
+                "known": sorted(PRODUCT_FINDER_BRANDS),
+            },
+        )
+    return marke
+
+
+def _product_finder_tools(brand: Optional[str] = None) -> List[dict]:
+    """Genau zwei Werkzeuge, beide lesend, beide ohne Produktdaten.
+
+    Die Anzeige ist ABSICHTLICH kein Werkzeug. Korrektur von
+    Tschepp-Codex2 am ersten Entwurf: Ein Anzeigewerkzeug in der Hand
+    des Modells kann eine erfundene Artikelnummer oeffnen. Der
+    Anzeigebefehl reist stattdessen IM geprueften Serverresultat und
+    wird vom Browser herausgeloest, bevor das Resultat ins Modell geht —
+    das Modell kann dadurch nur zeigen, was der Server gefunden hat.
+    """
+    kriterien = {
+        "brand": {"type": "string", "enum": list(PRODUCT_FINDER_BRANDS)},
+        # Liste, nicht Zeichenkette — und die Werte heissen MX/MTB,
+        # nicht moto/mtb. Ich hatte hier zuerst `"moto oder mtb"` als
+        # freien Text stehen; der committete Vertrag (OnealServ-Codex,
+        # `c887a89`) sagt beides anders. Zweite geratene Schreibweise
+        # heute an derselben Stelle.
+        "sport": {
+            "type": "array",
+            "items": {"type": "string", "enum": ["MX", "MTB"]},
+        },
+        # Kanonische Slugs, nie frei geratene Anzeigenamen — und
+        # ebenfalls eine Liste.
+        "category": {"type": "array", "items": {"type": "string"}},
+        "target_group": {"type": "string"},
+        "body_part": {"type": "string"},
+        "product_type": {"type": "string"},
+        "product_function": {"type": "string"},
+        "color": {"type": "string"},
+        "size": {"type": "string"},
+        "price_min": {"type": "number"},
+        "price_max": {"type": "number"},
+        "collection_year": {"type": "integer"},
+    }
+    # Das Jahr waehlt das Modell NIE — es ist Sitzungs-Scope und wird
+    # serverseitig injiziert. Als Kriterium waere es nur Vorbau, den
+    # jede Antwort mitbezahlt, und eine Einladung zum Widerspruch.
+    kriterien.pop("collection_year", None)
+    if brand:
+        # Gebundene Sitzung: Das Modell darf die Marke nicht mehr
+        # waehlen — sie steht fest und wird serverseitig gesetzt.
+        # `brand=None` heisst ausdruecklich MARKENOFFEN (Flows `open`
+        # und `direct` ueberspringen die Marke bewusst), nicht
+        # "vergessen" — dann bleibt das Kriterium waehlbar.
+        kriterien.pop("brand", None)
+    ergebnis = (
+        "Zurueck kommen NUR Anzahl, Eckwerte und ein Auswahl-Token — "
+        "keine Produkt-IDs, keine Namen, keine Beschreibungen, keine "
+        "Einzelpreise. Die Karten erscheinen auf dem Bildschirm des "
+        "Kunden, nicht in deinem Kontext."
+    )
+    return [
+        {
+            "type": "function",
+            "name": "find_products",
+            "description": "Neue Suche aus dem gesprochenen Bedarf. " + ergebnis,
+            "parameters": {
+                "type": "object",
+                "properties": dict(kriterien),
+                "additionalProperties": False,
+            },
+        },
+        {
+            "type": "function",
+            "name": "refine_search",
+            "description": (
+                "Bestehende Trefferliste einschraenken, wenn der Kunde "
+                "nachschaerft ('nur O'Neal', 'in L', 'unter hundert'). "
+                "Braucht das Auswahl-Token der laufenden Suche. " + ergebnis
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {"selection_token": {"type": "string"}, **kriterien},
+                "required": ["selection_token"],
+                "additionalProperties": False,
+            },
+        },
+    ]
+
+
 @router.post("/realtime/token")
 async def mint_realtime_token(
     request: RealtimeTokenRequest,
@@ -3522,6 +3744,35 @@ async def mint_realtime_token(
             f"detail_level={detail_level} "
             f"companion_run_id={request.companion_run_id or 'none'} "
             f"({len(instructions)} chars, 0 tools)"
+        )
+    elif companion_mode == "product-finder":
+        marke = _product_finder_brand(request.brand)
+        jahr = request.collection_year or PRODUCT_FINDER_DEFAULT_YEAR
+        instructions = _product_finder_prompt(request.language or "de", marke)
+        companion_tools_override = _product_finder_tools(marke)
+        # Scope serverseitig ablegen — der Werkzeug-Dispatch bekommt
+        # spaeter nur eine Sitzungskennung und die Argumente des
+        # Modells. Weder Browser noch Modell duerfen Marke und Jahr
+        # behaupten; deshalb muss es der Server wissen.
+        try:
+            realtime_session_scope.merken(
+                session_id=request.session_id or request.voice_session_id or "",
+                brand=marke,
+                collection_year=jahr,
+                entry_selection=request.entry_selection,
+            )
+        except Exception as exc:
+            # Ein fehlgeschlagener Scope-Schreibvorgang darf den Mint
+            # nicht toeten — die Sitzung startet dann ohne Scope, und
+            # der erste Werkzeugaufruf faellt fail-closed aus. Das ist
+            # unangenehm und ehrlich; ein Mint, der stirbt, ist beides
+            # nicht.
+            logger.warning("Sitzungs-Scope nicht abgelegt: %s", exc)
+        logger.info(
+            f"Realtime: companion_mode=product-finder "
+            f"brand={marke or 'markenoffen'} jahr={jahr} "
+            f"({len(instructions)} chars, "
+            f"{len(companion_tools_override)} tools)"
         )
     elif companion_mode == "agent-transparent":
         # Content-Post #1235 — first-person transparent relay.
