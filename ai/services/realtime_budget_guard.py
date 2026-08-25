@@ -115,19 +115,31 @@ class BudgetGuardError(Exception):
         self.public_fields = public_fields or {}
 
 
-class DailyBudgetExceeded(BudgetGuardError):
+class BudgetExceeded(BudgetGuardError):
     """Fenster-Grenze erreicht.
 
-    Der Fehlercode bleibt vorerst `daily_budget_exceeded`, obwohl er
-    beim Monatsfenster luegt: Er ist ein geschlossenes Enum auf der
-    Leitung, und ein ausgeliefertes iOS-Geraet prueft darauf. Die
-    Umbenennung braucht AppDevs Zustimmung — die Zahlen daneben
-    brauchen sie nicht und beheben das Problem heute.
+    Der Code heisst `budget_exceeded` und nennt das Fenster NICHT
+    (Issue #1314). Das ist AppDevs Empfehlung und die bessere: Das
+    Fenster steht im Feld `window`, und zwei Stellen fuer dieselbe
+    Aussage driften irgendwann gegeneinander. Ein `monthly_...`/
+    `daily_...` im Namen waere eine zweite Wahrheitsquelle, die beim
+    naechsten Umschalten wieder haengenbleibt — genau so ist der alte
+    Name entstanden.
+
+    Vorgeschichte: Er hiess `daily_budget_exceeded`, unabhaengig davon,
+    worauf `REALTIME_BUDGET_WINDOW` stand. Beide Clients uebersetzten
+    ihn woertlich, und Alexanders Stimme sagte fuenf Tage lang
+    „morgen wieder verfuegbar", waehrend das Fenster erst am Monats-
+    ersten aufging.
+
+    Was ein Client lesen soll, in dieser Reihenfolge: `window` fuer das
+    Fenster, `resets_at` fuer den Zeitpunkt, `used_eur`/`limit_eur` fuer
+    die Zahlen. Der Code sagt NUR, DASS das Budget erschoepft ist.
     """
 
     def __init__(self, profile_id: str, daily_total: float, cap: float):
         super().__init__(
-            "daily_budget_exceeded",
+            "budget_exceeded",
             f"profile={profile_id} total_eur={daily_total:.2f} cap={cap:.2f}",
             public_fields={
                 "window": BUDGET_WINDOW,
@@ -136,6 +148,13 @@ class DailyBudgetExceeded(BudgetGuardError):
                 "resets_at": _window_reset_at(),
             },
         )
+
+
+# Alter Name als Alias. Nicht aus Bequemlichkeit: Wer `except
+# DailyBudgetExceeded` schreibt, soll weiter fangen, was er meint —
+# ein umbenanntes Symbol, das still nicht mehr faengt, waere ein
+# Ausfall an genau der Stelle, die Geld begrenzt.
+DailyBudgetExceeded = BudgetExceeded
 
 
 class MaxParallelExceeded(BudgetGuardError):
@@ -168,9 +187,10 @@ def _window_reset_at() -> str:
     Anlass (2026-08-18): Alexanders Stimme startete fuenf Tage lang
     nicht, und die Meldung sagte „Tageslimit erreicht — morgen wieder
     verfuegbar". Das Fenster stand aber auf `monthly`; „morgen" kam nie.
-    Der Fehlercode heisst bis heute `daily_budget_exceeded`, egal wie
-    das Fenster konfiguriert ist — der Kommentar an `_today_str` sagt
-    sogar ausdruecklich „name kept for compat".
+    Der Fehlercode hiess bis 2026-08-25 `daily_budget_exceeded`, egal wie
+    das Fenster konfiguriert war — der Kommentar an `_today_str` sagt
+    bis heute ausdruecklich „name kept for compat". Seit #1314 heisst er
+    `budget_exceeded` und behauptet ueber das Fenster gar nichts mehr.
 
     **Eine Beschriftung, die eine Umstellung nicht mitgemacht hat,
     altert lautlos.** Deshalb nennt der Fehler ab jetzt das echte
@@ -190,6 +210,32 @@ def _window_reset_at() -> str:
         naechstes = (jetzt + _dt.timedelta(days=1)).replace(
             hour=0, minute=0, second=0, microsecond=0)
     return naechstes.isoformat()
+
+
+SESSION_BUDGET_ENV = "REALTIME_SESSION_BUDGET_EUR"
+
+
+def _session_budget_eur() -> float:
+    """Obergrenze je EINZELNER Sprachsitzung. 0/unbesetzt = keine.
+
+    Der Monatstopf merkt erst nach dem Schaden, dass eine Sitzung teuer
+    war — CloudV2s Punkt 3 in #1283. Die Zahl selbst ist Alex';
+    solange sie fehlt, wird nur GEZAEHLT und nichts abgeschnitten.
+    Zaehlen ohne Grenze ist die Vorbedingung, nicht der halbe Weg: Man
+    kann nicht deckeln, was man nicht misst.
+    """
+    roh = os.environ.get(SESSION_BUDGET_ENV, "").strip()
+    if not roh:
+        return 0.0
+    try:
+        wert = float(roh)
+    except ValueError:
+        logger.warning(
+            "%s=%r ist keine Zahl — Sitzungsgrenze bleibt AUS",
+            SESSION_BUDGET_ENV, roh,
+        )
+        return 0.0
+    return wert if wert > 0 else 0.0
 
 
 def _today_str() -> str:
@@ -316,7 +362,7 @@ def reserve_mint(
 ) -> Reservation:
     """Reserve a slot for an imminent mint.
 
-    Raises ``MaxParallelExceeded`` or ``DailyBudgetExceeded`` if the
+    Raises ``MaxParallelExceeded`` or ``BudgetExceeded`` if the
     grant's limits would be violated. Returns a ``Reservation`` handle
     that MUST be passed back to ``release_reservation()`` on mint
     failure or to ``confirm_usage_charge()`` to add real usage to the
@@ -348,7 +394,7 @@ def reserve_mint(
         # least one minimum-cost session beyond what is already booked.
         booked = float(pv.get("daily_total_eur") or 0.0)
         if booked + MIN_SESSION_RESERVE_EUR > daily_budget_eur:
-            raise DailyBudgetExceeded(
+            raise BudgetExceeded(
                 profile_id, booked, daily_budget_eur,
             )
 
@@ -420,11 +466,21 @@ def confirm_usage_charge(
         uv = _user_view(pv, user_id)
         pv["daily_total_eur"] = float(pv.get("daily_total_eur") or 0.0) + cost_eur
         uv["daily_eur"] = float(uv.get("daily_eur") or 0.0) + cost_eur
+        # Je Sitzung mitfuehren. Der Schluessel ist die voice_session_id;
+        # ohne sie (Altaufrufer) wird nur der Tagestopf gefuehrt, damit
+        # kein Sammeleintrag "" entsteht, der mehrere Sitzungen vermengt.
+        sitzung_eur = None
+        if voice_session_id:
+            je_sitzung = uv.setdefault("session_eur", {})
+            sitzung_eur = float(je_sitzung.get(voice_session_id) or 0.0) + cost_eur
+            je_sitzung[voice_session_id] = sitzung_eur
         snapshot = {
             "profile_id": profile_id,
             "day": today,
             "daily_total_eur": pv["daily_total_eur"],
             "user_daily_eur": uv["daily_eur"],
+            "session_eur": sitzung_eur,
+            "session_budget_eur": _session_budget_eur() or None,
             "active_sessions": list(uv.get("active_sessions") or []),
         }
     logger.info(
@@ -467,6 +523,24 @@ def refresh_lease(
         active = uv.get("active_sessions") or []
         if voice_session_id not in active:
             return False
+        # Sitzungsgrenze — hier und nicht beim Verrechnen: Laufendes
+        # Audio laesst sich nicht hart abschneiden (Codex' v1-Regel,
+        # siehe confirm_usage_charge). Der Herzschlag ist die naechste
+        # Stelle, an der ein Nein ohne Abbruch mitten im Satz wirkt;
+        # der Client kennt `False` bereits als "Sitzung ist zu Ende".
+        grenze = _session_budget_eur()
+        if grenze > 0:
+            verbraucht = float(
+                (uv.get("session_eur") or {}).get(voice_session_id) or 0.0
+            )
+            if verbraucht >= grenze:
+                logger.warning(
+                    "realtime_session_cap profile=%s user=%s vid=%s "
+                    "eur=%.2f >= %.2f — Herzschlag verweigert",
+                    profile_id, user_id[:8], voice_session_id,
+                    verbraucht, grenze,
+                )
+                return False
         started = uv.setdefault("session_started", {})
         started[voice_session_id] = now
     logger.debug(

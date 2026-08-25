@@ -39,41 +39,71 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
+from urllib.parse import urlsplit
+
 import httpx
 
 logger = logging.getLogger(__name__)
 
 
-# OpenAI Realtime pricing — USD per 1M tokens. Source: openai.com/pricing.
-# Realtime models bill audio and text tokens separately; we record both
-# so a Knowledge-style live narration session (mostly audio) is priced
-# differently from a Tool-heavy session (mostly text from function calls).
+# OpenAI Realtime pricing — USD per 1M tokens.
+# Quelle: developers.openai.com/api/docs/pricing, abgerufen 2026-08-22.
+#
+# Zwei Korrekturen an dieser Tabelle, beide am 2026-08-22 gegen die
+# Preisliste geprueft (Issue #1283):
+#
+#   * `gpt-realtime` text_input stand auf 5.00 statt 4.00 und
+#     text_output auf 20.00 statt 16.00 — beides 25 % zu hoch. Text war
+#     im August 2026 mit 64 % der groesste Posten, der Fehler also nicht
+#     akademisch.
+#   * Zwischengespeicherte Eingabe fehlte ganz. Die Realtime-API rechnet
+#     den gesamten Sitzungskontext bei jeder Antwort erneut als Eingabe
+#     ab — aber der stabile Vorbau (Persona, Werkzeuge) wird nach der
+#     ersten Antwort zwischengespeichert und kostet dann ein Zehntel.
+#     Ohne diese Zeilen wird genau der Anteil voll berechnet, der in
+#     Wahrheit fast nichts kostet.
 OPENAI_REALTIME_PRICING = {
     "gpt-realtime": {
-        "audio_input_per_1m":  32.0,
-        "audio_output_per_1m": 64.0,
-        "text_input_per_1m":    5.0,
-        "text_output_per_1m":  20.0,
+        "audio_input_per_1m":         32.0,
+        "audio_input_cached_per_1m":   0.40,
+        "audio_output_per_1m":        64.0,
+        "text_input_per_1m":           4.0,
+        "text_input_cached_per_1m":    0.40,
+        "text_output_per_1m":         16.0,
     },
+    # Die beiden Preview-Modelle stehen hier seit jeher und werden von
+    # SUPPORTED_REALTIME_MODELS nicht angeboten. Ihre Zwischenspeicher-
+    # Preise habe ich NICHT nachgeschlagen — deshalb stehen sie auf dem
+    # vollen Satz. Eine geratene Zahl waere hier schlimmer als gar
+    # keine: Sie saehe aus wie ein Messwert.
     "gpt-4o-realtime-preview": {
-        "audio_input_per_1m":  40.0,
-        "audio_output_per_1m": 80.0,
-        "text_input_per_1m":    5.0,
-        "text_output_per_1m":  20.0,
+        "audio_input_per_1m":         40.0,
+        "audio_input_cached_per_1m":  40.0,
+        "audio_output_per_1m":        80.0,
+        "text_input_per_1m":           5.0,
+        "text_input_cached_per_1m":    5.0,
+        "text_output_per_1m":         20.0,
     },
     "gpt-4o-mini-realtime-preview": {
-        "audio_input_per_1m":  10.0,
-        "audio_output_per_1m": 20.0,
-        "text_input_per_1m":  0.60,
-        "text_output_per_1m": 2.40,
+        "audio_input_per_1m":         10.0,
+        "audio_input_cached_per_1m":  10.0,
+        "audio_output_per_1m":        20.0,
+        "text_input_per_1m":           0.60,
+        "text_input_cached_per_1m":    0.60,
+        "text_output_per_1m":          2.40,
     },
-    # Default fallback — bill at full gpt-realtime rates so we never
-    # silently under-count an unknown model.
+    # Rueckfall fuer unbekannte Modelle: die jeweils TEUERSTE bekannte
+    # Rate, und zwischengespeicherte Eingabe wird VOLL berechnet. Ein
+    # unbekanntes Modell soll lieber zu hoch als zu niedrig zaehlen —
+    # sonst laesst sich der Deckel durch einen Tippfehler im Modellnamen
+    # umgehen.
     "default": {
-        "audio_input_per_1m":  32.0,
-        "audio_output_per_1m": 64.0,
-        "text_input_per_1m":    5.0,
-        "text_output_per_1m":  20.0,
+        "audio_input_per_1m":         32.0,
+        "audio_input_cached_per_1m":  32.0,
+        "audio_output_per_1m":        64.0,
+        "text_input_per_1m":           4.0,
+        "text_input_cached_per_1m":    4.0,
+        "text_output_per_1m":         24.0,
     },
 }
 
@@ -222,15 +252,38 @@ class OpenAIRealtimeCostTracker:
         audio_output_tokens: int,
         text_input_tokens: int,
         text_output_tokens: int,
+        cached_text_input_tokens: int = 0,
+        cached_audio_input_tokens: int = 0,
     ) -> tuple[float, float]:
+        """Preis einer Nutzungsmeldung.
+
+        Die zwischengespeicherten Anteile sind TEILMENGEN der jeweiligen
+        Eingabe, keine zusaetzlichen Tokens: OpenAI meldet sie unter
+        ``input_token_details.cached_tokens``, also innerhalb von
+        ``input_tokens``. Sie werden deshalb abgezogen und zum
+        Zwischenspeicher-Preis wieder aufgeschlagen — nicht addiert.
+
+        Die Kappung ist kein Zierrat: Ohne sie koennte eine Meldung mit
+        ``cached > total`` einen NEGATIVEN Betrag erzeugen und den
+        Monatszaehler nach unten treiben. Wer den Deckel bezahlt, darf
+        nicht durch eine kaputte Meldung darunter rutschen.
+        """
         pricing = OPENAI_REALTIME_PRICING.get(
             model, OPENAI_REALTIME_PRICING["default"]
         )
+        gespeichert_text = max(0, min(int(cached_text_input_tokens or 0),
+                                      int(text_input_tokens or 0)))
+        gespeichert_audio = max(0, min(int(cached_audio_input_tokens or 0),
+                                       int(audio_input_tokens or 0)))
         cost_usd = (
-            audio_input_tokens  * pricing["audio_input_per_1m"]
+            (audio_input_tokens - gespeichert_audio)
+            * pricing["audio_input_per_1m"]
+            + gespeichert_audio * pricing["audio_input_cached_per_1m"]
             + audio_output_tokens * pricing["audio_output_per_1m"]
-            + text_input_tokens   * pricing["text_input_per_1m"]
-            + text_output_tokens  * pricing["text_output_per_1m"]
+            + (text_input_tokens - gespeichert_text)
+            * pricing["text_input_per_1m"]
+            + gespeichert_text * pricing["text_input_cached_per_1m"]
+            + text_output_tokens * pricing["text_output_per_1m"]
         ) / 1_000_000.0
         cost_eur = cost_usd / EUR_USD_RATE
         return cost_usd, cost_eur
@@ -243,6 +296,8 @@ class OpenAIRealtimeCostTracker:
         text_input_tokens: int = 0,
         text_output_tokens: int = 0,
         duration_sec: float = 0.0,
+        cached_text_input_tokens: int = 0,
+        cached_audio_input_tokens: int = 0,
         voice_session_id: Optional[str] = None,
         usage_event_id: Optional[str] = None,
     ) -> dict:
@@ -317,6 +372,8 @@ class OpenAIRealtimeCostTracker:
                     text_input_tokens=text_input_tokens,
                     text_output_tokens=text_output_tokens,
                     duration_sec=duration_sec,
+                    cached_text_input_tokens=cached_text_input_tokens,
+                    cached_audio_input_tokens=cached_audio_input_tokens,
                     voice_session_id=voice_session_id,
                     usage_event_id=usage_event_id,
                 )
@@ -333,6 +390,8 @@ class OpenAIRealtimeCostTracker:
             text_input_tokens,
             text_output_tokens,
             duration_sec,
+            cached_text_input_tokens,
+            cached_audio_input_tokens,
         )
         return {"deduped": False, "accepted": True}
 
@@ -344,6 +403,8 @@ class OpenAIRealtimeCostTracker:
         text_input_tokens: int,
         text_output_tokens: int,
         duration_sec: float,
+        cached_text_input_tokens: int = 0,
+        cached_audio_input_tokens: int = 0,
     ) -> None:
         cost_usd, cost_eur = self._cost_for_session(
             model,
@@ -351,6 +412,8 @@ class OpenAIRealtimeCostTracker:
             audio_output_tokens,
             text_input_tokens,
             text_output_tokens,
+            cached_text_input_tokens,
+            cached_audio_input_tokens,
         )
         if cost_usd <= 0:
             return
@@ -369,6 +432,8 @@ class OpenAIRealtimeCostTracker:
                 "audio_output_tokens": 0,
                 "text_input_tokens": 0,
                 "text_output_tokens": 0,
+                "cached_text_input_tokens": 0,
+                "cached_audio_input_tokens": 0,
                 "duration_sec": 0.0,
                 "cost_usd": 0.0,
                 "cost_eur": 0.0,
@@ -378,6 +443,18 @@ class OpenAIRealtimeCostTracker:
             stats["audio_output_tokens"] += audio_output_tokens
             stats["text_input_tokens"] += text_input_tokens
             stats["text_output_tokens"] += text_output_tokens
+            # Teilmenge der Eingabe, nicht zusaetzlich — beim Lesen der
+            # Datei nicht zur Summe addieren.
+            stats["cached_text_input_tokens"] = (
+                stats.get("cached_text_input_tokens", 0)
+                + max(0, min(int(cached_text_input_tokens or 0),
+                             int(text_input_tokens or 0)))
+            )
+            stats["cached_audio_input_tokens"] = (
+                stats.get("cached_audio_input_tokens", 0)
+                + max(0, min(int(cached_audio_input_tokens or 0),
+                             int(audio_input_tokens or 0)))
+            )
             stats["duration_sec"] += duration_sec
             stats["cost_usd"] += cost_usd
             stats["cost_eur"] += cost_eur
@@ -386,7 +463,9 @@ class OpenAIRealtimeCostTracker:
         logger.info(
             f"OpenAI Realtime tracked: {model} audio_in={audio_input_tokens} "
             f"audio_out={audio_output_tokens} text_in={text_input_tokens} "
-            f"text_out={text_output_tokens} dur={duration_sec:.1f}s "
+            f"text_out={text_output_tokens} "
+            f"cached_text_in={cached_text_input_tokens} "
+            f"dur={duration_sec:.1f}s "
             f"= {cost_eur:.6f}EUR "
             f"(total: {self._usage_data['total_cost_eur']:.4f}EUR)"
         )
@@ -439,7 +518,56 @@ class OpenAIRealtimeCostTracker:
             )
 
     def get_status(self) -> dict:
+        """Zustandsbericht — mit Herkunft der Sperrentscheidung.
+
+        Der Grund für die Herkunftsangabe (Issue #1283): Auf einem
+        Nicht-Master zeigte dieser Bericht die EIGENEN Zahlen — etwa
+        „0,20 von 30,00 EUR, budget_exceeded: false" — daneben aber
+        „requests_blocked: true", weil die Sperre vom Master kommt. Das
+        liest sich wie ein Widerspruch und hat CloudV2 bei der Suche
+        zuerst in die falsche Richtung geschickt.
+
+        Die lokalen Felder bleiben unverändert stehen; wer sie liest,
+        liest weiter dasselbe. Dazu kommt, WER entschieden hat und mit
+        welchen Zahlen.
+        """
         self._maybe_reload_from_file()
+        gesperrt = self.should_block_request()
+        hart = bool(self._usage_data.get("openai_realtime_hard_cap_active"))
+        if hart:
+            herkunft = "hard_cap"
+        elif self.master_url and self.shared_secret:
+            herkunft = "master"
+        else:
+            herkunft = "local"
+        master_sicht = None
+        if herkunft == "master":
+            # Ausdrücklich abrufen statt auf den Zwischenspeicher zu
+            # hoffen, den `should_block_request` nebenbei füllt: Nimmt
+            # der Aufruf den Kurzschluss über die harte Sperre oder
+            # scheitert er, bliebe hier ein leeres oder veraltetes Bild
+            # stehen — und der Bericht behauptete eine Herkunft, deren
+            # Zahlen er nicht zeigt. Der Abruf ist 10 s zwischen-
+            # gespeichert, kostet also keine zweite Anfrage.
+            try:
+                m = self._fetch_master_status() or {}
+            except Exception as exc:
+                m = {}
+                logger.warning(
+                    "cost-status: Master nicht erreichbar (%s) — Herkunft "
+                    "wird als unbekannt ausgewiesen", exc,
+                )
+            master_sicht = {
+                # Nur der Host, nicht die volle URL: Sie kann
+                # Zugangsdaten tragen, und für das Verstehen genügt der
+                # Name der Maschine.
+                "host": urlsplit(self.master_url).hostname or "",
+                "total_cost_eur": m.get("total_cost_eur"),
+                "monthly_budget_eur": m.get("monthly_budget_eur"),
+                "would_block": m.get("would_block"),
+                "month": m.get("month"),
+                "reachable": bool(m),
+            }
         with self._data_lock:
             cost_eur = self._usage_data.get("total_cost_eur", 0)
             return {
@@ -458,7 +586,16 @@ class OpenAIRealtimeCostTracker:
                 "session_count": self._usage_data.get("session_count", 0),
                 "by_model": self._usage_data.get("by_model", {}),
                 "budget_exceeded": self.is_budget_exceeded(),
-                "requests_blocked": self.should_block_request(),
+                "requests_blocked": gesperrt,
+                # Wer hat gesperrt, und womit? Auf einem Nicht-Master
+                # sind die lokalen Zahlen darüber nur Anzeige.
+                "decision_source": herkunft,
+                "master": master_sicht,
+                "note": (
+                    "Sperrentscheidung stammt vom Master; die lokalen "
+                    "Kosten- und Budgetzahlen dieses Hosts sind nur "
+                    "Anzeige und nicht massgeblich."
+                ) if herkunft == "master" else None,
                 "openai_realtime_hard_cap_active": bool(
                     self._usage_data.get("openai_realtime_hard_cap_active")
                 ),
@@ -546,6 +683,8 @@ class OpenAIRealtimeCostTracker:
         text_input_tokens: int,
         text_output_tokens: int,
         duration_sec: float,
+        cached_text_input_tokens: int = 0,
+        cached_audio_input_tokens: int = 0,
         voice_session_id: Optional[str] = None,
         usage_event_id: Optional[str] = None,
     ) -> None:
@@ -559,6 +698,8 @@ class OpenAIRealtimeCostTracker:
                     "audio_output_tokens": audio_output_tokens,
                     "text_input_tokens": text_input_tokens,
                     "text_output_tokens": text_output_tokens,
+                    "cached_text_input_tokens": cached_text_input_tokens,
+                    "cached_audio_input_tokens": cached_audio_input_tokens,
                     "duration_sec": duration_sec,
                     "voice_session_id": voice_session_id,
                     "usage_event_id": usage_event_id,

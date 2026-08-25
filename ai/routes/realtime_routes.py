@@ -404,6 +404,21 @@ class RealtimeUsageReport(BaseModel):
     audio_output_tokens: int = 0
     text_input_tokens: int = 0
     text_output_tokens: int = 0
+    # Zwischengespeicherte Eingabe aus `response.done`:
+    # ``usage.input_token_details.cached_tokens_details.{text,audio}_tokens``.
+    # Es sind TEILMENGEN von text_input_tokens bzw. audio_input_tokens,
+    # keine zusaetzlichen Tokens — nicht aufaddieren.
+    #
+    # Warum das Feld nachtraeglich kam (Issue #1283): Die Realtime-API
+    # rechnet den ganzen Sitzungskontext bei jeder Antwort erneut als
+    # Eingabe ab. Der stabile Vorbau — Persona und Werkzeuge, gemessen
+    # 3.608 von 4.919 Tokens je Antwort — wird dabei aber
+    # zwischengespeichert und kostet ein Zehntel. Wer diese Zahl nicht
+    # meldet, laesst genau den groessten Posten zum vollen Preis
+    # verbuchen. Vorgabe 0 heisst: nichts als zwischengespeichert
+    # angenommen, also niemals zu WENIG gezaehlt.
+    cached_text_input_tokens: int = 0
+    cached_audio_input_tokens: int = 0
     duration_sec: float = 0.0
     # Idempotency keys (Codex IACP, Post #1215). Pre-existing callers
     # may not set these; we'll log a non-idempotent warning. New
@@ -454,9 +469,20 @@ class DevlogUpsertRequest(BaseModel):
     growing transcript every ~2.5 s (debounced) and on stop. The server
     upserts by ``voice_session_id`` so the latest payload always wins.
 
-    Storage is dev-only, owner-scoped via the bearer-JWT email claim,
-    and purgeable via DELETE. The FE-toggle ships off-by-default; this
-    endpoint accepts whatever it gets without minting policy.
+    Storage is owner-scoped via the verified grant
+    (``sub:tenant:profile``) and purgeable via DELETE.
+
+    Der Satz, der hier bis 2026-08-22 stand — "the FE-toggle ships
+    off-by-default; this endpoint accepts whatever it gets without
+    minting policy" — beschrieb eine Arbeitsteilung, deren andere
+    Hälfte nie ausgeliefert wurde: Der Browser-Riegel ist nie auf
+    cloud-v2 `main` gelangt (Issue #1267). Übrig blieb ein Schreibweg
+    ohne jede Bedingung, der wörtliche Rede dauerhaft ablegt.
+
+    Deshalb gibt es jetzt ``retention_consent`` und den Schalter
+    ``REALTIME_DEVLOG_REQUIRE_CONSENT``. Der Schalter steht auf AUS —
+    das Verhalten ist unverändert, bis jemand ihn umlegt. Er existiert,
+    damit die Entscheidung eine Zeile ist und kein Umbau.
     """
 
     voice_session_id: str = Field(
@@ -474,6 +500,16 @@ class DevlogUpsertRequest(BaseModel):
     ended_at: Optional[Any] = Field(
         default=None,
         description="Epoch-ms or ISO when the capture finished (null mid-run).",
+    )
+    retention_consent: Optional[bool] = Field(
+        default=None,
+        description=(
+            "Hat der SPRECHER der dauerhaften Aufbewahrung dieses "
+            "Mitschnitts zugestimmt? Solange "
+            "REALTIME_DEVLOG_REQUIRE_CONSENT aus ist, wird das Feld "
+            "nur mitgeschrieben. Ist der Schalter an, ist alles ausser "
+            "`true` eine Ablehnung — auch das Fehlen des Feldes."
+        ),
     )
     lines: List[DevlogLine] = Field(
         default_factory=list,
@@ -4201,6 +4237,8 @@ async def realtime_usage_report(
         audio_output_tokens=report.audio_output_tokens,
         text_input_tokens=report.text_input_tokens,
         text_output_tokens=report.text_output_tokens,
+        cached_text_input_tokens=report.cached_text_input_tokens,
+        cached_audio_input_tokens=report.cached_audio_input_tokens,
         duration_sec=report.duration_sec,
         voice_session_id=report.voice_session_id or report.session_id,
         usage_event_id=report.usage_event_id,
@@ -4221,6 +4259,8 @@ async def realtime_usage_report(
                 audio_output_tokens=report.audio_output_tokens,
                 text_input_tokens=report.text_input_tokens,
                 text_output_tokens=report.text_output_tokens,
+                cached_text_input_tokens=report.cached_text_input_tokens,
+                cached_audio_input_tokens=report.cached_audio_input_tokens,
             )
             realtime_budget_guard.confirm_usage_charge(
                 profile_id=grant.profile_id,
@@ -4339,6 +4379,13 @@ async def realtime_session_end(
 
 DEVLOG_ROOT = "/var/lib/api-ai/devlogs"
 DEVLOG_SECRET_ENV = "DEVLOG_DEV_SECRET"
+DEVLOG_CONSENT_ENV = "REALTIME_DEVLOG_REQUIRE_CONSENT"
+DEVLOG_RETENTION_ENV = "REALTIME_DEVLOG_RETENTION_DAYS"
+# Wie oft ein Arbeitsprozess hoechstens durchkehrt. Der Verfall
+# muss nicht auf die Minute genau greifen; er muss ueberhaupt
+# greifen, ohne bei jedem Schreibvorgang die Ablage abzugehen.
+_DEVLOG_SWEEP_INTERVAL_SEC = 3600.0
+_devlog_letzter_kehrgang = 0.0
 
 
 def _extract_owner_from_jwt(authorization: Optional[str]) -> Optional[str]:
@@ -4425,6 +4472,129 @@ def _check_dev_secret(header_secret: Optional[str]) -> None:
         )
 
 
+def _devlog_retention_days() -> float:
+    """Aufbewahrungsfrist in Tagen. 0 oder nicht gesetzt = kein Verfall.
+
+    Ohne Zahl passiert nichts — genau wie heute. Der Wert ist Alex'
+    Entscheidung (Issue #1267); hier steht nur die Mechanik, damit die
+    Entscheidung eine Zeile ist und kein Umbau.
+    """
+    roh = os.environ.get(DEVLOG_RETENTION_ENV, "").strip()
+    if not roh:
+        return 0.0
+    try:
+        tage = float(roh)
+    except ValueError:
+        logger.warning(
+            "%s=%r ist keine Zahl — Verfall bleibt AUS", DEVLOG_RETENTION_ENV, roh,
+        )
+        return 0.0
+    return tage if tage > 0 else 0.0
+
+
+def _devlog_kehre_aus(max_alter_tage: float) -> int:
+    """Loescht abgelaufene Mitschnitte. Gibt die Anzahl zurueck.
+
+    Das Alter kommt aus ``received_at`` IM Datensatz, nicht aus der
+    mtime der Datei: Ein Umzug, ein `cp -r` oder eine Sicherung setzt
+    Dateizeiten neu und wuerde die Frist stillschweigend verlaengern.
+    Faellt das Feld aus, zieht die mtime als Notbehelf nach.
+
+    Faellt hier etwas um, darf es den Schreibweg nicht mitreissen —
+    ein nicht gekehrter Mitschnitt ist ein Aufraeumproblem, ein
+    abgestuerzter Schreibvorgang ein Datenverlust.
+    """
+    if max_alter_tage <= 0 or not os.path.isdir(DEVLOG_ROOT):
+        return 0
+    grenze = time.time() - max_alter_tage * 86400.0
+    geloescht = 0
+    for eimer in os.listdir(DEVLOG_ROOT):
+        eimer_pfad = os.path.join(DEVLOG_ROOT, eimer)
+        if not os.path.isdir(eimer_pfad):
+            continue
+        for name in os.listdir(eimer_pfad):
+            if not name.endswith(".json"):
+                continue
+            pfad = os.path.join(eimer_pfad, name)
+            try:
+                with open(pfad, "r", encoding="utf-8") as f:
+                    alter = json.load(f).get("received_at")
+                if not isinstance(alter, (int, float)):
+                    alter = os.path.getmtime(pfad)
+                if alter < grenze:
+                    os.remove(pfad)
+                    geloescht += 1
+            except Exception as exc:
+                logger.warning("Devlog-Kehrgang: %s uebersprungen (%s)", pfad, exc)
+    if geloescht:
+        logger.info(
+            "Devlog-Kehrgang: %d Mitschnitte aelter als %.1f Tage geloescht",
+            geloescht, max_alter_tage,
+        )
+    return geloescht
+
+
+def _devlog_kehre_gedrosselt() -> None:
+    """Hoechstens einmal je Intervall und Arbeitsprozess.
+
+    Bei zwei uvicorn-Arbeitern kehrt jeder fuer sich — das Loeschen ist
+    idempotent, doppelte Laeufe schaden nicht.
+    """
+    global _devlog_letzter_kehrgang
+    tage = _devlog_retention_days()
+    if tage <= 0:
+        return
+    jetzt = time.time()
+    if jetzt - _devlog_letzter_kehrgang < _DEVLOG_SWEEP_INTERVAL_SEC:
+        return
+    _devlog_letzter_kehrgang = jetzt
+    try:
+        _devlog_kehre_aus(tage)
+    except Exception as exc:
+        logger.warning("Devlog-Kehrgang fehlgeschlagen: %s", exc)
+
+
+def _devlog_consent_required() -> bool:
+    """Ist der Einwilligungsriegel scharf?
+
+    Default AUS. Das ist bewusst und nicht Bequemlichkeit: Der einzige
+    heutige Anrufer (CloudV2) sendet das Feld noch nicht, und ein
+    Riegel, der beim Ausrollen sofort greift, nimmt einem Gegenüber die
+    Funktion weg, statt sie ihm zu überlassen. Wer die Fähigkeit nutzt,
+    legt den Schalter um — nicht wer sie ausliefert.
+    """
+    return os.environ.get(DEVLOG_CONSENT_ENV, "").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
+
+
+def _pruefe_devlog_einwilligung(consent: Optional[bool]) -> None:
+    """Fail-closed, wenn der Riegel scharf ist.
+
+    Alles ausser ``True`` ist eine Ablehnung — auch ``None``. Ein
+    fehlendes Feld darf nicht als Zustimmung durchgehen, sonst ist der
+    Riegel genau für den Client offen, der von ihm nichts weiss.
+    """
+    if not _devlog_consent_required():
+        return
+    if consent is True:
+        return
+    raise HTTPException(
+        status_code=403,
+        detail={
+            "error": "devlog_retention_consent_required",
+            "hint": (
+                "Dauerhafte Aufbewahrung gesprochener Inhalte ist auf "
+                "dieser Instanz zustimmungspflichtig. Sende "
+                "retention_consent=true, wenn der SPRECHER zugestimmt "
+                "hat. Ohne Zustimmung nichts senden — ein Mitschnitt "
+                "ohne Einwilligung ist kein halber Mitschnitt."
+            ),
+            "field": "retention_consent",
+        },
+    )
+
+
 @router.post("/realtime/devlog")
 async def realtime_devlog_upsert(
     body: DevlogUpsertRequest,
@@ -4443,6 +4613,11 @@ async def realtime_devlog_upsert(
     inside the owner's bucket. CloudV2 re-POSTs the growing transcript
     every ~2.5 s and on stop; the latest payload always wins.
     """
+    # Vor jedem Schreiben, nicht danach: Der Fehler, den ich hier
+    # gerade repariert habe, lag NACH `os.replace` — geschrieben und
+    # trotzdem 500 gemeldet. Ein Riegel an derselben Stelle wäre ein
+    # Riegel, der die Tür erst hinter dem Gast zuzieht.
+    _pruefe_devlog_einwilligung(body.retention_consent)
     # Stable-id owner bucket — Codex Punkt 5 (no email-as-primary-key).
     owner_key = f"{grant.sub}:{grant.tenant_id}:{grant.profile_id}"
     path = _devlog_path(owner_key, body.voice_session_id)
@@ -4455,6 +4630,8 @@ async def realtime_devlog_upsert(
         "agent": body.agent,
         "started_at": body.started_at,
         "ended_at": body.ended_at,
+        "retention_consent": body.retention_consent,
+        "consent_enforced": _devlog_consent_required(),
         "line_count": len(body.lines),
         "lines": [line.dict(exclude_none=True) for line in body.lines],
         "received_at": time.time(),
@@ -4467,14 +4644,18 @@ async def realtime_devlog_upsert(
         finally:
             fcntl.flock(f.fileno(), fcntl.LOCK_UN)
     os.replace(tmp_path, path)
+    # Nach dem Schreiben, nicht davor: Der eigene Mitschnitt ist gerade
+    # frisch, kann also nie das Opfer sein — und ein Kehrgang, der
+    # klemmt, darf den Schreibvorgang nicht verzoegern.
+    _devlog_kehre_gedrosselt()
     logger.info(
         "Devlog upsert: voice_session_id=%s owner=%s lines=%d",
-        body.voice_session_id, owner or "anonymous", len(body.lines),
+        body.voice_session_id, owner_key, len(body.lines),
     )
     return {
         "accepted": True,
         "voice_session_id": body.voice_session_id,
-        "owner": owner,
+        "owner": owner_key,
         "line_count": len(body.lines),
     }
 

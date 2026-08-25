@@ -204,6 +204,13 @@ class _OpenAIRealtimeSharedTrackPayload(BaseModel):
     audio_input_tokens: int = 0
     audio_output_tokens: int = 0
     text_input_tokens: int = 0
+    # Zwischengespeicherte Eingabe — TEILMENGE der beiden Eingabezahlen
+    # oben, nicht zusaetzlich (OpenAI meldet sie unter
+    # input_token_details.cached_tokens). Vorgabe 0: Ein aelterer Client,
+    # der das Feld nicht kennt, rechnet wie bisher, nur zum richtigen
+    # Preis.
+    cached_text_input_tokens: int = 0
+    cached_audio_input_tokens: int = 0
     text_output_tokens: int = 0
     duration_sec: float = 0.0
     source_host: Optional[str] = None
@@ -476,6 +483,8 @@ async def openai_realtime_cost_shared_state_track(
             audio_output_tokens=payload.audio_output_tokens,
             text_input_tokens=payload.text_input_tokens,
             text_output_tokens=payload.text_output_tokens,
+            cached_text_input_tokens=payload.cached_text_input_tokens,
+            cached_audio_input_tokens=payload.cached_audio_input_tokens,
             duration_sec=payload.duration_sec,
             voice_session_id=payload.voice_session_id,
             usage_event_id=payload.usage_event_id,

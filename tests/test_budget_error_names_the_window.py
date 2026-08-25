@@ -12,9 +12,11 @@ ODER einen Monat, und der Kommentar sagt selbst „name kept for compat".
 Eine Beschriftung, die eine Umstellung nicht mitgemacht hat, altert
 lautlos.
 
-Der Fehlercode bleibt vorerst, weil ein ausgeliefertes iOS-Geraet ihn
-als geschlossenes Enum prueft — die Umbenennung braucht AppDevs
-Zustimmung. Die Zahlen daneben brauchen sie nicht.
+Damals blieb der Fehlercode stehen, weil ein ausgeliefertes iOS-Geraet
+ihn als geschlossenes Enum prueft. Seit #1314 liegt AppDevs Zustimmung
+vor und der Code heisst `budget_exceeded` — siehe
+`tests/test_budget_fehlercode.py` fuer die Regeln, die dabei
+gelten.
 """
 
 from ai.services import realtime_budget_guard as g
