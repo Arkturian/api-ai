@@ -134,3 +134,93 @@ def test_persona_sagt_zur_passform_ehrlich_nein():
 def test_persona_verbietet_erfundene_produktnamen():
     text = rr._product_finder_prompt("de")
     assert "Erfinde niemals einen Produktnamen" in text
+
+
+# ────────────────────────────── Sitzungs-Scope (OnealServ-Codex, #4831)
+
+def test_markennamen_sind_die_echten_facet_werte():
+    """Der Fehler, den ich hier selbst gemacht habe.
+
+    Ich hatte `("O'Neal", "ONE", "KINI")` geschrieben — abgeleitet aus
+    Kurzlabels in einer Zusammenfassung, nicht aus dem Katalog. Der
+    Enum haette jeden echten Wert abgewiesen, und zwar erst beim ersten
+    Kundengespraech. Wer Bezeichner aus Prosa ableitet, rechnet mit
+    einer Schreibweise, die nie jemand zugesagt hat.
+    """
+    assert rr.PRODUCT_FINDER_BRANDS == ("O'Neal", "ONE Industries", "Kini Red Bull")
+
+
+def test_markenoffen_ist_ein_zustand_kein_versehen():
+    """`brand=None` heisst markenoffener Katalog — die Flows `open` und
+    `direct` ueberspringen die Marke bewusst. Dann MUSS das Kriterium
+    waehlbar bleiben, sonst kann der Agent dort gar nicht filtern."""
+    offen = {t["name"]: t for t in rr._product_finder_tools(None)}
+    assert "brand" in offen["find_products"]["parameters"]["properties"]
+    gebunden = {t["name"]: t for t in rr._product_finder_tools("O'Neal")}
+    assert "brand" not in gebunden["find_products"]["parameters"]["properties"]
+
+
+def test_persona_nennt_bei_bindung_nur_die_eine_marke():
+    text = rr._product_finder_prompt("de", "Kini Red Bull")
+    assert "Kini Red Bull" in text
+    assert "ONE Industries" not in text
+
+
+@pytest.mark.parametrize("werkzeug", ["find_products", "refine_search"])
+def test_jahr_ist_kein_modell_kriterium(werkzeug):
+    """Das Jahr ist Sitzungs-Scope und wird serverseitig injiziert.
+
+    Ohne Angabe setzt der Katalog sein eigenes Jahr. Fuehrt der
+    Sprachpfad es nicht mit, trifft seine Auswahl womoeglich eine
+    andere Menge als die sichtbare Oberflaeche — **und nichts schlaegt
+    dabei fehl**. Genau diese Sorte lautloser Abweichung.
+    """
+    for gebunden in (None, "O'Neal"):
+        t = {x["name"]: x for x in rr._product_finder_tools(gebunden)}[werkzeug]
+        assert "collection_year" not in t["parameters"]["properties"]
+
+
+def test_mint_kennt_die_beiden_scope_felder():
+    felder = rr.RealtimeTokenRequest.model_fields
+    for name in ("brand", "collection_year", "entry_selection"):
+        assert name in felder, f"{name} fehlt an der Anfrage"
+        assert felder[name].default is None
+
+
+def test_unbekannte_marke_wird_abgewiesen_statt_fallengelassen():
+    """Fail-closed, und zwar AUFGERUFEN statt im Quelltext gesucht.
+
+    Die erste Fassung dieses Tests suchte nur die Zeichenkette
+    `"error": "unknown_brand"` im Quelltext. Sie blieb gruen, als ich
+    die Bedingung zur Gegenprobe auf `if False:` setzte — die
+    Fehlermeldung stand ja weiter da, nur unerreichbar. Deshalb sitzt
+    die Pruefung jetzt in einer eigenen Funktion, die man rufen kann.
+    """
+    from fastapi import HTTPException
+
+    with pytest.raises(HTTPException) as exc:
+        rr._product_finder_brand("Fox Racing")
+    assert exc.value.status_code == 422
+    assert exc.value.detail["error"] == "unknown_brand"
+    assert exc.value.detail["brand"] == "Fox Racing"
+    assert sorted(rr.PRODUCT_FINDER_BRANDS) == exc.value.detail["known"]
+
+
+@pytest.mark.parametrize("roh,erwartet", [
+    (None, None), ("", None), ("   ", None),
+    ("O'Neal", "O'Neal"), ("  Kini Red Bull  ", "Kini Red Bull"),
+])
+def test_markenpruefung_normalisiert_und_laesst_markenoffen_zu(roh, erwartet):
+    assert rr._product_finder_brand(roh) == erwartet
+
+
+def test_mint_benutzt_die_pruefung():
+    import inspect
+    assert "_product_finder_brand(request.brand)" in inspect.getsource(
+        rr.mint_realtime_token)
+
+
+def test_jahr_wird_im_mint_gesetzt_auch_ohne_angabe():
+    import inspect
+    quelle = inspect.getsource(rr.mint_realtime_token)
+    assert "PRODUCT_FINDER_DEFAULT_YEAR" in quelle

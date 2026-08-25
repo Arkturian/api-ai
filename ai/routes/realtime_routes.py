@@ -205,6 +205,39 @@ class RealtimeTokenRequest(BaseModel):
             "(same scheme as /ai/{claude,chatgpt,gemini}). Optional."
         ),
     )
+    brand: Optional[str] = Field(
+        default=None,
+        description=(
+            "Nur fuer companion_mode='product-finder'. Die im "
+            "Katalogeinstieg gewaehlte Marke, exakter Facet-Name. Der "
+            "Browser schickt den bereits von seinem BrandSelectionGate "
+            "geprueften Wert; der Server prueft ihn ERNEUT gegen seine "
+            "bekannten Marken und bindet ihn unveraenderlich an die "
+            "Sitzung. Ein Markenwechsel beendet die Sitzung und mintet "
+            "eine neue — Marken werden nie unbemerkt gemischt "
+            "(Bauplan #4831, Scope-Regel OnealServ-Codex)."
+        ),
+    )
+    collection_year: Optional[int] = Field(
+        default=None,
+        description=(
+            "Nur fuer 'product-finder'. HARTER Sitzungs-Scope. Ohne "
+            "Angabe setzt der Katalog serverseitig sein eigenes Jahr — "
+            "fuehrt der Sprachpfad es nicht mit, kann seine Auswahl von "
+            "der sichtbaren Katalogmenge abweichen, ohne dass etwas "
+            "fehlschlaegt (OnealServ-Codex, Code-Recheck)."
+        ),
+    )
+    entry_selection: Optional[dict] = Field(
+        default=None,
+        description=(
+            "Nur fuer 'product-finder'. Typisiert und klein: "
+            "{sport_id, category_id|null}. BERATUNGSHINWEIS, keine "
+            "harte Suchgrenze — eine Sprachsuche muss ueber die "
+            "Einstiegskategorie hinaus zeigen koennen. Beeinflusst nur "
+            "die erste Rueckfrage und die Sortierung."
+        ),
+    )
     companion_mode: Optional[str] = Field(
         default=None,
         description=(
@@ -3404,10 +3437,22 @@ async def voice_clone(
 # Marken (3) und Katalogstruktur passen; Farben (50) und Groessen (239,
 # mit Dubletten wie `One Size`/`ONE SIZE`) nicht — die gehoeren
 # nachgeschlagen. Zahlen von OnealServ-Codex, live gegen `/v1/facets`.
-PRODUCT_FINDER_BRANDS = ("O'Neal", "ONE", "KINI")
+# EXAKTE Facet-Namen, von OnealServ-Codex am Code geprueft. Ich hatte
+# hier zuerst "ONE" und "KINI" stehen — abgeleitet aus Kurzlabels in
+# einer Zusammenfassung, nicht aus dem Katalog. Der Enum haette jeden
+# echten Wert abgewiesen. Wer Bezeichner aus Prosa ableitet, rechnet
+# mit einer Schreibweise, die nie jemand zugesagt hat.
+PRODUCT_FINDER_BRANDS = ("O'Neal", "ONE Industries", "Kini Red Bull")
+
+# Ohne Angabe setzt `fetchProducts` serverseitig CATALOG_ENTRY_CONFIG.year
+# (derzeit 2027). Fuehrt der Sprachpfad das Jahr NICHT mit, trifft seine
+# Auswahl womoeglich eine andere Menge als die sichtbare Oberflaeche —
+# und nichts schlaegt fehl dabei. Deshalb harter Sitzungs-Scope.
+PRODUCT_FINDER_DEFAULT_YEAR = 2027
 
 
-def _product_finder_prompt(language: str = "de") -> str:
+def _product_finder_prompt(language: str = "de",
+                           brand: Optional[str] = None) -> str:
     """Persona des sprechenden Produktfinders.
 
     Drei Dinge stehen hier bewusst NICHT drin:
@@ -3423,7 +3468,10 @@ def _product_finder_prompt(language: str = "de") -> str:
     * **Keine Produktnamen.** Die erreichen das Modell nie; es weiss,
       DASS zwoelf Helme gezeigt wurden, nicht WELCHE.
     """
-    marken = ", ".join(PRODUCT_FINDER_BRANDS)
+    # Ist die Sitzung an eine Marke gebunden, nennt die Persona NUR
+    # diese. Sonst wuerde das Modell dem Kunden Marken anbieten, die
+    # der Katalogeinstieg gerade ausgeschlossen hat.
+    marken = brand if brand else ", ".join(PRODUCT_FINDER_BRANDS)
     return (
         "Du bist die Stimme im O'Neal-Produktfinder und beraetst den "
         "Aussendienst beim Kunden.\n\n"
@@ -3462,7 +3510,32 @@ def _product_finder_prompt(language: str = "de") -> str:
     )
 
 
-def _product_finder_tools() -> List[dict]:
+def _product_finder_brand(roh: Optional[str]) -> Optional[str]:
+    """Marke der Sitzung pruefen. `None` heisst MARKENOFFEN.
+
+    Eigene Funktion statt inline im Mint, damit die Pruefung
+    aufrufbar — also pruefbar — ist. Ein Test, der nur die
+    Fehlermeldung im Quelltext sucht, bleibt gruen, wenn die
+    Bedingung nie zutrifft; genau das ist mir hier passiert.
+
+    Fail-closed: Eine unbekannte Marke hebt die Bindung NICHT
+    stillschweigend auf. Sonst liefe die Sitzung ueber den ganzen
+    Katalog, und niemand saehe es.
+    """
+    marke = (roh or "").strip() or None
+    if marke and marke not in PRODUCT_FINDER_BRANDS:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "error": "unknown_brand",
+                "brand": marke,
+                "known": sorted(PRODUCT_FINDER_BRANDS),
+            },
+        )
+    return marke
+
+
+def _product_finder_tools(brand: Optional[str] = None) -> List[dict]:
     """Genau zwei Werkzeuge, beide lesend, beide ohne Produktdaten.
 
     Die Anzeige ist ABSICHTLICH kein Werkzeug. Korrektur von
@@ -3486,6 +3559,17 @@ def _product_finder_tools() -> List[dict]:
         "price_max": {"type": "number"},
         "collection_year": {"type": "integer"},
     }
+    # Das Jahr waehlt das Modell NIE — es ist Sitzungs-Scope und wird
+    # serverseitig injiziert. Als Kriterium waere es nur Vorbau, den
+    # jede Antwort mitbezahlt, und eine Einladung zum Widerspruch.
+    kriterien.pop("collection_year", None)
+    if brand:
+        # Gebundene Sitzung: Das Modell darf die Marke nicht mehr
+        # waehlen — sie steht fest und wird serverseitig gesetzt.
+        # `brand=None` heisst ausdruecklich MARKENOFFEN (Flows `open`
+        # und `direct` ueberspringen die Marke bewusst), nicht
+        # "vergessen" — dann bleibt das Kriterium waehlbar.
+        kriterien.pop("brand", None)
     ergebnis = (
         "Zurueck kommen NUR Anzahl, Eckwerte und ein Auswahl-Token — "
         "keine Produkt-IDs, keine Namen, keine Beschreibungen, keine "
@@ -3651,10 +3735,13 @@ async def mint_realtime_token(
             f"({len(instructions)} chars, 0 tools)"
         )
     elif companion_mode == "product-finder":
-        instructions = _product_finder_prompt(request.language or "de")
-        companion_tools_override = _product_finder_tools()
+        marke = _product_finder_brand(request.brand)
+        jahr = request.collection_year or PRODUCT_FINDER_DEFAULT_YEAR
+        instructions = _product_finder_prompt(request.language or "de", marke)
+        companion_tools_override = _product_finder_tools(marke)
         logger.info(
             f"Realtime: companion_mode=product-finder "
+            f"brand={marke or 'markenoffen'} jahr={jahr} "
             f"({len(instructions)} chars, "
             f"{len(companion_tools_override)} tools)"
         )
