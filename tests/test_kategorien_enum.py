@@ -159,3 +159,43 @@ def test_die_persona_sagt_was_bei_keinem_treffer_zu_tun_ist():
     t = rr._product_finder_prompt("de", "O'Neal")
     assert "KATEGORIEN" in t
     assert "LASS ES WEG" in t
+
+
+# ═══════════ die ECHTE Antwortform, nicht die angenommene ═══════════
+
+def test_die_echte_antwortform_von_oneal_wird_gelesen(monkeypatch):
+    """Aufgezeichnet aus der Produktion am 2026-08-27 00:10.
+
+    Meine erste Fassung parste `items`/`categories` — oneal liefert
+    aber `data`. Ergebnis: HTTP 200, null Eintraege, und mein
+    Leer-Schutz machte daraus lautlos die Rueckfallliste. Der Abruf
+    war „erfolgreich" und wirkungslos.
+
+    Bitterer Teil: Mein erster Test benutzte eine nackte Liste — also
+    die Form, die ich ANGENOMMEN hatte. Ein Test gegen die eigene
+    Annahme prueft nichts.
+    """
+    monkeypatch.setenv(rr.ONEAL_SELECTION_BASE_ENV, "https://oneal.example")
+    monkeypatch.setenv(rr.ONEAL_API_KEY_ENV, "k")
+
+    class _A:
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return {"data": [
+                {"id": 17177, "name": "ADV Pants", "slug": "adv-pants",
+                 "name_de": "ADV Pants", "name_en": None},
+                {"id": 29, "name": "Bags / Backpacks",
+                 "slug": "bags---backpacks",
+                 "name_de": "Taschen / Rucksäcke", "name_en": None},
+                {"id": 99, "name": "Z-Spare Parts Helmets",
+                 "slug": "z-spare-parts-helmets",
+                 "name_de": "Ersatzteile Helme", "name_en": None},
+            ]}
+
+    monkeypatch.setattr(rr.httpx, "get", lambda *a, **k: _A())
+    werte = rr._oneal_kategorien()
+    assert werte == ["adv-pants", "bags---backpacks"]
+    assert werte != list(rr.ONEAL_KATEGORIEN_RUECKFALL), \
+        "Rueckfallliste statt Live-Liste — der Abruf ist wirkungslos"

@@ -5174,8 +5174,15 @@ def _oneal_kategorien() -> List[str]:
                           headers={"X-API-Key": schluessel}, timeout=4.0)
             if r.status_code == 200:
                 roh = r.json()
+                # oneal antwortet mit {"data": [...]}. Die anderen
+                # Namen stehen als Toleranz daneben — aber `data` ist
+                # der Fall, der WIRKLICH vorkommt. Ohne ihn lieferte
+                # der Abruf HTTP 200 und null Eintraege, und mein
+                # Leer-Schutz machte daraus lautlos die Rueckfallliste:
+                # gruen an der Naht, tot am Ziel.
                 liste = roh if isinstance(roh, list) else (
-                    roh.get("items") or roh.get("categories") or [])
+                    roh.get("data") or roh.get("items")
+                    or roh.get("categories") or [])
                 slugs = [
                     x if isinstance(x, str) else (x.get("slug") or "")
                     for x in liste
