@@ -66,6 +66,7 @@ from ..services.realtime_grant_verifier import (
 )
 from ai.clients.storage_client import storage_api_key
 from ..services import realtime_budget_guard
+from ..services.realtime_identity import kurz_id
 from ..services import realtime_session_scope
 from ..services.realtime_budget_guard import (
     BudgetGuardError,
@@ -4167,6 +4168,7 @@ async def mint_realtime_token(
             voice_session_id=voice_session_id,
             max_parallel_sessions=grant.max_parallel_sessions,
             daily_budget_eur=grant.daily_budget_eur,
+            monthly_budget_eur=grant.monthly_budget_eur,
         )
     except BudgetGuardError as exc:
         logger.warning(
@@ -4590,7 +4592,7 @@ async def realtime_session_heartbeat(
         logger.warning(
             "realtime_heartbeat MISS profile=%s user=%s asked=%s known=%s "
             "(client heartbeats an id we did not book under)",
-            grant.profile_id, grant.sub[:8], body.voice_session_id, known,
+            grant.profile_id, kurz_id(grant.sub), body.voice_session_id, known,
         )
     return {
         "alive": alive,
@@ -5063,6 +5065,11 @@ async def realtime_config_health(
         "secret_version": os.environ.get(
             "REALTIME_GRANT_SECRET_VERSION", ""
         ),
+        # Befund der Altwerkzeug-Messung. Steht hier und nicht nur im
+        # journalctl, weil journalctl ohne sudo lautlos nichts liefert
+        # — und eine Messung, die man nur mit dem richtigen Recht
+        # sieht, wird als „keine Aufrufe" fehlgelesen.
+        "legacy_tool_auth": legacy_auth_befund(),
     }
 
 
@@ -5074,9 +5081,114 @@ async def realtime_config_health(
 # (the browser shorts them locally); we reject them so a bug there
 # surfaces fast instead of silently going to OpenAI's expensive
 # fail-mode of "model thinks it called the tool, never got an answer".
+# Die zwei Produktwerkzeuge — eigene Menge, weil sie strenger
+# behandelt werden als die uebrigen Lesewerkzeuge.
+PRODUCT_TOOL_NAMES = {"find_products", "refine_search"}
+
+
+# ── Altwerkzeuge: erst messen, dann durchsetzen ───────────────────────
+#
+# Die uebrigen Lesewerkzeuge verlangen bis heute keinen Grant. Das ist
+# kein Versehen, sondern die Zwischenstufe: Der Wanderlaut-Browser ruft
+# sie seit Monaten ohne, eine harte Pflicht braeche ihn im selben
+# Moment, in dem sie ausgeliefert wird.
+#
+# Was hier NICHT passiert: raten. Bevor ich eine Pflicht einschalte,
+# muss ich WISSEN, ob der bestehende Aufrufer ueberhaupt etwas mitsendet
+# — sonst ist die Umstellung ein Wurf mit verbundenen Augen. Deshalb
+# zwei Stufen an EINEM Schalter:
+#
+#   REALTIME_LEGACY_TOOL_AUTH=off      (Vorgabe) — nur zaehlen
+#   REALTIME_LEGACY_TOOL_AUTH=enforce            — Grant verlangen
+#
+# Die Messung kostet bewusst KEINEN Netzaufruf. Die Frage der Stufe 1
+# lautet nicht „ist der Grant gueltig", sondern „kommt ueberhaupt
+# einer" — und die beantwortet der Kopf allein. Ein Austausch gegen
+# auth-api auf dem heissen Pfad kostete einen Roundtrip im 250-ms-
+# Budget, fuer eine Antwort, die ich nicht brauche.
+LEGACY_TOOL_AUTH_ENV = "REALTIME_LEGACY_TOOL_AUTH"
+
+# Zaehler je (Werkzeug, mit/ohne Kopf). Prozesslokal und absichtlich
+# schlicht: Er beantwortet eine einzige Frage und wird danach entfernt.
+_legacy_auth_zaehler: dict = {}
+_LEGACY_LOG_INTERVALL = 50
+
+
+def _legacy_auth_modus() -> str:
+    """`off` (Vorgabe) oder `enforce`. Unbekanntes faellt auf `off`.
+
+    Fail-open ist hier richtig, obwohl es sonst falsch waere: Ein
+    Tippfehler in der Variable darf nicht den laufenden Wanderlaut-
+    Browser abschalten. Die Stelle, an der fail-closed zaehlt — die
+    Produktwerkzeuge — haengt nicht an diesem Schalter.
+    """
+    roh = (os.environ.get(LEGACY_TOOL_AUTH_ENV) or "").strip().lower()
+    if roh in {"off", "enforce"}:
+        return roh
+    if roh:
+        logger.warning(
+            "%s=%r unbekannt — Altwerkzeuge bleiben ungeschuetzt (off)",
+            LEGACY_TOOL_AUTH_ENV, roh,
+        )
+    return "off"
+
+
+def _hat_bearer(authorization: Optional[str]) -> bool:
+    """Traegt der Aufruf ueberhaupt ein Bearer-Token?
+
+    Prueft NICHT, ob es gueltig ist — das waere eine andere Frage und
+    ein Netzaufruf. `True` heisst nur: hier ist etwas, das man
+    einloesen koennte.
+    """
+    if not authorization:
+        return False
+    teile = authorization.split(None, 1)
+    return len(teile) == 2 and teile[0].lower() == "bearer" and bool(teile[1].strip())
+
+
+def _log_auth_presence(tool_name: str, authorization: Optional[str]) -> bool:
+    """Zaehle, ob Altwerkzeug-Aufrufe einen Bearer mitbringen.
+
+    Gibt zurueck, ob einer da war. Loggt gedrosselt, damit die Messung
+    nicht selbst zum Problem wird: bei jedem Aufruf eine Zeile waere
+    bei ~60 Werkzeugaufrufen je Sprachsitzung Rauschen, in dem der
+    Befund untergeht.
+    """
+    da = _hat_bearer(authorization)
+    schluessel = (tool_name, da)
+    n = _legacy_auth_zaehler.get(schluessel, 0) + 1
+    _legacy_auth_zaehler[schluessel] = n
+    if n == 1 or n % _LEGACY_LOG_INTERVALL == 0:
+        logger.info(
+            "Altwerkzeug-Befund: %s %s Bearer — %sx seit Prozessstart "
+            "(Modus=%s)",
+            tool_name, "MIT" if da else "OHNE", n, _legacy_auth_modus(),
+        )
+    return da
+
+
+def legacy_auth_befund() -> dict:
+    """Der Befund als Datenstruktur, fuer den Statusendpunkt.
+
+    Ohne diese Ausleitung stuende die Messung nur im journalctl — und
+    journalctl liefert ohne sudo lautlos nichts zurueck. Eine Messung,
+    die man nur mit dem richtigen Recht sieht, wird als „keine Aufrufe"
+    fehlgelesen.
+    """
+    return {
+        "mode": _legacy_auth_modus(),
+        "counts": {
+            f"{werkzeug}:{'mit' if da else 'ohne'}": n
+            for (werkzeug, da), n in sorted(_legacy_auth_zaehler.items())
+        },
+    }
+
 READ_TOOL_NAMES = {"knowledge_query", "pois_near", "narration_near", "osm_nearby",
                    "resolve_agent_name",
-                   "agent_status"}
+                   "agent_status",
+                   # Produktfinder — beide lesend, beide ohne Produktdaten
+                   # im Rueckgabewert (Bauplan #4831, Vertrag c887a89).
+                   "find_products", "refine_search"}
 
 
 # Zahlwoerter aus #1037, deutsch und englisch. Die Faltung muss auf
@@ -5430,6 +5542,103 @@ async def _tool_resolve_agent_name(args: dict, authorization: Optional[str]) -> 
     return {"ok": True, **r.json()}
 
 
+# ── Produktfinder-Werkzeuge (Bauplan #4831, Vertrag c887a89/bad029d) ──
+
+ONEAL_SELECTION_BASE_ENV = "ONEAL_SELECTION_BASE_URL"
+ONEAL_INTERNAL_KEY_ENV = "ONEAL_REALTIME_INTERNAL_KEY"
+ONEAL_API_KEY_ENV = "ONEAL_API_KEY"
+
+# Drei Zustaende, und die Trennung ist der Punkt: `matches` und `empty`
+# kommen von der Gegenseite — sie weiss, ob nichts da ist. `unavailable`
+# ist AUSSCHLIESSLICH unsere Uebersetzung eines technischen Fehlers — wir
+# wissen nur, ob wir sie erreicht haben. Wer die beiden verwechselt, sagt
+# einem Kunden "das fuehren wir nicht", waehrend der Katalog bloss
+# klemmt: eine falsche Auskunft ueber das Sortiment.
+_NICHT_ERREICHBAR = {"status": "unavailable"}
+
+
+async def _tool_product_search(
+    args: dict,
+    session_id: Optional[str],
+    verfeinern: bool,
+) -> dict:
+    """`find_products` und `refine_search` — eine Route, ein Unterschied.
+
+    Der Unterschied ist `base_selection_token`: ohne ihn eine neue
+    Suche, mit ihm ein Kriterien-Patch, den die Gegenseite serverseitig
+    mit der gespeicherten Auswahl zusammenfuehrt. Damit halten wir
+    weder Filterzustand noch SQL-Semantik doppelt.
+
+    **Das Ergebnis wird UNVERAENDERT durchgereicht**, `__app_command__`
+    eingeschlossen. Der Browser-Core loest ihn heraus, fuehrt ihn lokal
+    aus und schickt nur das bereinigte Resultat ans Modell. Entfernten
+    wir ihn hier, oeffnete die Trefferflaeche nie — obwohl die Suche
+    erfolgreich war (geklaert im Plan, belegt durch
+    `ProductFinderRealtimeAdapter.test.ts`).
+    """
+    basis = (os.environ.get(ONEAL_SELECTION_BASE_ENV) or "").strip().rstrip("/")
+    internal = os.environ.get(ONEAL_INTERNAL_KEY_ENV) or ""
+    if not basis or not internal:
+        logger.warning(
+            "Produktsuche nicht konfiguriert (%s/%s fehlen) — als "
+            "'unavailable' gemeldet", ONEAL_SELECTION_BASE_ENV,
+            ONEAL_INTERNAL_KEY_ENV,
+        )
+        return dict(_NICHT_ERREICHBAR)
+
+    # Marke und Jahr kommen aus dem SERVERSEITIGEN Sitzungs-Scope, nie
+    # aus den Argumenten des Modells und nie vom Browser.
+    scope = realtime_session_scope.lesen(session_id)
+    if scope is None:
+        # Unbekannter Scope ist NICHT dasselbe wie markenoffen. Fuer den
+        # Sprecher klingt es gleich ("ich kann das nicht nachsehen"),
+        # im Protokoll muss es unterscheidbar bleiben.
+        logger.warning(
+            "Produktsuche ohne Sitzungs-Scope (session_id=%r) — "
+            "als 'unavailable' gemeldet", session_id,
+        )
+        return dict(_NICHT_ERREICHBAR)
+
+    kriterien = {k: v for k, v in (args or {}).items()
+                 if k not in ("selection_token", "brand", "collection_year")}
+    nutzlast = {
+        "session_id": session_id,
+        "brand": scope.get("brand"),
+        "collection_year": scope.get("collection_year"),
+        "criteria": kriterien,
+        "base_selection_token": (args or {}).get("selection_token")
+        if verfeinern else None,
+    }
+    kopf = {
+        "X-Realtime-Internal-Key": internal,
+        "Content-Type": "application/json",
+    }
+    if os.environ.get(ONEAL_API_KEY_ENV):
+        kopf["X-API-Key"] = os.environ[ONEAL_API_KEY_ENV]
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            r = await client.post(
+                f"{basis}/v1/realtime/selections/search",
+                json=nutzlast, headers=kopf,
+            )
+    except Exception as exc:
+        logger.warning("Produktsuche nicht erreichbar: %s: %s",
+                       type(exc).__name__, exc)
+        return dict(_NICHT_ERREICHBAR)
+
+    if r.status_code != 200:
+        # Auch 4xx sind hier technische Fehler: Ein abgelaufenes Token
+        # oder ein Schemafehler heisst nicht "es gibt nichts".
+        logger.warning("Produktsuche HTTP %s: %s", r.status_code, r.text[:200])
+        return dict(_NICHT_ERREICHBAR)
+    try:
+        return r.json()
+    except Exception as exc:
+        logger.warning("Produktsuche: Antwort nicht lesbar (%s)", exc)
+        return dict(_NICHT_ERREICHBAR)
+
+
 @router.post("/realtime/tool/{tool_name}")
 async def realtime_tool_call(
     tool_name: str = Path(..., description="Function name from the model"),
@@ -5455,6 +5664,67 @@ async def realtime_tool_call(
     Federation MCPs being colocated on arkserver / arkturian, and a
     hot httpx client at runtime.
     """
+    # Die beiden Produktwerkzeuge verlangen einen gueltigen Grant. Die
+    # uebrigen Lesewerkzeuge NICHT — nicht weil das richtig waere,
+    # sondern weil der Wanderlaut-Browser sie heute ohne ruft und eine
+    # harte Pflicht ihn sofort braeche. Neue Faehigkeit von Tag eins
+    # geschuetzt, alte Aufrufer stufenweise; der Rest steht als Befund
+    # im Protokoll (siehe _log_auth_presence).
+    if tool_name in PRODUCT_TOOL_NAMES:
+        try:
+            await exchange_and_verify(authorization, "mint")
+        except Exception as exc:
+            logger.warning(
+                "Produktwerkzeug %s ohne gueltigen Grant abgewiesen: %s",
+                tool_name, type(exc).__name__,
+            )
+            raise HTTPException(
+                status_code=401,
+                detail={
+                    "error": "realtime_grant_required",
+                    "tool": tool_name,
+                    "hint": (
+                        "Die Produktwerkzeuge laufen ueber einen "
+                        "serverseitigen Pfad, der ein Bearer-Grant "
+                        "haelt. Der Browser ruft sie nicht direkt."
+                    ),
+                },
+            )
+
+    # Altwerkzeuge: immer messen, nur bei geschaltetem Modus abweisen.
+    # Die Messung steht VOR der Namenspruefung nicht — ein unbekanntes
+    # Werkzeug ist kein Aufrufer, den ich zaehlen will.
+    if tool_name in READ_TOOL_NAMES and tool_name not in PRODUCT_TOOL_NAMES:
+        hat_grant = _log_auth_presence(tool_name, authorization)
+        if _legacy_auth_modus() == "enforce":
+            fehler = None
+            if not hat_grant:
+                fehler = "kein Bearer"
+            else:
+                try:
+                    await exchange_and_verify(authorization, "mint")
+                except Exception as exc:
+                    fehler = type(exc).__name__
+            if fehler:
+                logger.warning(
+                    "Altwerkzeug %s abgewiesen (%s) — Modus=enforce",
+                    tool_name, fehler,
+                )
+                raise HTTPException(
+                    status_code=401,
+                    detail={
+                        "error": "realtime_grant_required",
+                        "tool": tool_name,
+                        "hint": (
+                            "Dieser Host verlangt seit der Umstellung "
+                            "auch fuer die Lesewerkzeuge ein Bearer-"
+                            "Grant. Der Aufrufer muss denselben Grant "
+                            "mitsenden, mit dem er die Sitzung geoeffnet "
+                            "hat."
+                        ),
+                    },
+                )
+
     if tool_name not in READ_TOOL_NAMES:
         raise HTTPException(
             status_code=400,
@@ -5486,6 +5756,10 @@ async def realtime_tool_call(
             result = await _tool_osm_nearby(args)
         elif tool_name == "agent_status":
             result = await _tool_agent_status(args, authorization)
+        elif tool_name == "find_products":
+            result = await _tool_product_search(args, x_session_id, False)
+        elif tool_name == "refine_search":
+            result = await _tool_product_search(args, x_session_id, True)
         elif tool_name == "resolve_agent_name":
             result = await _tool_resolve_agent_name(args, authorization)
         else:
