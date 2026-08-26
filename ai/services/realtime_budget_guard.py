@@ -51,6 +51,8 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
+
+from ai.services.realtime_identity import kurz_id
 from zoneinfo import ZoneInfo
 
 logger = logging.getLogger(__name__)
@@ -441,7 +443,7 @@ def reserve_mint(
         is_remint = voice_session_id in active
 
         if not is_remint and len(active) >= max_parallel_sessions:
-            short = user_id[:8]
+            short = kurz_id(user_id)
             raise MaxParallelExceeded(
                 profile_id, short, len(active), max_parallel_sessions,
             )
@@ -484,7 +486,7 @@ def reserve_mint(
     logger.info(
         "realtime_reserve ok profile=%s user=%s vid=%s active=%d/%d "
         "daily=%.2f/%.2f remint=%s",
-        profile_id, user_id[:8], voice_session_id,
+        profile_id, kurz_id(user_id), voice_session_id,
         len(active), max_parallel_sessions,
         booked, daily_budget_eur, is_remint,
     )
@@ -512,7 +514,7 @@ def release_reservation(reservation: Reservation) -> None:
         uv["session_started"] = started
     logger.info(
         "realtime_release profile=%s user=%s vid=%s",
-        reservation.profile_id, reservation.user_id[:8],
+        reservation.profile_id, kurz_id(reservation.user_id),
         reservation.voice_session_id,
     )
 
@@ -554,7 +556,7 @@ def confirm_usage_charge(
         }
     logger.info(
         "realtime_charge profile=%s user=%s vid=%s eur=%.4f day_total=%.2f",
-        profile_id, user_id[:8], voice_session_id,
+        profile_id, kurz_id(user_id), voice_session_id,
         cost_eur, snapshot["daily_total_eur"],
     )
     return snapshot
@@ -606,7 +608,7 @@ def refresh_lease(
                 logger.warning(
                     "realtime_session_cap profile=%s user=%s vid=%s "
                     "eur=%.2f >= %.2f — Herzschlag verweigert",
-                    profile_id, user_id[:8], voice_session_id,
+                    profile_id, kurz_id(user_id), voice_session_id,
                     verbraucht, grenze,
                 )
                 return False
@@ -614,7 +616,7 @@ def refresh_lease(
         started[voice_session_id] = now
     logger.debug(
         "realtime_heartbeat profile=%s user=%s vid=%s",
-        profile_id, user_id[:8], voice_session_id,
+        profile_id, kurz_id(user_id), voice_session_id,
     )
     return True
 
@@ -651,7 +653,7 @@ def release_by_voice_session(
         uv["session_started"] = started
     logger.info(
         "realtime_release_explicit profile=%s user=%s vid=%s",
-        profile_id, user_id[:8], voice_session_id,
+        profile_id, kurz_id(user_id), voice_session_id,
     )
     return True
 

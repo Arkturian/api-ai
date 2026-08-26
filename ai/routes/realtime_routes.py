@@ -66,6 +66,7 @@ from ..services.realtime_grant_verifier import (
 )
 from ai.clients.storage_client import storage_api_key
 from ..services import realtime_budget_guard
+from ..services.realtime_identity import kurz_id
 from ..services import realtime_session_scope
 from ..services.realtime_budget_guard import (
     BudgetGuardError,
@@ -4591,7 +4592,7 @@ async def realtime_session_heartbeat(
         logger.warning(
             "realtime_heartbeat MISS profile=%s user=%s asked=%s known=%s "
             "(client heartbeats an id we did not book under)",
-            grant.profile_id, grant.sub[:8], body.voice_session_id, known,
+            grant.profile_id, kurz_id(grant.sub), body.voice_session_id, known,
         )
     return {
         "alive": alive,

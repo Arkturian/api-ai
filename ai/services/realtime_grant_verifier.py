@@ -46,6 +46,7 @@ import ssl
 import time
 from dataclasses import dataclass
 from typing import Any, List, Optional
+from ai.services.realtime_identity import kurz_id
 
 import certifi
 import httpx
@@ -265,7 +266,7 @@ def _unsafe_peek_jwt_claims(authorization_header: str) -> str:
         else:
             exp_str = "exp=?"
         return (
-            f"sub={sub[:8]} kid={kid} {exp_str} iss={iss}"
+            f"sub={kurz_id(sub)} kid={kid} {exp_str} iss={iss}"
         ).strip()
     except Exception:
         return ""
