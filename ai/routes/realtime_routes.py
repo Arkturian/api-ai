@@ -3505,6 +3505,12 @@ def _product_finder_prompt(language: str = "de",
         "gerade heraus, weiche nicht aus: 'Groesse kann ich aus "
         "Koerpermassen nicht bestimmen, dazu fehlen mir die Tabellen. "
         "Ich zeig Ihnen, was der Hersteller angibt.'\n\n"
+        "KATEGORIEN\n"
+        "Das Kategorienfeld kennt nur feste Werte aus der Liste im "
+        "Werkzeug. Passt keiner auf das, was der Kunde sagt, LASS ES "
+        "WEG und beschreibe die Ware ueber Art, Sportart und "
+        "Koerperstelle — 'Jersey', 'MX', 'Oberkoerper'. Ein selbst "
+        "erfundener Kategoriewert findet nichts.\n\n"
         "TON\n"
         "Kurze Saetze. Der Kunde steht daneben und schaut auf den "
         "Bildschirm; du bist der Kollege, der die Zahlen kennt — nicht "
@@ -3560,7 +3566,9 @@ def _product_finder_tools(brand: Optional[str] = None) -> List[dict]:
         },
         # Kanonische Slugs, nie frei geratene Anzeigenamen — und
         # ebenfalls eine Liste.
-        "category": {"type": "array", "items": {"type": "string"}},
+        "category": {"type": "array",
+                     "items": {"type": "string",
+                               "enum": list(_oneal_kategorien())}},
         "target_group": {"type": "string"},
         "body_part": {"type": "string"},
         "product_type": {"type": "string"},
@@ -5089,6 +5097,107 @@ async def realtime_config_health(
 # Die zwei Produktwerkzeuge — eigene Menge, weil sie strenger
 # behandelt werden als die uebrigen Lesewerkzeuge.
 PRODUCT_TOOL_NAMES = {"find_products", "refine_search"}
+
+
+# ── Kategorien: echte Slugs statt freier Woerter ──────────────────────
+#
+# Anlass (Alex' erster echter Kundendialog, 00:02): Das Modell fuellte
+# `category` mit dem gehoerten Wort — „Bekleidung". oneal verlangt
+# kanonische Slugs (`^[a-z0-9][a-z0-9-]*$`), antwortete 422, mein
+# Fehlerzweig machte daraus `unavailable`, und der Sprecher sagte
+# „Katalog nicht erreichbar". Ein deutsches Substantiv legte den
+# Katalog lahm.
+#
+# Meine Haertung von vorhin filtert unbekannte FELDER. Das hier ist
+# dieselbe Luecke eine Ebene tiefer: unbekannte WERTE. Ein Feld ohne
+# Enum ist eine Einladung an das Modell, etwas zu erfinden — und im
+# Sprachbetrieb erfindet es immer das Wort des Kunden.
+#
+# Die Liste kommt LIVE von oneal, nicht aus einer Abschrift: Eine
+# handgepflegte Kopie waere am Tag der naechsten Katalogaenderung
+# still falsch, und zwar wieder als „nicht erreichbar".
+
+ONEAL_KATEGORIEN_TTL_SEC = 3600.0
+_kategorien_cache: dict = {"werte": None, "geholt": 0.0}
+
+# Slugs, die es im Katalog gibt, aber nicht im Kundengespraech:
+# Ersatzteil-Sammelposten, Display-Material, Altmarken, ein
+# Buchhaltungsposten. `z-spare-parts-helmets` ist mit 1357 Eintraegen
+# sogar die GROESSTE Kategorie — gaebe ich sie dem Modell, schlaege
+# eine Frage nach Helmen zuerst Ersatzvisiere vor.
+_KATEGORIE_AUSSCHLUSS = {
+    "displays", "merchandise-displays", "old-brands",
+    "revenue-without-material-usage",
+}
+
+
+def _ist_kundenkategorie(slug: str) -> bool:
+    return bool(slug) and not slug.startswith("z-") and slug not in _KATEGORIE_AUSSCHLUSS
+
+
+# Rueckfallliste — Stand 2026-08-27, von `GET /v1/categories` geholt.
+# Sie greift NUR, wenn oneal beim Mint nicht erreichbar ist. Ohne sie
+# haette ein kurzer Ausfall dort ein Werkzeug ohne Kategorien zur
+# Folge, und der Kunde bekaeme wieder „Katalog nicht erreichbar" —
+# fuer einen Fehler, der laengst vorbei ist.
+ONEAL_KATEGORIEN_RUECKFALL = (
+    "adv-pants", "bags---backpacks", "boots-adventure", "boots-mx",
+    "casual-wear", "face-masks", "gloves", "goggles", "grips",
+    "handlebars", "helme-mtb-open-face", "helmets-mtb-full-face",
+    "helmets-mx", "helmets-street", "jackets", "jerseys-mtb",
+    "jerseys-offroad", "kids-wear-protection", "leather-suits-road",
+    "leisure-accessories", "pants-mx", "pants--shorts-mtb",
+    "protection-mtb", "protection-mx", "rain-wear", "shoes",
+    "sunglasses", "transportation",
+)
+
+
+def _oneal_kategorien() -> List[str]:
+    """Kundentaugliche Kategorie-Slugs, gecacht.
+
+    Faellt NIE aus: Bei jedem Fehler kommt die Rueckfallliste. Ein
+    Mint darf nicht daran scheitern, dass ein Katalogdienst gerade
+    langsam ist — das Werkzeug bliebe sonst ohne Kategorien und der
+    Kunde hoerte denselben Satz wie beim eigentlichen Fehler.
+    """
+    jetzt = time.time()
+    if (_kategorien_cache["werte"]
+            and jetzt - _kategorien_cache["geholt"] < ONEAL_KATEGORIEN_TTL_SEC):
+        return _kategorien_cache["werte"]
+
+    basis = (os.environ.get(ONEAL_SELECTION_BASE_ENV) or "").strip().rstrip("/")
+    schluessel = os.environ.get(ONEAL_API_KEY_ENV) or ""
+    werte = None
+    if basis and schluessel:
+        try:
+            r = httpx.get(f"{basis}/v1/categories",
+                          headers={"X-API-Key": schluessel}, timeout=4.0)
+            if r.status_code == 200:
+                roh = r.json()
+                liste = roh if isinstance(roh, list) else (
+                    roh.get("items") or roh.get("categories") or [])
+                slugs = [
+                    x if isinstance(x, str) else (x.get("slug") or "")
+                    for x in liste
+                ]
+                gefiltert = sorted({s for s in slugs if _ist_kundenkategorie(s)})
+                # Eine leere Antwort ist KEINE gueltige Kategorienliste.
+                # Sie zu uebernehmen hiesse, ein leeres Regal fuer einen
+                # geraeumten Laden zu halten.
+                if gefiltert:
+                    werte = gefiltert
+            else:
+                logger.warning("Kategorien HTTP %s — Rueckfallliste",
+                               r.status_code)
+        except Exception as exc:
+            logger.warning("Kategorien nicht abrufbar (%s) — Rueckfallliste",
+                           type(exc).__name__)
+
+    if werte is None:
+        werte = list(ONEAL_KATEGORIEN_RUECKFALL)
+    _kategorien_cache["werte"] = werte
+    _kategorien_cache["geholt"] = jetzt
+    return werte
 
 # Felder, die der SERVER setzt — nie das Modell, nie der Browser.
 PRODUCT_SERVER_CONTROLLED = frozenset(
