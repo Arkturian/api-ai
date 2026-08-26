@@ -89,6 +89,21 @@ class _Grant:
     500, der wie ein Produktionsfehler aussah und einer des Tests war.
     """
 
+    # `monthly_budget_eur = None` ist die Vorgabe des echten Grants und
+    # heisst KEIN Monatsfenster. Dass dieser Test rot wurde, als das Feld
+    # am echten Grant dazukam, ist genau seine Aufgabe: Ein Double, das
+    # der Klasse hinterherhinkt, prueft eine Wirklichkeit von gestern.
+    monthly_budget_eur = None
+
+    # Vom Mint-Rumpf heute nicht gelesen, aber am echten Grant
+    # vorhanden. Der Waechter unten verlangt Vollstaendigkeit statt
+    # "was gerade gebraucht wird" — sonst faellt die naechste
+    # Erweiterung wieder erst im Betrieb auf.
+    jti = "jti-test"
+    grant_id = "grant-test"
+    iat = 1_700_000_000
+    exp = 1_900_000_000
+
     profile_id = "agentos-test"
     sub = "test-subject"
     tenant_id = "arkturian"
@@ -134,3 +149,21 @@ def test_arcturian_mint_wirft_keinen_500(client, resolver):
     assert d.get("persona_sha256"), "Persona wurde nicht zusammengesetzt"
     if resolver:
         assert d.get("arcturian_resolver") == resolver
+
+
+def test_double_traegt_alle_felder_des_echten_grants():
+    """Wächter gegen ein Double, das der Wirklichkeit hinterherhinkt.
+
+    Als `monthly_budget_eur` am echten `VerifiedGrant` dazukam, wurde
+    dieser Test rot — richtig so. Die Alternative wäre ein
+    `getattr(grant, ..., None)` im Rumpf gewesen; das hätte die
+    Abweichung **versteckt** statt gemeldet, und beim nächsten Feld
+    hätte niemand etwas bemerkt.
+    """
+    import dataclasses
+
+    from ai.services.realtime_grant_verifier import VerifiedGrant
+
+    echt = {f.name for f in dataclasses.fields(VerifiedGrant)}
+    fehlt = sorted(f for f in echt if not hasattr(_Grant, f))
+    assert not fehlt, f"Das Double kennt diese Grant-Felder nicht: {fehlt}"

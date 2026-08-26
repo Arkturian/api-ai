@@ -206,6 +206,11 @@ class VerifiedGrant:
     exp: int
     max_parallel_sessions: int
     daily_budget_eur: float
+    # Zweites Fenster (AuthApi-Migration j1a8b3c4d5e2, 2026-08-26).
+    # `None` heisst KEIN Monatsfenster — das ist der Zustand aller
+    # bestehenden Profile. Ein Wert 0.0 waere dagegen eine echte
+    # Null-Grenze. Die beiden nie gleichsetzen.
+    monthly_budget_eur: Optional[float] = None
 
     def has_scope(self, scope: str) -> bool:
         return scope in self.scopes
@@ -406,6 +411,20 @@ def _verify_grant_jwt(grant_token: str, allowed_profile_ids: set) -> VerifiedGra
             "limits claim missing/malformed",
         ) from exc
 
+    # Optional und fail-soft: Ein kaputter Wert darf keine Sitzung
+    # verhindern, die ohne das Feld laufen wuerde — er darf nur nicht
+    # als Grenze durchgehen.
+    monthly_budget: Optional[float] = None
+    roh_monat = limits.get("monthly_budget_eur")
+    if roh_monat is not None:
+        try:
+            monthly_budget = float(roh_monat)
+        except (TypeError, ValueError):
+            logger.warning(
+                "realtime_grant: monthly_budget_eur=%r unlesbar — als "
+                "'kein Monatsfenster' behandelt", roh_monat,
+            )
+
     return VerifiedGrant(
         sub=str(claims["sub"]),
         tenant_id=str(claims.get("tenant_id") or ""),
@@ -417,6 +436,7 @@ def _verify_grant_jwt(grant_token: str, allowed_profile_ids: set) -> VerifiedGra
         exp=int(claims["exp"]),
         max_parallel_sessions=max_parallel,
         daily_budget_eur=daily_budget,
+        monthly_budget_eur=monthly_budget,
     )
 
 

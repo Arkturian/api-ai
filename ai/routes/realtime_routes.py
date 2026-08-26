@@ -4167,6 +4167,7 @@ async def mint_realtime_token(
             voice_session_id=voice_session_id,
             max_parallel_sessions=grant.max_parallel_sessions,
             daily_budget_eur=grant.daily_budget_eur,
+            monthly_budget_eur=grant.monthly_budget_eur,
         )
     except BudgetGuardError as exc:
         logger.warning(

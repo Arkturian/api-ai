@@ -137,15 +137,22 @@ class BudgetExceeded(BudgetGuardError):
     die Zahlen. Der Code sagt NUR, DASS das Budget erschoepft ist.
     """
 
-    def __init__(self, profile_id: str, daily_total: float, cap: float):
+    def __init__(self, profile_id: str, daily_total: float, cap: float,
+                 window: Optional[str] = None):
+        # `window` ueberschreibt das Hauptfenster, wenn die MONATSgrenze
+        # gerissen hat — sonst stuende dort "daily", waehrend der
+        # Zurueckstellzeitpunkt der Monatserste ist. Genau diese
+        # Verwechslung war #1314.
+        fenster = window or BUDGET_WINDOW
         super().__init__(
             "budget_exceeded",
-            f"profile={profile_id} total_eur={daily_total:.2f} cap={cap:.2f}",
+            f"profile={profile_id} total_eur={daily_total:.2f} cap={cap:.2f} "
+            f"window={fenster}",
             public_fields={
-                "window": BUDGET_WINDOW,
+                "window": fenster,
                 "used_eur": round(daily_total, 2),
                 "limit_eur": round(cap, 2),
-                "resets_at": _window_reset_at(),
+                "resets_at": _window_reset_at(fenster),
             },
         )
 
@@ -181,7 +188,7 @@ class Reservation:
 # ── Storage helpers ───────────────────────────────────────────────────
 
 
-def _window_reset_at() -> str:
+def _window_reset_at(window: Optional[str] = None) -> str:
     """Wann sich das aktuelle Budgetfenster oeffnet — als ISO-Zeitpunkt.
 
     Anlass (2026-08-18): Alexanders Stimme startete fuenf Tage lang
@@ -199,7 +206,7 @@ def _window_reset_at() -> str:
     """
     import datetime as _dt   # lokal, wie in `_now_local` — kein Modul-Import
     jetzt = _now_local()
-    if BUDGET_WINDOW == "monthly":
+    if (window or BUDGET_WINDOW) == "monthly":
         if jetzt.month == 12:
             naechstes = jetzt.replace(year=jetzt.year + 1, month=1, day=1,
                                       hour=0, minute=0, second=0, microsecond=0)
@@ -215,7 +222,35 @@ def _window_reset_at() -> str:
 SESSION_BUDGET_ENV = "REALTIME_SESSION_BUDGET_EUR"
 
 
-def _session_budget_eur() -> float:
+def _session_budget_eur(profile_id: Optional[str] = None) -> float:
+    """Sitzungsdeckel — je Profil, sonst global.
+
+    `REALTIME_SESSION_BUDGET_EUR__<profil>` schlaegt
+    `REALTIME_SESSION_BUDGET_EUR`. Punkte und Bindestriche im Profilnamen
+    werden zu Unterstrichen, weil Umgebungsvariablen sie nicht tragen:
+    `product-finder` -> `REALTIME_SESSION_BUDGET_EUR__PRODUCT_FINDER`.
+
+    Warum hier und nicht im Grant: Tages- und Monatsgrenze kommen von
+    AuthApi, dieser Wert nicht — AuthApi fuehrt ihn heute nicht. Das ist
+    bewusst als Zwischenstand vermerkt und gehoert spaeter zu den
+    uebrigen Limits, damit nicht zwei Stellen dasselbe fuehren.
+    """
+    if profile_id:
+        suffix = profile_id.strip().replace("-", "_").replace(".", "_").upper()
+        roh = os.environ.get(f"{SESSION_BUDGET_ENV}__{suffix}", "").strip()
+        if roh:
+            try:
+                wert = float(roh)
+                return wert if wert > 0 else 0.0
+            except ValueError:
+                logger.warning(
+                    "%s__%s=%r ist keine Zahl — falle auf den globalen "
+                    "Wert zurueck", SESSION_BUDGET_ENV, suffix, roh,
+                )
+    return _session_budget_global()
+
+
+def _session_budget_global() -> float:
     """Obergrenze je EINZELNER Sprachsitzung. 0/unbesetzt = keine.
 
     Der Monatstopf merkt erst nach dem Schaden, dass eine Sitzung teuer
@@ -248,6 +283,18 @@ def _today_str() -> str:
     if BUDGET_WINDOW == "monthly":
         return _now_local().strftime("%Y-%m")
     return _now_local().strftime("%Y-%m-%d")
+
+
+def _month_str() -> str:
+    """Monatsschluessel — unabhaengig vom konfigurierten Hauptfenster.
+
+    Das ZWEITE Fenster (#4831, Vertrag vom 2026-08-26). Es laeuft
+    zusaetzlich zum Hauptfenster und wird nur fuer Profile gefuehrt,
+    deren Grant ein `monthly_budget_eur` traegt. Alle anderen behalten
+    exakt das bisherige Verhalten — `None` heisst kein Monatsfenster,
+    nicht "Monatsfenster mit Null".
+    """
+    return _now_local().strftime("%Y-%m")
 
 
 def _now_local():
@@ -302,6 +349,14 @@ def _profile_view(state: dict, profile_id: str, today: str) -> dict:
         "daily_total_eur": 0.0,
         "users": {},
     })
+    # Monatstopf: eigener Schluessel, eigenes Zuruecksetzen. Er lebt
+    # neben dem Hauptfenster, nicht statt seiner — sonst wuerde eine
+    # Umstellung des Hauptfensters stillschweigend den Monatsstand
+    # loeschen.
+    monat = _month_str()
+    if p.get("month") != monat:
+        p["month"] = monat
+        p["monthly_total_eur"] = 0.0
     if p.get("day") != today:
         # Day rolled. Hard-reset the daily counters but keep active
         # sessions intact — a mint that started yesterday and is still
@@ -359,6 +414,7 @@ def reserve_mint(
     voice_session_id: str,
     max_parallel_sessions: int,
     daily_budget_eur: float,
+    monthly_budget_eur: Optional[float] = None,
 ) -> Reservation:
     """Reserve a slot for an imminent mint.
 
@@ -397,6 +453,18 @@ def reserve_mint(
             raise BudgetExceeded(
                 profile_id, booked, daily_budget_eur,
             )
+
+        # Zweites Fenster. `None` heisst KEIN Monatsfenster — das ist
+        # der Zustand aller bestehenden Profile und aendert an ihnen
+        # nichts. Ein Wert von 0 waere dagegen eine echte Null-Grenze;
+        # die beiden duerfen nicht verwechselt werden.
+        if monthly_budget_eur is not None:
+            monat_gebucht = float(pv.get("monthly_total_eur") or 0.0)
+            if monat_gebucht + MIN_SESSION_RESERVE_EUR > monthly_budget_eur:
+                raise BudgetExceeded(
+                    profile_id, monat_gebucht, monthly_budget_eur,
+                    window="monthly",
+                )
 
         if not is_remint:
             active.append(voice_session_id)
@@ -465,6 +533,7 @@ def confirm_usage_charge(
         pv = _profile_view(state, profile_id, today)
         uv = _user_view(pv, user_id)
         pv["daily_total_eur"] = float(pv.get("daily_total_eur") or 0.0) + cost_eur
+        pv["monthly_total_eur"] = float(pv.get("monthly_total_eur") or 0.0) + cost_eur
         uv["daily_eur"] = float(uv.get("daily_eur") or 0.0) + cost_eur
         # Je Sitzung mitfuehren. Der Schluessel ist die voice_session_id;
         # ohne sie (Altaufrufer) wird nur der Tagestopf gefuehrt, damit
@@ -480,7 +549,7 @@ def confirm_usage_charge(
             "daily_total_eur": pv["daily_total_eur"],
             "user_daily_eur": uv["daily_eur"],
             "session_eur": sitzung_eur,
-            "session_budget_eur": _session_budget_eur() or None,
+            "session_budget_eur": _session_budget_eur(profile_id) or None,
             "active_sessions": list(uv.get("active_sessions") or []),
         }
     logger.info(
@@ -528,7 +597,7 @@ def refresh_lease(
         # siehe confirm_usage_charge). Der Herzschlag ist die naechste
         # Stelle, an der ein Nein ohne Abbruch mitten im Satz wirkt;
         # der Client kennt `False` bereits als "Sitzung ist zu Ende".
-        grenze = _session_budget_eur()
+        grenze = _session_budget_eur(profile_id)
         if grenze > 0:
             verbraucht = float(
                 (uv.get("session_eur") or {}).get(voice_session_id) or 0.0
