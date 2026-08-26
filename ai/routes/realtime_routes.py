@@ -5065,6 +5065,11 @@ async def realtime_config_health(
         "secret_version": os.environ.get(
             "REALTIME_GRANT_SECRET_VERSION", ""
         ),
+        # Befund der Altwerkzeug-Messung. Steht hier und nicht nur im
+        # journalctl, weil journalctl ohne sudo lautlos nichts liefert
+        # — und eine Messung, die man nur mit dem richtigen Recht
+        # sieht, wird als „keine Aufrufe" fehlgelesen.
+        "legacy_tool_auth": legacy_auth_befund(),
     }
 
 
@@ -5079,6 +5084,104 @@ async def realtime_config_health(
 # Die zwei Produktwerkzeuge — eigene Menge, weil sie strenger
 # behandelt werden als die uebrigen Lesewerkzeuge.
 PRODUCT_TOOL_NAMES = {"find_products", "refine_search"}
+
+
+# ── Altwerkzeuge: erst messen, dann durchsetzen ───────────────────────
+#
+# Die uebrigen Lesewerkzeuge verlangen bis heute keinen Grant. Das ist
+# kein Versehen, sondern die Zwischenstufe: Der Wanderlaut-Browser ruft
+# sie seit Monaten ohne, eine harte Pflicht braeche ihn im selben
+# Moment, in dem sie ausgeliefert wird.
+#
+# Was hier NICHT passiert: raten. Bevor ich eine Pflicht einschalte,
+# muss ich WISSEN, ob der bestehende Aufrufer ueberhaupt etwas mitsendet
+# — sonst ist die Umstellung ein Wurf mit verbundenen Augen. Deshalb
+# zwei Stufen an EINEM Schalter:
+#
+#   REALTIME_LEGACY_TOOL_AUTH=off      (Vorgabe) — nur zaehlen
+#   REALTIME_LEGACY_TOOL_AUTH=enforce            — Grant verlangen
+#
+# Die Messung kostet bewusst KEINEN Netzaufruf. Die Frage der Stufe 1
+# lautet nicht „ist der Grant gueltig", sondern „kommt ueberhaupt
+# einer" — und die beantwortet der Kopf allein. Ein Austausch gegen
+# auth-api auf dem heissen Pfad kostete einen Roundtrip im 250-ms-
+# Budget, fuer eine Antwort, die ich nicht brauche.
+LEGACY_TOOL_AUTH_ENV = "REALTIME_LEGACY_TOOL_AUTH"
+
+# Zaehler je (Werkzeug, mit/ohne Kopf). Prozesslokal und absichtlich
+# schlicht: Er beantwortet eine einzige Frage und wird danach entfernt.
+_legacy_auth_zaehler: dict = {}
+_LEGACY_LOG_INTERVALL = 50
+
+
+def _legacy_auth_modus() -> str:
+    """`off` (Vorgabe) oder `enforce`. Unbekanntes faellt auf `off`.
+
+    Fail-open ist hier richtig, obwohl es sonst falsch waere: Ein
+    Tippfehler in der Variable darf nicht den laufenden Wanderlaut-
+    Browser abschalten. Die Stelle, an der fail-closed zaehlt — die
+    Produktwerkzeuge — haengt nicht an diesem Schalter.
+    """
+    roh = (os.environ.get(LEGACY_TOOL_AUTH_ENV) or "").strip().lower()
+    if roh in {"off", "enforce"}:
+        return roh
+    if roh:
+        logger.warning(
+            "%s=%r unbekannt — Altwerkzeuge bleiben ungeschuetzt (off)",
+            LEGACY_TOOL_AUTH_ENV, roh,
+        )
+    return "off"
+
+
+def _hat_bearer(authorization: Optional[str]) -> bool:
+    """Traegt der Aufruf ueberhaupt ein Bearer-Token?
+
+    Prueft NICHT, ob es gueltig ist — das waere eine andere Frage und
+    ein Netzaufruf. `True` heisst nur: hier ist etwas, das man
+    einloesen koennte.
+    """
+    if not authorization:
+        return False
+    teile = authorization.split(None, 1)
+    return len(teile) == 2 and teile[0].lower() == "bearer" and bool(teile[1].strip())
+
+
+def _log_auth_presence(tool_name: str, authorization: Optional[str]) -> bool:
+    """Zaehle, ob Altwerkzeug-Aufrufe einen Bearer mitbringen.
+
+    Gibt zurueck, ob einer da war. Loggt gedrosselt, damit die Messung
+    nicht selbst zum Problem wird: bei jedem Aufruf eine Zeile waere
+    bei ~60 Werkzeugaufrufen je Sprachsitzung Rauschen, in dem der
+    Befund untergeht.
+    """
+    da = _hat_bearer(authorization)
+    schluessel = (tool_name, da)
+    n = _legacy_auth_zaehler.get(schluessel, 0) + 1
+    _legacy_auth_zaehler[schluessel] = n
+    if n == 1 or n % _LEGACY_LOG_INTERVALL == 0:
+        logger.info(
+            "Altwerkzeug-Befund: %s %s Bearer — %sx seit Prozessstart "
+            "(Modus=%s)",
+            tool_name, "MIT" if da else "OHNE", n, _legacy_auth_modus(),
+        )
+    return da
+
+
+def legacy_auth_befund() -> dict:
+    """Der Befund als Datenstruktur, fuer den Statusendpunkt.
+
+    Ohne diese Ausleitung stuende die Messung nur im journalctl — und
+    journalctl liefert ohne sudo lautlos nichts zurueck. Eine Messung,
+    die man nur mit dem richtigen Recht sieht, wird als „keine Aufrufe"
+    fehlgelesen.
+    """
+    return {
+        "mode": _legacy_auth_modus(),
+        "counts": {
+            f"{werkzeug}:{'mit' if da else 'ohne'}": n
+            for (werkzeug, da), n in sorted(_legacy_auth_zaehler.items())
+        },
+    }
 
 READ_TOOL_NAMES = {"knowledge_query", "pois_near", "narration_near", "osm_nearby",
                    "resolve_agent_name",
@@ -5587,6 +5690,40 @@ async def realtime_tool_call(
                     ),
                 },
             )
+
+    # Altwerkzeuge: immer messen, nur bei geschaltetem Modus abweisen.
+    # Die Messung steht VOR der Namenspruefung nicht — ein unbekanntes
+    # Werkzeug ist kein Aufrufer, den ich zaehlen will.
+    if tool_name in READ_TOOL_NAMES and tool_name not in PRODUCT_TOOL_NAMES:
+        hat_grant = _log_auth_presence(tool_name, authorization)
+        if _legacy_auth_modus() == "enforce":
+            fehler = None
+            if not hat_grant:
+                fehler = "kein Bearer"
+            else:
+                try:
+                    await exchange_and_verify(authorization, "mint")
+                except Exception as exc:
+                    fehler = type(exc).__name__
+            if fehler:
+                logger.warning(
+                    "Altwerkzeug %s abgewiesen (%s) — Modus=enforce",
+                    tool_name, fehler,
+                )
+                raise HTTPException(
+                    status_code=401,
+                    detail={
+                        "error": "realtime_grant_required",
+                        "tool": tool_name,
+                        "hint": (
+                            "Dieser Host verlangt seit der Umstellung "
+                            "auch fuer die Lesewerkzeuge ein Bearer-"
+                            "Grant. Der Aufrufer muss denselben Grant "
+                            "mitsenden, mit dem er die Sitzung geoeffnet "
+                            "hat."
+                        ),
+                    },
+                )
 
     if tool_name not in READ_TOOL_NAMES:
         raise HTTPException(
