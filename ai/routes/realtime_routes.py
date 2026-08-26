@@ -5812,6 +5812,23 @@ async def _tool_product_search(
     # es je zu sehen bekommt. Fehlschlaege sind hier kein Grund, das
     # Ergebnis zu verwerfen: Der Kunde hat seine Treffer, nur die
     # naechste Verfeinerung waere dann eine neue Suche.
+    # Was oneal von meinen Kriterien verworfen hat, gehoert in MEIN
+    # Protokoll — sonst steht der Befund nur auf einer Seite. Ein
+    # verworfenes Kriterium ist kein Fehler (der Kunde bekommt
+    # Treffer), aber es ist der Fruehwarnwert dafuer, dass mein
+    # Werkzeugschema und ihr Vokabular auseinanderlaufen.
+    try:
+        verworfen_dort = (
+            ((ergebnis or {}).get("hints") or {}).get("ignored_criteria") or []
+        )
+        if verworfen_dort:
+            logger.info(
+                "Produktsuche: oneal hat Kriterien verworfen %s "
+                "(Schema und Vokabular driften)", verworfen_dort,
+            )
+    except Exception:
+        pass
+
     try:
         befehl = (ergebnis or {}).get("__app_command__") or {}
         token = ((befehl.get("args") or {}).get("selection_token")
