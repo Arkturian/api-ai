@@ -199,3 +199,15 @@ def test_die_echte_antwortform_von_oneal_wird_gelesen(monkeypatch):
     assert werte == ["adv-pants", "bags---backpacks"]
     assert werte != list(rr.ONEAL_KATEGORIEN_RUECKFALL), \
         "Rueckfallliste statt Live-Liste — der Abruf ist wirkungslos"
+
+
+def test_verworfene_kriterien_von_oneal_werden_protokolliert():
+    """oneal verwirft seit `e851e91` unbekanntes Vokabular still und
+    meldet es in `hints.ignored_criteria`. Das ist kein Fehler — der
+    Kunde bekommt Treffer. Es ist der Fruehwarnwert dafuer, dass mein
+    Werkzeugschema und ihr Vokabular auseinanderlaufen. Steht er nur
+    in ihrem Log, sieht ihn niemand, der mein Schema pflegt.
+    """
+    import inspect
+    quelle = inspect.getsource(rr._tool_product_search)
+    assert "ignored_criteria" in quelle
