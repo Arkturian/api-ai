@@ -5074,6 +5074,10 @@ async def realtime_config_health(
 # (the browser shorts them locally); we reject them so a bug there
 # surfaces fast instead of silently going to OpenAI's expensive
 # fail-mode of "model thinks it called the tool, never got an answer".
+# Die zwei Produktwerkzeuge — eigene Menge, weil sie strenger
+# behandelt werden als die uebrigen Lesewerkzeuge.
+PRODUCT_TOOL_NAMES = {"find_products", "refine_search"}
+
 READ_TOOL_NAMES = {"knowledge_query", "pois_near", "narration_near", "osm_nearby",
                    "resolve_agent_name",
                    "agent_status",
@@ -5555,6 +5559,33 @@ async def realtime_tool_call(
     Federation MCPs being colocated on arkserver / arkturian, and a
     hot httpx client at runtime.
     """
+    # Die beiden Produktwerkzeuge verlangen einen gueltigen Grant. Die
+    # uebrigen Lesewerkzeuge NICHT — nicht weil das richtig waere,
+    # sondern weil der Wanderlaut-Browser sie heute ohne ruft und eine
+    # harte Pflicht ihn sofort braeche. Neue Faehigkeit von Tag eins
+    # geschuetzt, alte Aufrufer stufenweise; der Rest steht als Befund
+    # im Protokoll (siehe _log_auth_presence).
+    if tool_name in PRODUCT_TOOL_NAMES:
+        try:
+            await exchange_and_verify(authorization, "mint")
+        except Exception as exc:
+            logger.warning(
+                "Produktwerkzeug %s ohne gueltigen Grant abgewiesen: %s",
+                tool_name, type(exc).__name__,
+            )
+            raise HTTPException(
+                status_code=401,
+                detail={
+                    "error": "realtime_grant_required",
+                    "tool": tool_name,
+                    "hint": (
+                        "Die Produktwerkzeuge laufen ueber einen "
+                        "serverseitigen Pfad, der ein Bearer-Grant "
+                        "haelt. Der Browser ruft sie nicht direkt."
+                    ),
+                },
+            )
+
     if tool_name not in READ_TOOL_NAMES:
         raise HTTPException(
             status_code=400,

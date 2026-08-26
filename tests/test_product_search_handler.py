@@ -169,3 +169,39 @@ def test_dispatch_unterscheidet_finden_und_verfeinern():
     quelle = inspect.getsource(rr.realtime_tool_call)
     assert "_tool_product_search(args, x_session_id, False)" in quelle
     assert "_tool_product_search(args, x_session_id, True)" in quelle
+
+
+# ─────────────────────────── Zugang zum Werkzeug-Dispatch (Befund 26.08.)
+
+def test_produktwerkzeuge_verlangen_einen_grant():
+    """Gemessen am laufenden Dienst: `POST /ai/realtime/tool/{name}` ist
+    von aussen ohne jede Anmeldung erreichbar — HTTP 200, beide Hosts.
+
+    Für `agent_status` fällt das nicht auf, weil der Handler intern eine
+    Aufruferkennung verlangt. Die Produktsuche braucht sie nicht: Sie
+    zieht Marke und Jahr aus dem Sitzungs-Scope. Wer eine `session_id`
+    kennt oder rät, könnte also über einen offenen Endpunkt gegen den
+    Katalog suchen.
+
+    Deshalb Grant-Pflicht für **diese beiden** Werkzeuge. Die übrigen
+    Lesewerkzeuge bleiben unverändert — nicht weil das richtig wäre,
+    sondern weil der Wanderlaut-Browser sie heute ohne Grant ruft und
+    eine harte Pflicht ihn sofort bräche. Neue Fähigkeit ab Tag eins
+    geschützt, alter Aufrufer stufenweise.
+    """
+    import inspect
+    quelle = inspect.getsource(rr.realtime_tool_call)
+    assert "PRODUCT_TOOL_NAMES" in quelle
+    assert "realtime_grant_required" in quelle
+    # Die Prüfung muss VOR dem Ausführen stehen, nicht danach.
+    pruefung = quelle.index("PRODUCT_TOOL_NAMES")
+    ausfuehrung = quelle.index("_tool_product_search")
+    assert pruefung < ausfuehrung
+
+
+def test_die_uebrigen_lesewerkzeuge_bleiben_ohne_grant():
+    """Sonst bricht der Wanderlaut-Guide beim Ausliefern — derselbe
+    Schaden wie der beklagte, nur mit umgekehrtem Vorzeichen."""
+    assert rr.PRODUCT_TOOL_NAMES == {"find_products", "refine_search"}
+    assert "knowledge_query" not in rr.PRODUCT_TOOL_NAMES
+    assert "agent_status" not in rr.PRODUCT_TOOL_NAMES
