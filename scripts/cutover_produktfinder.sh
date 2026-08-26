@@ -24,11 +24,14 @@ systemctl show -p MainPID --value api-ai \
 
 echo
 echo "== 2. Grant wird eingetauscht (der eigentliche Test) =="
+# `confirm_api_billing: true` ist PFLICHT — das Kosten-Gate sitzt HINTER
+# der Grant-Pruefung. Fehlt das Feld, kommt 403 und sieht aus, als waere
+# der Grant abgelehnt worden. Er war es nicht.
 ANTWORT="$(curl -sS -m 15 -o /tmp/cutover_body.$$ -w '%{http_code}' \
   -X POST "$HOST/ai/realtime/token" \
   -H "Authorization: Bearer $JWT" \
   -H 'Content-Type: application/json' \
-  -d '{"companion_mode":"product-finder","language":"de"}' 2>/tmp/cutover_err.$$)"
+  -d '{"companion_mode":"product-finder","language":"de","confirm_api_billing":true}' 2>/tmp/cutover_err.$$)"
 RC=$?
 if [ $RC -ne 0 ]; then
   echo "  NICHT ERREICHBAR (curl rc=$RC) — das ist KEINE Ablehnung:"
