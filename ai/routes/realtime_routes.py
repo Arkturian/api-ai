@@ -5076,7 +5076,10 @@ async def realtime_config_health(
 # fail-mode of "model thinks it called the tool, never got an answer".
 READ_TOOL_NAMES = {"knowledge_query", "pois_near", "narration_near", "osm_nearby",
                    "resolve_agent_name",
-                   "agent_status"}
+                   "agent_status",
+                   # Produktfinder — beide lesend, beide ohne Produktdaten
+                   # im Rueckgabewert (Bauplan #4831, Vertrag c887a89).
+                   "find_products", "refine_search"}
 
 
 # Zahlwoerter aus #1037, deutsch und englisch. Die Faltung muss auf
@@ -5430,6 +5433,103 @@ async def _tool_resolve_agent_name(args: dict, authorization: Optional[str]) -> 
     return {"ok": True, **r.json()}
 
 
+# ── Produktfinder-Werkzeuge (Bauplan #4831, Vertrag c887a89/bad029d) ──
+
+ONEAL_SELECTION_BASE_ENV = "ONEAL_SELECTION_BASE_URL"
+ONEAL_INTERNAL_KEY_ENV = "ONEAL_REALTIME_INTERNAL_KEY"
+ONEAL_API_KEY_ENV = "ONEAL_API_KEY"
+
+# Drei Zustaende, und die Trennung ist der Punkt: `matches` und `empty`
+# kommen von der Gegenseite — sie weiss, ob nichts da ist. `unavailable`
+# ist AUSSCHLIESSLICH unsere Uebersetzung eines technischen Fehlers — wir
+# wissen nur, ob wir sie erreicht haben. Wer die beiden verwechselt, sagt
+# einem Kunden "das fuehren wir nicht", waehrend der Katalog bloss
+# klemmt: eine falsche Auskunft ueber das Sortiment.
+_NICHT_ERREICHBAR = {"status": "unavailable"}
+
+
+async def _tool_product_search(
+    args: dict,
+    session_id: Optional[str],
+    verfeinern: bool,
+) -> dict:
+    """`find_products` und `refine_search` — eine Route, ein Unterschied.
+
+    Der Unterschied ist `base_selection_token`: ohne ihn eine neue
+    Suche, mit ihm ein Kriterien-Patch, den die Gegenseite serverseitig
+    mit der gespeicherten Auswahl zusammenfuehrt. Damit halten wir
+    weder Filterzustand noch SQL-Semantik doppelt.
+
+    **Das Ergebnis wird UNVERAENDERT durchgereicht**, `__app_command__`
+    eingeschlossen. Der Browser-Core loest ihn heraus, fuehrt ihn lokal
+    aus und schickt nur das bereinigte Resultat ans Modell. Entfernten
+    wir ihn hier, oeffnete die Trefferflaeche nie — obwohl die Suche
+    erfolgreich war (geklaert im Plan, belegt durch
+    `ProductFinderRealtimeAdapter.test.ts`).
+    """
+    basis = (os.environ.get(ONEAL_SELECTION_BASE_ENV) or "").strip().rstrip("/")
+    internal = os.environ.get(ONEAL_INTERNAL_KEY_ENV) or ""
+    if not basis or not internal:
+        logger.warning(
+            "Produktsuche nicht konfiguriert (%s/%s fehlen) — als "
+            "'unavailable' gemeldet", ONEAL_SELECTION_BASE_ENV,
+            ONEAL_INTERNAL_KEY_ENV,
+        )
+        return dict(_NICHT_ERREICHBAR)
+
+    # Marke und Jahr kommen aus dem SERVERSEITIGEN Sitzungs-Scope, nie
+    # aus den Argumenten des Modells und nie vom Browser.
+    scope = realtime_session_scope.lesen(session_id)
+    if scope is None:
+        # Unbekannter Scope ist NICHT dasselbe wie markenoffen. Fuer den
+        # Sprecher klingt es gleich ("ich kann das nicht nachsehen"),
+        # im Protokoll muss es unterscheidbar bleiben.
+        logger.warning(
+            "Produktsuche ohne Sitzungs-Scope (session_id=%r) — "
+            "als 'unavailable' gemeldet", session_id,
+        )
+        return dict(_NICHT_ERREICHBAR)
+
+    kriterien = {k: v for k, v in (args or {}).items()
+                 if k not in ("selection_token", "brand", "collection_year")}
+    nutzlast = {
+        "session_id": session_id,
+        "brand": scope.get("brand"),
+        "collection_year": scope.get("collection_year"),
+        "criteria": kriterien,
+        "base_selection_token": (args or {}).get("selection_token")
+        if verfeinern else None,
+    }
+    kopf = {
+        "X-Realtime-Internal-Key": internal,
+        "Content-Type": "application/json",
+    }
+    if os.environ.get(ONEAL_API_KEY_ENV):
+        kopf["X-API-Key"] = os.environ[ONEAL_API_KEY_ENV]
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            r = await client.post(
+                f"{basis}/v1/realtime/selections/search",
+                json=nutzlast, headers=kopf,
+            )
+    except Exception as exc:
+        logger.warning("Produktsuche nicht erreichbar: %s: %s",
+                       type(exc).__name__, exc)
+        return dict(_NICHT_ERREICHBAR)
+
+    if r.status_code != 200:
+        # Auch 4xx sind hier technische Fehler: Ein abgelaufenes Token
+        # oder ein Schemafehler heisst nicht "es gibt nichts".
+        logger.warning("Produktsuche HTTP %s: %s", r.status_code, r.text[:200])
+        return dict(_NICHT_ERREICHBAR)
+    try:
+        return r.json()
+    except Exception as exc:
+        logger.warning("Produktsuche: Antwort nicht lesbar (%s)", exc)
+        return dict(_NICHT_ERREICHBAR)
+
+
 @router.post("/realtime/tool/{tool_name}")
 async def realtime_tool_call(
     tool_name: str = Path(..., description="Function name from the model"),
@@ -5486,6 +5586,10 @@ async def realtime_tool_call(
             result = await _tool_osm_nearby(args)
         elif tool_name == "agent_status":
             result = await _tool_agent_status(args, authorization)
+        elif tool_name == "find_products":
+            result = await _tool_product_search(args, x_session_id, False)
+        elif tool_name == "refine_search":
+            result = await _tool_product_search(args, x_session_id, True)
         elif tool_name == "resolve_agent_name":
             result = await _tool_resolve_agent_name(args, authorization)
         else:
