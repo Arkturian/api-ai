@@ -5085,6 +5085,29 @@ async def realtime_config_health(
 # behandelt werden als die uebrigen Lesewerkzeuge.
 PRODUCT_TOOL_NAMES = {"find_products", "refine_search"}
 
+# Felder, die der SERVER setzt — nie das Modell, nie der Browser.
+PRODUCT_SERVER_CONTROLLED = frozenset(
+    {"brand", "collection_year", "selection_token"}
+)
+
+
+def _product_finder_kriterien_felder() -> set:
+    """Die Kriterienfelder AUS dem Werkzeugschema.
+
+    Einzige Wahrheitsquelle: Wer dem Schema ein Feld hinzufuegt, muss
+    hier nichts nachziehen — und kann es auch nicht vergessen. Eine
+    zweite, handgepflegte Liste waere genau die Stelle, an der ein neues
+    Feld lautlos verworfen wuerde.
+    """
+    schema = _product_finder_tools(None)[0]["parameters"]
+    felder = set((schema.get("properties") or {}).keys())
+    # Serverseitig gesetzte Felder gehoeren NIE zu den Kriterien, auch
+    # wenn sie im Schema stehen: Bei ungebundener Marke fuehrt das
+    # Schema `brand`, damit das Modell danach fragen KANN — den Wert
+    # setzt trotzdem der Sitzungs-Scope. Liesse ich ihn durch, koennte
+    # ein Gespraech die Marke wechseln, an der Bindung vorbei.
+    return felder - PRODUCT_SERVER_CONTROLLED
+
 
 # ── Altwerkzeuge: erst messen, dann durchsetzen ───────────────────────
 #
@@ -5599,8 +5622,26 @@ async def _tool_product_search(
         )
         return dict(_NICHT_ERREICHBAR)
 
-    kriterien = {k: v for k, v in (args or {}).items()
-                 if k not in ("selection_token", "brand", "collection_year")}
+    # Nur Felder weiterreichen, die im Werkzeugschema stehen.
+    #
+    # Das Schema traegt `additionalProperties: false`, aber ohne
+    # `strict: true` ist das fuer OpenAI ein HINWEIS, keine Schranke —
+    # das Modell darf ein Feld erfinden. Reichte ich es durch, antwortet
+    # oneal mit 422, mein Fehlerzweig macht daraus `unavailable`, und
+    # der Kunde hoert „Katalog gerade nicht erreichbar". Ein erfundenes
+    # Wort des Modells sperrte damit den ganzen Katalog.
+    #
+    # Die Liste kommt aus dem Schema selbst, nicht aus einer zweiten
+    # Aufzaehlung — zwei Listen fuer dieselbe Aussage driften.
+    erlaubt = _product_finder_kriterien_felder()
+    kriterien = {k: v for k, v in (args or {}).items() if k in erlaubt}
+    verworfen = sorted(set(args or {}) - erlaubt
+                       - {"selection_token", "brand", "collection_year"})
+    if verworfen:
+        logger.info(
+            "Produktsuche: unbekannte Kriterien verworfen %s "
+            "(Modell hat sie erfunden, Schema kennt sie nicht)", verworfen,
+        )
     nutzlast = {
         "session_id": session_id,
         "brand": scope.get("brand"),
