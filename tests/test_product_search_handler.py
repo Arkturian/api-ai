@@ -92,12 +92,28 @@ def test_finden_schickt_kein_basis_token():
     assert _Client.gesehen[-1]["json"]["base_selection_token"] is None
 
 
-def test_verfeinern_reicht_das_token_weiter():
-    _ruf({"selection_token": "st_a1", "size": "L"}, verfeinern=True)
+def test_verfeinern_nimmt_das_token_aus_dem_scope_nicht_vom_modell():
+    """Umgestellt mit #1398 — vorher kam das Token aus den Argumenten.
+
+    Es darf den Modellkontext nie erreichen (oneal `0e3ea84`), also
+    kann das Modell es nicht liefern. Schickt es trotzdem eines, ist es
+    erfunden oder aus einer fremden Sitzung — beides nehme ich nicht.
+    """
+    from ai.services import realtime_session_scope as sc
+    sc.token_merken("vs1", "st_echt")
+
+    _ruf({"selection_token": "st_erfunden", "size": "L"}, verfeinern=True)
     n = _Client.gesehen[-1]["json"]
-    assert n["base_selection_token"] == "st_a1"
+    assert n["base_selection_token"] == "st_echt"
     # und das Token ist KEIN Suchkriterium
     assert "selection_token" not in n["criteria"]
+
+
+def test_verfeinern_ohne_vorherige_suche_hat_kein_token():
+    """`None` heisst „es gab noch keine Suche" — oneal macht daraus
+    eine neue Suche statt einer Verfeinerung von nichts."""
+    _ruf({"size": "L"}, verfeinern=True)
+    assert _Client.gesehen[-1]["json"]["base_selection_token"] is None
 
 
 def test_interner_schluessel_geht_mit_der_anfrage():

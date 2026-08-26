@@ -66,11 +66,18 @@ def test_kein_kriterium_heisst_wie_ein_rueckgabefeld():
         assert not (felder & {"ids", "product_ids", "name", "description"})
 
 
-def test_verfeinern_braucht_das_token_der_laufenden_suche():
-    """Ohne Token waere `refine_search` eine zweite Volltextsuche —
-    und die Trefferfolge nicht mehr dieselbe."""
+def test_verfeinern_verlangt_kein_token_mehr_vom_modell():
+    """Umgekehrt seit #1398.
+
+    Der Gedanke stimmt weiter — ohne Token waere `refine_search` eine
+    zweite Volltextsuche. Falsch war nur, WER das Token liefert. Es
+    darf den Modellkontext nie erreichen (oneal `0e3ea84`), also kann
+    das Modell es nicht mitschicken; ein Pflichtfeld dafuer erzeugt nur
+    erfundene Werte. Der Server haelt es an der Sitzung.
+    """
     t = [x for x in rr._product_finder_tools() if x["name"] == "refine_search"][0]
-    assert t["parameters"]["required"] == ["selection_token"]
+    assert not t["parameters"].get("required")
+    assert "selection_token" not in t["parameters"]["properties"]
 
 
 @pytest.mark.parametrize("werkzeug", ["find_products", "refine_search"])
