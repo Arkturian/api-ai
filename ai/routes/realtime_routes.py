@@ -3605,12 +3605,17 @@ def _product_finder_tools(brand: Optional[str] = None) -> List[dict]:
             "description": (
                 "Bestehende Trefferliste einschraenken, wenn der Kunde "
                 "nachschaerft ('nur O'Neal', 'in L', 'unter hundert'). "
-                "Braucht das Auswahl-Token der laufenden Suche. " + ergebnis
+                "Setzt automatisch auf der letzten Suche dieser Sitzung "
+                "auf — du brauchst dafuer nichts mitzuschicken. " + ergebnis
             ),
             "parameters": {
+                # KEIN `selection_token`. Das Token darf den Modellkontext
+                # nie erreichen (oneal `0e3ea84`), also kann das Modell es
+                # auch nicht mitschicken — ein Pflichtfeld dafuer waere ein
+                # Vertrag, den niemand erfuellen kann. Der Server haelt es
+                # an der Sitzung (Issue #1398).
                 "type": "object",
-                "properties": {"selection_token": {"type": "string"}, **kriterien},
-                "required": ["selection_token"],
+                "properties": dict(kriterien),
                 "additionalProperties": False,
             },
         },
@@ -5647,8 +5652,15 @@ async def _tool_product_search(
         "brand": scope.get("brand"),
         "collection_year": scope.get("collection_year"),
         "criteria": kriterien,
-        "base_selection_token": (args or {}).get("selection_token")
-        if verfeinern else None,
+        # Das Token kommt aus dem SERVERSEITIGEN Scope, nicht vom
+        # Modell: oneal entfernt es aus dem Werkzeugergebnis (0e3ea84),
+        # der Browser ergaenzt es nicht (am Client-Code geprueft). Ein
+        # vom Modell mitgeschicktes Token waere entweder erfunden oder
+        # aus einer fremden Sitzung — beides nehme ich nicht.
+        "base_selection_token": (
+            realtime_session_scope.token_lesen(session_id)
+            if verfeinern else None
+        ),
     }
     kopf = {
         "X-Realtime-Internal-Key": internal,
@@ -5674,10 +5686,28 @@ async def _tool_product_search(
         logger.warning("Produktsuche HTTP %s: %s", r.status_code, r.text[:200])
         return dict(_NICHT_ERREICHBAR)
     try:
-        return r.json()
+        ergebnis = r.json()
     except Exception as exc:
         logger.warning("Produktsuche: Antwort nicht lesbar (%s)", exc)
         return dict(_NICHT_ERREICHBAR)
+
+    # Das ausgegebene Auswahl-Token an der Sitzung halten, damit eine
+    # spaetere Verfeinerung darauf aufsetzen kann, OHNE dass das Modell
+    # es je zu sehen bekommt. Fehlschlaege sind hier kein Grund, das
+    # Ergebnis zu verwerfen: Der Kunde hat seine Treffer, nur die
+    # naechste Verfeinerung waere dann eine neue Suche.
+    try:
+        befehl = (ergebnis or {}).get("__app_command__") or {}
+        token = ((befehl.get("args") or {}).get("selection_token")
+                 if isinstance(befehl, dict) else None)
+        if token:
+            realtime_session_scope.token_merken(session_id, token)
+    except Exception as exc:
+        logger.warning("Auswahl-Token nicht gemerkt (%s)", exc)
+
+    # Unveraendert zurueck — einschliesslich __app_command__. Was der
+    # Browser bekommt, entscheidet nicht dieser Handler.
+    return ergebnis
 
 
 @router.post("/realtime/tool/{tool_name}")

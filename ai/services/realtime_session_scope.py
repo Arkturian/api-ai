@@ -113,6 +113,52 @@ def lesen(session_id: Optional[str]) -> Optional[dict]:
     return eintrag
 
 
+def token_merken(session_id: Optional[str], token: Optional[str]) -> bool:
+    """Das zuletzt ausgegebene Auswahl-Token an der Sitzung halten.
+
+    Warum serverseitig: Das Token darf NICHT in den Modellkontext —
+    oneal hat es deshalb aus dem Werkzeugergebnis entfernt (`0e3ea84`).
+    Damit kann das Modell es bei einer Verfeinerung auch nicht
+    mitschicken, und der Browser ergaenzt es nicht (am Client-Code
+    geprueft). Also haelt es der Server, genau wie Marke und Jahr.
+
+    Dieselbe Doktrin, ein Satz: **Was das Modell nicht wissen soll,
+    haelt der Server.**
+
+    Gibt zurueck, ob abgelegt wurde. `False` heisst: keine Sitzung
+    bekannt oder kein Token dabei — beides normal (eine Suche ohne
+    Treffer liefert keins) und deshalb kein Fehler.
+    """
+    if not session_id or not token:
+        return False
+    daten = _laden()
+    eintrag = daten.get(session_id)
+    if not isinstance(eintrag, dict):
+        # Kein Scope, kein Token. Ein Token ohne Sitzung waere heimatlos
+        # und wuerde beim naechsten Lesen niemandem gehoeren.
+        return False
+    if (eintrag.get("expires_at") or 0) <= time.time():
+        return False
+    eintrag["last_selection_token"] = token
+    daten[session_id] = eintrag
+    _schreiben(daten)
+    return True
+
+
+def token_lesen(session_id: Optional[str]) -> Optional[str]:
+    """Das zuletzt gemerkte Auswahl-Token oder `None`.
+
+    `None` heisst „es gab noch keine Suche in dieser Sitzung" — der
+    Aufrufer muss daraus eine NEUE Suche machen, nicht eine
+    Verfeinerung von nichts.
+    """
+    eintrag = lesen(session_id)
+    if not eintrag:
+        return None
+    token = eintrag.get("last_selection_token")
+    return token if isinstance(token, str) and token else None
+
+
 def vergessen(session_id: str) -> bool:
     """Beim Sitzungsende aufraeumen."""
     daten = _laden()
