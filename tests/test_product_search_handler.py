@@ -220,6 +220,7 @@ def test_die_uebrigen_lesewerkzeuge_bleiben_ohne_grant():
     Schaden wie der beklagte, nur mit umgekehrtem Vorzeichen."""
     assert rr.PRODUCT_TOOL_NAMES == {
         "find_products", "refine_search", "product_details",
+        "cart_details",
     }
     assert "knowledge_query" not in rr.PRODUCT_TOOL_NAMES
     assert "agent_status" not in rr.PRODUCT_TOOL_NAMES

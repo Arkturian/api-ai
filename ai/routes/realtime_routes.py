@@ -3569,6 +3569,13 @@ def _product_finder_prompt(language: str = "de",
         "geschaut'. Und dann gilt: Null Treffer heisst in diesem Fall "
         "NICHT 'fuehren wir nicht'. Es heisst 'dort nicht'. Frag, ob "
         "du weiter schauen sollst.\n\n"
+        "WARENKORB\n"
+        "Fragt der Kunde, was er schon drin hat, was es zusammen "
+        "kostet oder ob ein bestimmtes Teil dabei ist, sieh IMMER "
+        "zuerst nach. Zaehl nie aus dem Gedaechtnis auf — was ihr "
+        "vorhin besprochen habt, muss nicht drin sein, und er hat "
+        "vielleicht seither etwas geaendert.\n"
+        "Ist er leer, sag es einfach: 'Ihr Warenkorb ist noch leer.'\n\n"
         "KATEGORIEN\n"
         "Das Kategorienfeld kennt nur feste Werte aus der Liste im "
         "Werkzeug. Passt keiner auf das, was der Kunde sagt, LASS ES "
@@ -3697,6 +3704,24 @@ def _product_finder_tools(brand: Optional[str] = None) -> List[dict]:
                 # an der Sitzung (Issue #1398).
                 "type": "object",
                 "properties": dict(kriterien),
+                "additionalProperties": False,
+            },
+        },
+        {
+            "type": "function",
+            "name": "cart_details",
+            "description": (
+                "Was der Kunde schon im Warenkorb hat: Stueckzahl, "
+                "Gesamtpreis und je Eintrag Artikel, Groesse, Farbe, "
+                "Menge, Preis. Ohne Angabe der ganze Korb, mit "
+                "`position` ein einzelner Eintrag — gezaehlt ab EINS. "
+                "Antworte NUR mit dem, was zurueckkommt."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "position": {"type": "integer", "minimum": 1},
+                },
                 "additionalProperties": False,
             },
         },
@@ -5306,7 +5331,8 @@ def _openai_key_fuer(profile_id: Optional[str]) -> tuple:
     return (os.environ.get(OPENAI_KEY_ENV) or "").strip(), "global"
 
 
-PRODUCT_TOOL_NAMES = {"find_products", "refine_search", "product_details"}
+PRODUCT_TOOL_NAMES = {"find_products", "refine_search", "product_details",
+                      "cart_details"}
 
 
 # ── Kategorien: echte Slugs statt freier Woerter ──────────────────────
@@ -5542,7 +5568,8 @@ READ_TOOL_NAMES = {"knowledge_query", "pois_near", "narration_near", "osm_nearby
                    "agent_status",
                    # Produktfinder — beide lesend, beide ohne Produktdaten
                    # im Rueckgabewert (Bauplan #4831, Vertrag c887a89).
-                   "find_products", "refine_search", "product_details"}
+                   "find_products", "refine_search", "product_details",
+                   "cart_details"}
 
 
 # Zahlwoerter aus #1037, deutsch und englisch. Die Faltung muss auf
@@ -6154,6 +6181,70 @@ async def _tool_product_details(
         return dict(_NICHT_ERREICHBAR)
 
 
+async def _tool_cart_details(
+    args: dict,
+    session_id: Optional[str],
+    diagnose: Optional[dict] = None,
+) -> dict:
+    """`cart_details` — was der Kunde schon im Korb hat.
+
+    Reines LESEwerkzeug. Es gibt bewusst kein Gegenstueck zum
+    Hinzufuegen, und die Persona erwaehnt keines: Ein Verbot im Text
+    waere eine Erwaehnung, und die laesst das Modell danach greifen.
+    Read-only wird dadurch erzwungen, dass die Faehigkeit nicht
+    existiert.
+
+    `empty` ist ein ERFOLG, kein Fehler — „Ihr Korb ist leer" ist eine
+    Auskunft. Nur ein echter Ausfall wird `unavailable`.
+    """
+    basis = (os.environ.get(ONEAL_SELECTION_BASE_ENV) or "").strip().rstrip("/")
+    internal = os.environ.get(ONEAL_INTERNAL_KEY_ENV) or ""
+    if not basis or not internal:
+        logger.warning("Warenkorb nicht konfiguriert — 'unavailable'")
+        return dict(_NICHT_ERREICHBAR)
+    if not session_id:
+        logger.warning("Warenkorb ohne Sitzungskennung")
+        return dict(_NICHT_ERREICHBAR)
+
+    nutzlast: dict = {"session_id": session_id}
+    roh = (args or {}).get("position")
+    if roh is not None:
+        try:
+            pos = int(roh)
+        except (TypeError, ValueError):
+            pos = 0
+        if pos >= 1:
+            nutzlast["position"] = pos
+        else:
+            logger.info("Warenkorb: unbrauchbare Position %r verworfen", roh)
+            if diagnose is not None:
+                diagnose["dropped_position"] = roh
+
+    kopf = {
+        "X-Realtime-Internal-Key": internal,
+        "Content-Type": "application/json",
+    }
+    if os.environ.get(ONEAL_API_KEY_ENV):
+        kopf["X-API-Key"] = os.environ[ONEAL_API_KEY_ENV]
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            r = await client.post(f"{basis}/v1/realtime/selections/cart",
+                                  json=nutzlast, headers=kopf)
+    except Exception as exc:
+        logger.warning("Warenkorb nicht erreichbar (%s)", type(exc).__name__)
+        return dict(_NICHT_ERREICHBAR)
+
+    if r.status_code != 200:
+        logger.warning("Warenkorb HTTP %s: %s", r.status_code, r.text[:200])
+        return dict(_NICHT_ERREICHBAR)
+    try:
+        return r.json()
+    except Exception as exc:
+        logger.warning("Warenkorb: Antwort nicht lesbar (%s)", exc)
+        return dict(_NICHT_ERREICHBAR)
+
+
 @router.post("/realtime/tool/{tool_name}")
 async def realtime_tool_call(
     tool_name: str = Path(..., description="Function name from the model"),
@@ -6285,6 +6376,8 @@ async def realtime_tool_call(
             result = await _tool_product_search(args, x_session_id, True, diagnose)
         elif tool_name == "product_details":
             result = await _tool_product_details(args, x_session_id, diagnose)
+        elif tool_name == "cart_details":
+            result = await _tool_cart_details(args, x_session_id, diagnose)
         elif tool_name == "resolve_agent_name":
             result = await _tool_resolve_agent_name(args, authorization)
         else:

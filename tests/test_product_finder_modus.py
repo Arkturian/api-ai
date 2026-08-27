@@ -29,12 +29,13 @@ def test_mint_verdrahtet_die_betriebsart():
 
 # ─────────────────────────────────────────────────── Werkzeuge
 
-def test_genau_drei_werkzeuge():
+def test_genau_vier_werkzeuge():
     """Seit #1404 drei. Die Zahl steht hier fest, damit ein viertes
     Werkzeug nicht unbemerkt in die Hand des Modells wandert — die
     Werkzeugliste IST die Angriffsflaeche."""
     namen = [t["name"] for t in rr._product_finder_tools()]
-    assert namen == ["find_products", "refine_search", "product_details"]
+    assert namen == ["find_products", "refine_search",
+                     "cart_details", "product_details"]
 
 
 def test_kein_anzeigewerkzeug_in_der_hand_des_modells():
@@ -75,9 +76,14 @@ def test_details_ist_die_einzige_ausnahme_von_der_kompakten_form():
     """Die Ausnahme muss EINE bleiben. Ruecken weitere Werkzeuge nach,
     die Produkttext liefern, soll dieser Test rot werden und nicht
     stillschweigend mitwachsen."""
-    mit_text = [t["name"] for t in rr._product_finder_tools()
-                if "keine Namen" not in t["description"]]
-    assert mit_text == ["product_details"]
+    mit_text = sorted(t["name"] for t in rr._product_finder_tools()
+                      if "keine Namen" not in t["description"])
+    # ZWEI benannte Ausnahmen, bewusst erweitert (Warenkorb, #1426):
+    # `product_details` liefert Produkttext, weil der Agent darueber
+    # sprechen soll; `cart_details` liefert die Artikel des Kunden,
+    # weil es SEINE sind. Ein dritter Kandidat faerbt diesen Test
+    # wieder rot — das ist der Zweck, nicht das Hindernis.
+    assert mit_text == ["cart_details", "product_details"]
 
 
 def test_kein_kriterium_heisst_wie_ein_rueckgabefeld():
