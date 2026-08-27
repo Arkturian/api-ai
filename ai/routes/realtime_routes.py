@@ -3592,6 +3592,19 @@ def _product_finder_prompt(language: str = "de",
         "Der Unterschied zwischen den letzten beiden entscheidet: "
         "'Fuehren wir nicht' bei einer Stoerung ist eine FALSCHE "
         "AUSKUNFT ueber das Sortiment.\n\n"
+        "KOMPLETTE AUSRUESTUNG\n"
+        "Will der Kunde eine ganze Montur, ein Set, eine Ausruestung "
+        "oder 'von jeder Sorte eins', mach EINE einzige Suche: alle "
+        "gewuenschten Kategorien zusammen im Kategorienfeld, dazu "
+        "`per_category_limit`.\n"
+        "Mach NIEMALS mehrere Suchen nacheinander — jede ersetzt die "
+        "vorige, und am Ende steht nur die letzte Kategorie da. Das "
+        "ist der haeufigste Fehler an dieser Stelle.\n"
+        "Welche Kategorien dazugehoeren, steht in der Liste des "
+        "Werkzeugs; waehle die, die zur Sportart und zum Wunsch "
+        "passen. Nenn danach die Gruppen, die zurueckkommen, statt "
+        "einer Gesamtzahl — 'je ein Helm, Jersey, Hose, Handschuh und "
+        "Stiefel'. Frag, ob Brille oder Protektoren dazusollen.\n\n"
         "AUSWAHL UND REIHENFOLGE\n"
         "Sagt der Kunde eine Zahl ('zeig mir fuenf', 'drei Stueck'), "
         "setz sie als `limit`. Sagt er 'die besten', 'top' oder "
@@ -3765,6 +3778,13 @@ def _product_finder_tools(brand: Optional[str] = None) -> List[dict]:
         # Kriterienpfad reicht sie deshalb unveraendert durch — kein
         # Sonderweg, keine zweite Liste.
         "limit": {"type": "integer", "minimum": 1, "maximum": 50},
+        # Set-Auswahl (#1446): mehrere Kategorien in EINER Suche, je
+        # Kategorie N Treffer. Ohne das Feld feuert das Modell mehrere
+        # Suchen nacheinander — und jede ersetzt die vorige, sodass am
+        # Ende nur die letzte Kategorie uebrig bleibt (Owner-Log
+        # `bfd02d1b`: fuenf Suchen, am Ende ein einzelner Stiefel).
+        "per_category_limit": {"type": "integer", "minimum": 1,
+                               "maximum": 10},
         "sort": {"type": "string",
                  "enum": ["newest", "price_desc", "price_asc"]},
         "target_group": {"type": "string"},
