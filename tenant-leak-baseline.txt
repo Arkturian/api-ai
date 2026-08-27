@@ -1,0 +1,40 @@
+# Bekannte Kundenbezuege im Kern. Ziel: leer.
+# Neue Eintraege lassen den Waechter fehlschlagen —
+# der Berg darf schrumpfen, nie wachsen.
+ai/routes/narration_routes.py:429	Kundenname (Tscheppaschlucht)
+ai/routes/realtime_routes.py:1893	Persona als Code statt als Text je Profil
+ai/routes/realtime_routes.py:191	Kundenname (Guide)
+ai/routes/realtime_routes.py:2092	Persona als Code statt als Text je Profil
+ai/routes/realtime_routes.py:2176	Persona als Code statt als Text je Profil
+ai/routes/realtime_routes.py:2658	Persona als Code statt als Text je Profil
+ai/routes/realtime_routes.py:2915	Persona als Code statt als Text je Profil
+ai/routes/realtime_routes.py:3091	Kundenname (Guide)
+ai/routes/realtime_routes.py:3092	Kundenname (Tscheppaschlucht)
+ai/routes/realtime_routes.py:3447	Kundenname (Marke)
+ai/routes/realtime_routes.py:3456	Persona als Code statt als Text je Profil
+ai/routes/realtime_routes.py:3479	Kundenname (Marke)
+ai/routes/realtime_routes.py:3695	Kundenname (Marke)
+ai/routes/realtime_routes.py:3809	Kundenname (Guide)
+ai/routes/realtime_routes.py:4108	Kundenname (Guide)
+ai/routes/realtime_routes.py:4162	Kundenname (Guide)
+ai/routes/realtime_routes.py:5	Kundenname (Guide)
+ai/routes/realtime_routes.py:5291	Kundenname (Marke)
+ai/routes/realtime_routes.py:5380	Katalog-Slug eines Kunden
+ai/routes/realtime_routes.py:5381	Katalog-Slug eines Kunden
+ai/routes/realtime_routes.py:5382	Katalog-Slug eines Kunden
+ai/routes/realtime_routes.py:5383	Katalog-Slug eines Kunden
+ai/routes/realtime_routes.py:5384	Katalog-Slug eines Kunden
+ai/routes/realtime_routes.py:5385	Katalog-Slug eines Kunden
+ai/routes/realtime_routes.py:5386	Katalog-Slug eines Kunden
+ai/routes/realtime_routes.py:5387	Katalog-Slug eines Kunden
+ai/routes/realtime_routes.py:5472	Kundenname (Guide)
+ai/routes/realtime_routes.py:5501	Kundenname (Guide)
+ai/routes/realtime_routes.py:573	Kundenname (Tscheppaschlucht)
+ai/routes/realtime_routes.py:6	Kundenname (Tscheppaschlucht)
+ai/routes/realtime_routes.py:6275	Kundenname (Guide)
+ai/routes/realtime_routes.py:6478	Kundenname (Guide)
+ai/routes/realtime_routes.py:683	Kundenname (Guide)
+ai/routes/text_ai_routes.py:224	Kundenname (Marke)
+ai/services/realtime_grant_verifier.py:320	Kundenname (Guide)
+ai/services/realtime_grant_verifier.py:365	Kundenname (Tscheppaschlucht)
+ai/services/realtime_grant_verifier.py:512	Kundenname (Tscheppaschlucht)
