@@ -3444,7 +3444,79 @@ async def voice_clone(
 # einer Zusammenfassung, nicht aus dem Katalog. Der Enum haette jeden
 # echten Wert abgewiesen. Wer Bezeichner aus Prosa ableitet, rechnet
 # mit einer Schreibweise, die nie jemand zugesagt hat.
-PRODUCT_FINDER_BRANDS = ("O'Neal", "ONE Industries", "Kini Red Bull")
+# ── Marken: aus der Kunden-API, NICHT aus dem Repo ────────────────
+#
+# Hier stand bis 2026-08-27 die Markenliste eines Kunden als
+# Konstante. Bei jedem weiteren Kunden waere fremdes
+# Sortimentswissen mit ausgeliefert worden (Entscheidung Alex).
+#
+# Es gibt bewusst KEINEN Rueckfallwert. Eine Vorgabe im Code waere
+# derselbe Leak, nur eine Zeile tiefer — und der Waechter bliebe zu
+# Recht rot.
+#
+# Fail-closed: Ohne beschaffbare Markenliste kann ich die Bindung
+# einer Sitzung nicht pruefen. Dann wird der Mint fuer dieses Profil
+# abgelehnt (`profile_not_configured`), statt still markenoffen zu
+# laufen. „Unbekannte Marke" und „markenoffen" sind verschiedene
+# Zustaende; sie zu verwechseln liesse eine gebundene Sitzung ueber
+# den ganzen Katalog laufen.
+MARKEN_TTL_SEC = 600.0
+_marken_cache: dict = {"werte": None, "geholt": 0.0}
+
+BRAND_CHECK_ENV = "REALTIME_BRAND_CHECK"
+
+
+def _markenpruefung_aus() -> bool:
+    """`REALTIME_BRAND_CHECK=off` — ein AUSDRUECKLICHER Schalter.
+
+    Wer bewusst ohne Markenbindung arbeitet, sagt es. Ein leerer Wert
+    bedeutet das NIE: Genau diese stille Variante ist der Fehler, den
+    die Konstante bisher verdeckt hat.
+    """
+    return (os.environ.get(BRAND_CHECK_ENV) or "").strip().lower() == "off"
+
+
+def _oneal_marken() -> List[str]:
+    """Marken aus `GET /v1/facets`. Leere Liste heisst NICHT erreichbar.
+
+    Kein Rueckfall. Der Aufrufer entscheidet, was eine leere Liste
+    bedeutet — hier waere jede Vorgabe eine Erfindung ueber ein
+    fremdes Sortiment.
+    """
+    jetzt = time.time()
+    if (_marken_cache["werte"] is not None
+            and jetzt - _marken_cache["geholt"] < MARKEN_TTL_SEC):
+        return _marken_cache["werte"]
+
+    basis = (os.environ.get(ONEAL_SELECTION_BASE_ENV) or "").strip().rstrip("/")
+    schluessel = os.environ.get(ONEAL_API_KEY_ENV) or ""
+    werte: List[str] = []
+    if basis and schluessel:
+        try:
+            r = httpx.get(f"{basis}/v1/facets",
+                          params={"relevant_only": "true"},
+                          headers={"X-API-Key": schluessel}, timeout=4.0)
+            if r.status_code == 200:
+                roh = r.json() or {}
+                werte = [
+                    (b.get("name") or "").strip()
+                    for b in (roh.get("brands") or [])
+                    if isinstance(b, dict) and (b.get("name") or "").strip()
+                ]
+            else:
+                logger.warning("Marken HTTP %s — Profil nicht konfigurierbar",
+                               r.status_code)
+        except Exception as exc:
+            logger.warning("Marken nicht abrufbar (%s) — Profil nicht "
+                           "konfigurierbar", type(exc).__name__)
+    else:
+        logger.warning("Marken: %s/%s fehlen — Profil nicht konfigurierbar",
+                       ONEAL_SELECTION_BASE_ENV, ONEAL_API_KEY_ENV)
+
+    if werte:
+        _marken_cache["werte"] = werte
+        _marken_cache["geholt"] = jetzt
+    return werte
 
 # Ohne Angabe setzt `fetchProducts` serverseitig CATALOG_ENTRY_CONFIG.year
 # (derzeit 2027). Fuehrt der Sprachpfad das Jahr NICHT mit, trifft seine
@@ -3473,7 +3545,7 @@ def _product_finder_prompt(language: str = "de",
     # Ist die Sitzung an eine Marke gebunden, nennt die Persona NUR
     # diese. Sonst wuerde das Modell dem Kunden Marken anbieten, die
     # der Katalogeinstieg gerade ausgeschlossen hat.
-    marken = brand if brand else ", ".join(PRODUCT_FINDER_BRANDS)
+    marken = brand or ", ".join(_oneal_marken()) or "das Sortiment"
     sprache = _sprachname(language)
     return (
         "Du bist die Stimme im O'Neal-Produktfinder und beraetst den "
@@ -3569,6 +3641,13 @@ def _product_finder_prompt(language: str = "de",
         "geschaut'. Und dann gilt: Null Treffer heisst in diesem Fall "
         "NICHT 'fuehren wir nicht'. Es heisst 'dort nicht'. Frag, ob "
         "du weiter schauen sollst.\n\n"
+        "WARENKORB\n"
+        "Fragt der Kunde, was er schon drin hat, was es zusammen "
+        "kostet oder ob ein bestimmtes Teil dabei ist, sieh IMMER "
+        "zuerst nach. Zaehl nie aus dem Gedaechtnis auf — was ihr "
+        "vorhin besprochen habt, muss nicht drin sein, und er hat "
+        "vielleicht seither etwas geaendert.\n"
+        "Ist er leer, sag es einfach: 'Ihr Warenkorb ist noch leer.'\n\n"
         "KATEGORIEN\n"
         "Das Kategorienfeld kennt nur feste Werte aus der Liste im "
         "Werkzeug. Passt keiner auf das, was der Kunde sagt, LASS ES "
@@ -3595,13 +3674,38 @@ def _product_finder_brand(roh: Optional[str]) -> Optional[str]:
     Katalog, und niemand saehe es.
     """
     marke = (roh or "").strip() or None
-    if marke and marke not in PRODUCT_FINDER_BRANDS:
+    if _markenpruefung_aus():
+        # Ausdruecklich abgeschaltet — der Kunde arbeitet ohne
+        # Markenbindung und hat das gesagt.
+        return marke
+    bekannt = _oneal_marken()
+    if not bekannt:
+        # Kein stiller Rueckfall auf "markenoffen": ohne Liste kann
+        # ich nicht pruefen, also mintet dieses Profil nicht.
+        logger.warning(
+            "Markenliste nicht beschaffbar — Mint abgelehnt "
+            "(profile_not_configured)",
+        )
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "error": "profile_not_configured",
+                "missing": "brands",
+                "hint": (
+                    "Die Markenliste kommt zur Laufzeit aus der "
+                    "Kunden-API. Ohne sie ist die Markenbindung nicht "
+                    "pruefbar. Konfiguration ergaenzen oder "
+                    "REALTIME_BRAND_CHECK=off ausdruecklich setzen."
+                ),
+            },
+        )
+    if marke and marke not in bekannt:
         raise HTTPException(
             status_code=422,
             detail={
                 "error": "unknown_brand",
                 "brand": marke,
-                "known": sorted(PRODUCT_FINDER_BRANDS),
+                "known": sorted(bekannt),
             },
         )
     return marke
@@ -3617,8 +3721,15 @@ def _product_finder_tools(brand: Optional[str] = None) -> List[dict]:
     wird vom Browser herausgeloest, bevor das Resultat ins Modell geht —
     das Modell kann dadurch nur zeigen, was der Server gefunden hat.
     """
+    # Einmal holen, nicht je Feld — und wenn nichts kommt, faellt das
+    # Kategoriefeld weg, statt ein leeres Enum anzubieten. Die Suche
+    # ueber Warenart und Sportart bleibt moeglich; die Logzeile in
+    # `_oneal_kategorien` sagt, dass etwas fehlt.
+    _kategorien = list(_oneal_kategorien())
+    _marken = list(_oneal_marken())
     kriterien = {
-        "brand": {"type": "string", "enum": list(PRODUCT_FINDER_BRANDS)},
+        **({"brand": {"type": "string", "enum": _marken}}
+           if _marken else {}),
         # Liste, nicht Zeichenkette — und die Werte heissen MX/MTB,
         # nicht moto/mtb. Ich hatte hier zuerst `"moto oder mtb"` als
         # freien Text stehen; der committete Vertrag (OnealServ-Codex,
@@ -3630,9 +3741,10 @@ def _product_finder_tools(brand: Optional[str] = None) -> List[dict]:
         },
         # Kanonische Slugs, nie frei geratene Anzeigenamen — und
         # ebenfalls eine Liste.
-        "category": {"type": "array",
-                     "items": {"type": "string",
-                               "enum": list(_oneal_kategorien())}},
+        **({"category": {"type": "array",
+                          "items": {"type": "string",
+                                    "enum": _kategorien}}}
+           if _kategorien else {}),
         # Auswahlsteuerung, laut Vertrag INNERHALB von `criteria`
         # (OnealServ-Codex 2026-08-27): Der Basis-Token traegt den
         # vollstaendigen normalisierten Kriterienzustand, damit
@@ -3697,6 +3809,24 @@ def _product_finder_tools(brand: Optional[str] = None) -> List[dict]:
                 # an der Sitzung (Issue #1398).
                 "type": "object",
                 "properties": dict(kriterien),
+                "additionalProperties": False,
+            },
+        },
+        {
+            "type": "function",
+            "name": "cart_details",
+            "description": (
+                "Was der Kunde schon im Warenkorb hat: Stueckzahl, "
+                "Gesamtpreis und je Eintrag Artikel, Groesse, Farbe, "
+                "Menge, Preis. Ohne Angabe der ganze Korb, mit "
+                "`position` ein einzelner Eintrag — gezaehlt ab EINS. "
+                "Antworte NUR mit dem, was zurueckkommt."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "position": {"type": "integer", "minimum": 1},
+                },
                 "additionalProperties": False,
             },
         },
@@ -5306,7 +5436,8 @@ def _openai_key_fuer(profile_id: Optional[str]) -> tuple:
     return (os.environ.get(OPENAI_KEY_ENV) or "").strip(), "global"
 
 
-PRODUCT_TOOL_NAMES = {"find_products", "refine_search", "product_details"}
+PRODUCT_TOOL_NAMES = {"find_products", "refine_search", "product_details",
+                      "cart_details"}
 
 
 # ── Kategorien: echte Slugs statt freier Woerter ──────────────────────
@@ -5330,19 +5461,16 @@ PRODUCT_TOOL_NAMES = {"find_products", "refine_search", "product_details"}
 ONEAL_KATEGORIEN_TTL_SEC = 3600.0
 _kategorien_cache: dict = {"werte": None, "geholt": 0.0}
 
-# Slugs, die es im Katalog gibt, aber nicht im Kundengespraech:
-# Ersatzteil-Sammelposten, Display-Material, Altmarken, ein
-# Buchhaltungsposten. `z-spare-parts-helmets` ist mit 1357 Eintraegen
-# sogar die GROESSTE Kategorie — gaebe ich sie dem Modell, schlaege
-# eine Frage nach Helmen zuerst Ersatzvisiere vor.
-_KATEGORIE_AUSSCHLUSS = {
-    "displays", "merchandise-displays", "old-brands",
-    "revenue-without-material-usage",
-}
-
-
-def _ist_kundenkategorie(slug: str) -> bool:
-    return bool(slug) and not slug.startswith("z-") and slug not in _KATEGORIE_AUSSCHLUSS
+# Welche Kategorien im Kundengespraech vorkommen, entscheidet der
+# KATALOG, nicht ich. Bis 2026-08-27 stand hier eine Ausschlussliste
+# mit Slugs eines Kunden (`displays`, `old-brands`, ein
+# Buchhaltungsposten, alles `z-*`). Das war dieselbe Sorte Leck wie
+# die Abschrift daneben — nur kleiner und deshalb uebersehen, auch von
+# meinem eigenen Waechter.
+#
+# oneal beantwortet die Frage seit `c18a3de` selbst: `relevant_only=true`
+# liefert nur Kategorien mit echten Produkten. Ich filtere nicht mehr,
+# ich frage praeziser.
 
 
 # Rueckfallliste — Stand 2026-08-27, von `GET /v1/categories` geholt.
@@ -5350,16 +5478,6 @@ def _ist_kundenkategorie(slug: str) -> bool:
 # haette ein kurzer Ausfall dort ein Werkzeug ohne Kategorien zur
 # Folge, und der Kunde bekaeme wieder „Katalog nicht erreichbar" —
 # fuer einen Fehler, der laengst vorbei ist.
-ONEAL_KATEGORIEN_RUECKFALL = (
-    "adv-pants", "bags---backpacks", "boots-adventure", "boots-mx",
-    "casual-wear", "face-masks", "gloves", "goggles", "grips",
-    "handlebars", "helme-mtb-open-face", "helmets-mtb-full-face",
-    "helmets-mx", "helmets-street", "jackets", "jerseys-mtb",
-    "jerseys-offroad", "kids-wear-protection", "leather-suits-road",
-    "leisure-accessories", "pants-mx", "pants--shorts-mtb",
-    "protection-mtb", "protection-mx", "rain-wear", "shoes",
-    "sunglasses", "transportation",
-)
 
 
 def _oneal_kategorien() -> List[str]:
@@ -5381,6 +5499,7 @@ def _oneal_kategorien() -> List[str]:
     if basis and schluessel:
         try:
             r = httpx.get(f"{basis}/v1/categories",
+                          params={"relevant_only": "true"},
                           headers={"X-API-Key": schluessel}, timeout=4.0)
             if r.status_code == 200:
                 roh = r.json()
@@ -5397,7 +5516,7 @@ def _oneal_kategorien() -> List[str]:
                     x if isinstance(x, str) else (x.get("slug") or "")
                     for x in liste
                 ]
-                gefiltert = sorted({s for s in slugs if _ist_kundenkategorie(s)})
+                gefiltert = sorted({x for x in slugs if x})
                 # Eine leere Antwort ist KEINE gueltige Kategorienliste.
                 # Sie zu uebernehmen hiesse, ein leeres Regal fuer einen
                 # geraeumten Laden zu halten.
@@ -5410,10 +5529,19 @@ def _oneal_kategorien() -> List[str]:
             logger.warning("Kategorien nicht abrufbar (%s) — Rueckfallliste",
                            type(exc).__name__)
 
+    # Kein Rueckfall mehr: Eine Abschrift im Repo waere fremdes
+    # Katalogwissen — und sie war bereits veraltet, wie OnealServ am
+    # 27.08. belegt hat (Katalog-Kategorien und `relevant_only` kamen
+    # nach der Abschrift dazu).
     if werte is None:
-        werte = list(ONEAL_KATEGORIEN_RUECKFALL)
-    _kategorien_cache["werte"] = werte
-    _kategorien_cache["geholt"] = jetzt
+        werte = []
+        logger.warning(
+            "Kategorienliste nicht beschaffbar — Werkzeug ohne "
+            "Kategoriefeld (categories_unavailable)",
+        )
+    if werte:
+        _kategorien_cache["werte"] = werte
+        _kategorien_cache["geholt"] = jetzt
     return werte
 
 # Felder, die der SERVER setzt — nie das Modell, nie der Browser.
@@ -5542,7 +5670,8 @@ READ_TOOL_NAMES = {"knowledge_query", "pois_near", "narration_near", "osm_nearby
                    "agent_status",
                    # Produktfinder — beide lesend, beide ohne Produktdaten
                    # im Rueckgabewert (Bauplan #4831, Vertrag c887a89).
-                   "find_products", "refine_search", "product_details"}
+                   "find_products", "refine_search", "product_details",
+                   "cart_details"}
 
 
 # Zahlwoerter aus #1037, deutsch und englisch. Die Faltung muss auf
@@ -6154,6 +6283,70 @@ async def _tool_product_details(
         return dict(_NICHT_ERREICHBAR)
 
 
+async def _tool_cart_details(
+    args: dict,
+    session_id: Optional[str],
+    diagnose: Optional[dict] = None,
+) -> dict:
+    """`cart_details` — was der Kunde schon im Korb hat.
+
+    Reines LESEwerkzeug. Es gibt bewusst kein Gegenstueck zum
+    Hinzufuegen, und die Persona erwaehnt keines: Ein Verbot im Text
+    waere eine Erwaehnung, und die laesst das Modell danach greifen.
+    Read-only wird dadurch erzwungen, dass die Faehigkeit nicht
+    existiert.
+
+    `empty` ist ein ERFOLG, kein Fehler — „Ihr Korb ist leer" ist eine
+    Auskunft. Nur ein echter Ausfall wird `unavailable`.
+    """
+    basis = (os.environ.get(ONEAL_SELECTION_BASE_ENV) or "").strip().rstrip("/")
+    internal = os.environ.get(ONEAL_INTERNAL_KEY_ENV) or ""
+    if not basis or not internal:
+        logger.warning("Warenkorb nicht konfiguriert — 'unavailable'")
+        return dict(_NICHT_ERREICHBAR)
+    if not session_id:
+        logger.warning("Warenkorb ohne Sitzungskennung")
+        return dict(_NICHT_ERREICHBAR)
+
+    nutzlast: dict = {"session_id": session_id}
+    roh = (args or {}).get("position")
+    if roh is not None:
+        try:
+            pos = int(roh)
+        except (TypeError, ValueError):
+            pos = 0
+        if pos >= 1:
+            nutzlast["position"] = pos
+        else:
+            logger.info("Warenkorb: unbrauchbare Position %r verworfen", roh)
+            if diagnose is not None:
+                diagnose["dropped_position"] = roh
+
+    kopf = {
+        "X-Realtime-Internal-Key": internal,
+        "Content-Type": "application/json",
+    }
+    if os.environ.get(ONEAL_API_KEY_ENV):
+        kopf["X-API-Key"] = os.environ[ONEAL_API_KEY_ENV]
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            r = await client.post(f"{basis}/v1/realtime/selections/cart",
+                                  json=nutzlast, headers=kopf)
+    except Exception as exc:
+        logger.warning("Warenkorb nicht erreichbar (%s)", type(exc).__name__)
+        return dict(_NICHT_ERREICHBAR)
+
+    if r.status_code != 200:
+        logger.warning("Warenkorb HTTP %s: %s", r.status_code, r.text[:200])
+        return dict(_NICHT_ERREICHBAR)
+    try:
+        return r.json()
+    except Exception as exc:
+        logger.warning("Warenkorb: Antwort nicht lesbar (%s)", exc)
+        return dict(_NICHT_ERREICHBAR)
+
+
 @router.post("/realtime/tool/{tool_name}")
 async def realtime_tool_call(
     tool_name: str = Path(..., description="Function name from the model"),
@@ -6285,6 +6478,8 @@ async def realtime_tool_call(
             result = await _tool_product_search(args, x_session_id, True, diagnose)
         elif tool_name == "product_details":
             result = await _tool_product_details(args, x_session_id, diagnose)
+        elif tool_name == "cart_details":
+            result = await _tool_cart_details(args, x_session_id, diagnose)
         elif tool_name == "resolve_agent_name":
             result = await _tool_resolve_agent_name(args, authorization)
         else:

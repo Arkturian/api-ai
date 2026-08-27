@@ -1,0 +1,17 @@
+# Bekannte Kundenbezuege im Kern. Ziel: leer.
+# Neue Eintraege lassen den Waechter fehlschlagen —
+# der Berg darf schrumpfen, nie wachsen.
+ai/routes/narration_routes.py	Kundenname (Tscheppaschlucht)	Tscheppa
+ai/routes/realtime_routes.py	Kundenname (Guide)	Wanderlaut
+ai/routes/realtime_routes.py	Kundenname (Marke)	O'Neal
+ai/routes/realtime_routes.py	Kundenname (Tscheppaschlucht)	Tscheppa
+ai/routes/realtime_routes.py	Persona als Code statt als Text je Profil	def _companion_agent_transparent_prompt
+ai/routes/realtime_routes.py	Persona als Code statt als Text je Profil	def _companion_agentos_narrator_prompt
+ai/routes/realtime_routes.py	Persona als Code statt als Text je Profil	def _companion_arcturian_prompt
+ai/routes/realtime_routes.py	Persona als Code statt als Text je Profil	def _companion_narrator_prompt
+ai/routes/realtime_routes.py	Persona als Code statt als Text je Profil	def _companion_talkback_prompt
+ai/routes/realtime_routes.py	Persona als Code statt als Text je Profil	def _product_finder_prompt
+ai/routes/text_ai_routes.py	Kundenname (Marke)	O'Neal
+ai/services/realtime_grant_verifier.py	Kundenname (Guide)	Wanderlaut
+ai/services/realtime_grant_verifier.py	Kundenname (Tscheppaschlucht)	Tscheppa
+ai/services/realtime_grant_verifier.py	Kundenname (Tscheppaschlucht)	tscheppa
