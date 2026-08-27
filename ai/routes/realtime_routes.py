@@ -220,6 +220,19 @@ class RealtimeTokenRequest(BaseModel):
             "(Bauplan #4831, Scope-Regel OnealServ-Codex)."
         ),
     )
+    brand_open: bool = Field(
+        default=False,
+        description=(
+            "Nur fuer 'product-finder'. AUSDRUECKLICH markenoffen: Der "
+            "Kunde ist ueber einen Flow ohne Marken-Gate hereingekommen "
+            "(`open`/`direct`), nicht: Die Marke wurde vergessen. "
+            "Beide Faelle senden heute `brand: null` und sind dadurch "
+            "nicht unterscheidbar — dieses Flag trennt sie. "
+            "Noch keine Pflicht: Sobald BFF und Finder es senden, wird "
+            "ein `brand: null` OHNE Flag abgewiesen "
+            "(REALTIME_BRAND_OPEN_REQUIRES_FLAG=on)."
+        ),
+    )
     collection_year: Optional[int] = Field(
         default=None,
         description=(
@@ -3983,6 +3996,28 @@ async def mint_realtime_token(
         )
     elif companion_mode == "product-finder":
         marke = _product_finder_brand(request.brand)
+        if marke is None:
+            # „bewusst offen" und „Marke vergessen" senden beide
+            # `brand: null`. Bis das Flag ueberall gesetzt wird, steht
+            # der Unterschied wenigstens im Protokoll — sonst laesst
+            # sich hinterher nicht sagen, ob eine markenoffene Sitzung
+            # gewollt war.
+            _absicht = "explicit" if request.brand_open else "implicit"
+            logger.info("Realtime mint: brand=open(%s)", _absicht)
+            if (_absicht == "implicit"
+                    and (os.environ.get("REALTIME_BRAND_OPEN_REQUIRES_FLAG")
+                         or "").strip().lower() == "on"):
+                raise HTTPException(
+                    status_code=422,
+                    detail={
+                        "error": "brand_required",
+                        "hint": (
+                            "Markenoffen ist ein Zustand, kein leerer "
+                            "Wert. Wer ohne Marke mintet, setzt "
+                            "`brand_open: true`."
+                        ),
+                    },
+                )
         jahr = request.collection_year or PRODUCT_FINDER_DEFAULT_YEAR
         instructions = _product_finder_prompt(request.language or "de", marke)
         companion_tools_override = _product_finder_tools(marke)
