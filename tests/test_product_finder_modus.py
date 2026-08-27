@@ -330,3 +330,29 @@ def test_leerer_schalter_ist_kein_aus(monkeypatch):
     monkeypatch.setenv(rr.BRAND_CHECK_ENV, "")
     with pytest.raises(HTTPException):
         rr._product_finder_brand("O'Neal")
+
+
+def test_markenoffen_wird_als_absicht_protokolliert():
+    """„Bewusst offen" und „Marke vergessen" senden beide `brand:
+    null`. Bis BFF und Finder das Flag setzen, steht der Unterschied
+    wenigstens im Protokoll — sonst lässt sich hinterher nicht sagen,
+    ob eine markenoffene Sitzung gewollt war."""
+    import inspect
+    q = inspect.getsource(rr.mint_realtime_token)
+    assert 'brand=open(%s)' in q
+    assert "request.brand_open" in q
+
+
+def test_die_pflicht_ist_noch_aus():
+    """Erzwänge ich sie sofort, brächen die Flows `open`/`direct` in
+    dem Moment, in dem ich ausliefere — der Finder sendet das Flag
+    noch nicht. Dieselbe Staffelung wie bei den Altwerkzeugen."""
+    import inspect
+    q = inspect.getsource(rr.mint_realtime_token)
+    assert 'REALTIME_BRAND_OPEN_REQUIRES_FLAG' in q
+    assert '"on"' in q
+
+
+def test_das_flag_steht_im_anfragemodell():
+    assert "brand_open" in rr.RealtimeTokenRequest.model_fields
+    assert rr.RealtimeTokenRequest.model_fields["brand_open"].default is False
