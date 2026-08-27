@@ -31,9 +31,13 @@ def cache_leer(monkeypatch):
 # ───────────────────────────────── das Schema kennt feste Werte
 
 def test_category_hat_ein_enum():
-    for t in rr._product_finder_tools("O'Neal"):
-        cat = t["parameters"]["properties"]["category"]
-        assert cat["items"].get("enum"), t["name"]
+    """Nur die Suchwerkzeuge tragen Kriterien. `product_details` waehlt
+    nicht aus, es fragt nach dem bereits gewaehlten Produkt."""
+    mit_kriterien = [t for t in rr._product_finder_tools("O'Neal")
+                     if "category" in t["parameters"]["properties"]]
+    assert {t["name"] for t in mit_kriterien} == {"find_products", "refine_search"}
+    for t in mit_kriterien:
+        assert t["parameters"]["properties"]["category"]["items"].get("enum"), t["name"]
 
 
 def test_das_gehoerte_wort_steht_nicht_drin():

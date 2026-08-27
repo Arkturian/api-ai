@@ -29,9 +29,12 @@ def test_mint_verdrahtet_die_betriebsart():
 
 # ─────────────────────────────────────────────────── Werkzeuge
 
-def test_genau_zwei_werkzeuge():
+def test_genau_drei_werkzeuge():
+    """Seit #1404 drei. Die Zahl steht hier fest, damit ein viertes
+    Werkzeug nicht unbemerkt in die Hand des Modells wandert — die
+    Werkzeugliste IST die Angriffsflaeche."""
     namen = [t["name"] for t in rr._product_finder_tools()]
-    assert namen == ["find_products", "refine_search"]
+    assert namen == ["find_products", "refine_search", "product_details"]
 
 
 def test_kein_anzeigewerkzeug_in_der_hand_des_modells():
@@ -50,12 +53,31 @@ def test_kein_anzeigewerkzeug_in_der_hand_des_modells():
 
 def test_werkzeugbeschreibung_verlangt_die_kompakte_form():
     """Der Vertrag steht in der Beschreibung, die das Modell liest —
-    nicht nur in einem Dokument, das niemand zur Laufzeit aufschlaegt."""
-    for t in rr._product_finder_tools():
+    nicht nur in einem Dokument, das niemand zur Laufzeit aufschlaegt.
+
+    Gilt fuer die SUCHWERKZEUGE. `product_details` ist die bewusste
+    Ausnahme (#1404): Es liefert Name, Material und Ausstattung, weil
+    der Agent genau darueber sprechen soll. Die Grenze verschiebt sich
+    dort vom „was darf das Modell sehen" zum „wer waehlt aus" — und
+    auswaehlen darf weiterhin nur der Server.
+    """
+    kompakt = [t for t in rr._product_finder_tools()
+               if t["name"] in ("find_products", "refine_search")]
+    assert len(kompakt) == 2
+    for t in kompakt:
         d = t["description"]
         assert "keine Produkt-IDs" in d
         assert "keine Namen" in d
         assert "Einzelpreise" in d
+
+
+def test_details_ist_die_einzige_ausnahme_von_der_kompakten_form():
+    """Die Ausnahme muss EINE bleiben. Ruecken weitere Werkzeuge nach,
+    die Produkttext liefern, soll dieser Test rot werden und nicht
+    stillschweigend mitwachsen."""
+    mit_text = [t["name"] for t in rr._product_finder_tools()
+                if "keine Namen" not in t["description"]]
+    assert mit_text == ["product_details"]
 
 
 def test_kein_kriterium_heisst_wie_ein_rueckgabefeld():
