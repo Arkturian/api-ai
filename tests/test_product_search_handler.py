@@ -183,8 +183,8 @@ def test_beide_werkzeuge_sind_routbar():
 def test_dispatch_unterscheidet_finden_und_verfeinern():
     import inspect
     quelle = inspect.getsource(rr.realtime_tool_call)
-    assert "_tool_product_search(args, x_session_id, False)" in quelle
-    assert "_tool_product_search(args, x_session_id, True)" in quelle
+    assert "_tool_product_search(args, x_session_id, False, diagnose)" in quelle
+    assert "_tool_product_search(args, x_session_id, True, diagnose)" in quelle
 
 
 # ─────────────────────────── Zugang zum Werkzeug-Dispatch (Befund 26.08.)

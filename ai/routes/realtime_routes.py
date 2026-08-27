@@ -5773,6 +5773,7 @@ async def _tool_product_search(
     args: dict,
     session_id: Optional[str],
     verfeinern: bool,
+    diagnose: Optional[dict] = None,
 ) -> dict:
     """`find_products` und `refine_search` — eine Route, ein Unterschied.
 
@@ -5831,6 +5832,12 @@ async def _tool_product_search(
             "Produktsuche: unbekannte Kriterien verworfen %s "
             "(Modell hat sie erfunden, Schema kennt sie nicht)", verworfen,
         )
+        # Auch in den Umschlag, nicht nur ins Log: journalctl liefert
+        # ohne sudo lautlos nichts, und im Sitzungsprotokoll stuende
+        # sonst ein Aufruf OHNE dieses Feld — niemand koennte
+        # rekonstruieren, dass das Modell es gesagt hat.
+        if diagnose is not None:
+            diagnose["dropped_criteria"] = verworfen
     nutzlast = {
         "session_id": session_id,
         "brand": scope.get("brand"),
@@ -5914,6 +5921,7 @@ async def _tool_product_search(
 async def _tool_product_details(
     args: dict,
     session_id: Optional[str],
+    diagnose: Optional[dict] = None,
 ) -> dict:
     """`product_details` — der Agent spricht ueber das offene Produkt.
 
@@ -5969,6 +5977,8 @@ async def _tool_product_details(
                 "Produktdetails: unbrauchbare Position %r verworfen — "
                 "frage stattdessen das fokussierte Produkt", roh,
             )
+            if diagnose is not None:
+                diagnose["dropped_position"] = roh
 
     kopf = {
         "X-Realtime-Internal-Key": internal,
@@ -6107,6 +6117,14 @@ async def realtime_tool_call(
 
     t0 = time.monotonic()
     args = body.arguments or {}
+    # Auditdaten fahren im TRANSPORT-Umschlag mit, nicht im Domain-
+    # Ergebnis (Tschepp-Codex2s Korrektur an meinem ersten Vorschlag):
+    # Im Ergebnis wuerde der Details-Validator sie als
+    # `invalid_tool_response` abweisen, waehrend die Suchvalidatoren sie
+    # durchliessen — und dann saehe und BEZAHLTE das Modell meine
+    # Diagnose. Der BFF schaelt den Umschlag ohnehin ab; er protokolliert
+    # das Feld und gibt dem Browser nur `result`.
+    diagnose: dict = {}
     result: Any
     try:
         if tool_name == "knowledge_query":
@@ -6120,11 +6138,11 @@ async def realtime_tool_call(
         elif tool_name == "agent_status":
             result = await _tool_agent_status(args, authorization)
         elif tool_name == "find_products":
-            result = await _tool_product_search(args, x_session_id, False)
+            result = await _tool_product_search(args, x_session_id, False, diagnose)
         elif tool_name == "refine_search":
-            result = await _tool_product_search(args, x_session_id, True)
+            result = await _tool_product_search(args, x_session_id, True, diagnose)
         elif tool_name == "product_details":
-            result = await _tool_product_details(args, x_session_id)
+            result = await _tool_product_details(args, x_session_id, diagnose)
         elif tool_name == "resolve_agent_name":
             result = await _tool_resolve_agent_name(args, authorization)
         else:
@@ -6154,13 +6172,19 @@ async def realtime_tool_call(
         f"realtime tool {tool_name} ok in {elapsed_ms}ms "
         f"(session={x_session_id})"
     )
-    return {
+    umschlag = {
         "call_id": body.call_id,
         "tool": tool_name,
         "ok": True,
         "result": result,
         "elapsed_ms": elapsed_ms,
     }
+    # Nur wenn tatsaechlich etwas verworfen wurde. Ein immer
+    # vorhandenes leeres Feld erzeugt Rauschen im Protokoll und
+    # verleitet dazu, es zu ignorieren.
+    if diagnose:
+        umschlag["diagnostics"] = diagnose
+    return umschlag
 
 
 # ── Tool implementations ──────────────────────────────────────────────
