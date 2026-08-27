@@ -144,3 +144,31 @@ def test_der_sprecher_muss_erst_nachsehen_bevor_er_ablehnt():
 def test_der_sprecher_nutzt_die_gewaehlte_variante():
     t = rr._product_finder_prompt("de", "O'Neal")
     assert "gewaehlte Groesse oder Farbe" in t
+
+
+# ───────────── Einstiegskategorie ist kein Zaun (Log 15:28)
+
+def test_der_einstieg_begrenzt_die_suche_nicht():
+    """Befund aus `7e5d7d86`: Einstieg über MX-Helme, Frage nach einem
+    Oberteil → 0 Treffer, weil die Suche im Einstiegs-Scope lief.
+    Ohne Scope liefert dieselbe Suche fünf."""
+    t = rr._product_finder_prompt("de", "O'Neal")
+    assert "KEIN ZAUN" in t
+
+
+def test_vorbelegung_wird_ausgesprochen():
+    """Sucht der Sprecher still im Zaun und meldet „nichts gefunden",
+    ist das die dritte Verwechslung derselben Achse: „führen wir
+    nicht" gegen „ich habe nur hier gesucht"."""
+    t = rr._product_finder_prompt("de", "O'Neal")
+    assert "defaults_applied" in t
+    assert "dort nicht" in t
+
+
+def test_die_drei_verwechslungen_stehen_alle_in_der_persona():
+    """Sortiment / Störung / Vorbelegung — drei verschiedene Gründe
+    für „nichts", die im Gespräch gleich klingen."""
+    t = rr._product_finder_prompt("de", "O'Neal")
+    assert "fuehren wir davon nichts" in t      # Sortiment
+    assert "Katalog antwortet gerade" in t       # Stoerung
+    assert "dort nicht" in t                     # Vorbelegung
