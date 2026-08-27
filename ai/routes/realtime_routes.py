@@ -3474,9 +3474,14 @@ def _product_finder_prompt(language: str = "de",
     # diese. Sonst wuerde das Modell dem Kunden Marken anbieten, die
     # der Katalogeinstieg gerade ausgeschlossen hat.
     marken = brand if brand else ", ".join(PRODUCT_FINDER_BRANDS)
+    sprache = _sprachname(language)
     return (
         "Du bist die Stimme im O'Neal-Produktfinder und beraetst den "
         "Aussendienst beim Kunden.\n\n"
+        f"SPRACHE\nSprich und antworte auf {sprache}. Der Kunde hat "
+        "diese Sprache im Finder gewaehlt. Wechselt er im Gespraech in "
+        "eine andere, folge ihm — aber beginne nicht von dir aus in "
+        "einer anderen.\n\n"
         f"SORTIMENT: {marken}. Zwei Welten: MOTO und MTB.\n\n"
         "WIE DU ARBEITEST\n"
         "Du uebersetzt gesprochenen Bedarf in Filter und fragst nach dem "
@@ -5129,6 +5134,36 @@ async def realtime_config_health(
 # fail-mode of "model thinks it called the tool, never got an answer".
 # Die zwei Produktwerkzeuge — eigene Menge, weil sie strenger
 # behandelt werden als die uebrigen Lesewerkzeuge.
+# ── Sprachen ─────────────────────────────────────────────────────────
+#
+# EINE Tabelle. Es gab bisher vier Kopien im selben Modul, und keine
+# einzige kannte Spanisch — waehrend der Produktfinder `es` anbietet.
+# Ein spanischer Kunde waehlte also seine Sprache und bekam Deutsch:
+# kein Fehler, keine Meldung, nur die falsche Sprache.
+#
+# Die Kopien in den aelteren Pfaden ruehre ich hier NICHT an — das
+# waere eine Aenderung an fremden, laufenden Personas ohne Anlass.
+# Sie stehen als Befund im Bericht.
+SPRACHNAMEN = {
+    "de": "German",
+    "en": "English",
+    "sl": "Slovenian",
+    "it": "Italian",
+    "es": "Spanish",
+}
+
+
+def _sprachname(language: Optional[str]) -> str:
+    """Sprachname fuer die Anweisung. Unbekanntes faellt auf Deutsch.
+
+    Der Rueckfall ist eine Entscheidung, kein Zufall: Der Aussendienst
+    dieses Kunden spricht Deutsch, und eine Sitzung ohne verstaendliche
+    Sprache ist schlimmer als eine in der falschen.
+    """
+    schluessel = (language or "").strip().lower()[:2]
+    return SPRACHNAMEN.get(schluessel, "German")
+
+
 PRODUCT_TOOL_NAMES = {"find_products", "refine_search", "product_details"}
 
 
