@@ -172,3 +172,16 @@ def test_die_drei_verwechslungen_stehen_alle_in_der_persona():
     assert "fuehren wir davon nichts" in t      # Sortiment
     assert "Katalog antwortet gerade" in t       # Stoerung
     assert "dort nicht" in t                     # Vorbelegung
+
+
+def test_die_gewaehlte_groesse_gilt_nur_fuer_dieses_produkt():
+    """Folgefehler meiner eigenen Regel, gefunden an OnealServ-Codex'
+    Befund `ee0142b`: Dort wurde die Helmgröße `S/M` serverseitig in
+    eine Jersey-Suche übernommen. Der Server räumt das jetzt aus —
+    meine Persona hätte es wieder hineingeredet, weil „frag nicht nach
+    der Größe" ohne Bindung an das Produkt dastand.
+    """
+    t = rr._product_finder_prompt("de", "O'Neal")
+    assert "NUR fuer dieses Produkt" in t
+    assert "Wechselt er die " in t
+    assert "darfst und sollst du neu fragen" in t
