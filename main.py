@@ -228,13 +228,38 @@ if os.path.isdir(os.path.join(_STATIC_DIR, "realtime-test")):
     )
 
 # Health check
+def _realtime_faehigkeiten() -> list:
+    """Welche Realtime-Werkzeuge diese Instanz kennt.
+
+    Warum das hier steht (OnealServ-Codex, 2026-08-27): `/health`
+    meldete keinen nachpruefbaren Stand, und die Frage „laeuft dort
+    schon der neue Code" liess sich von aussen nicht beantworten.
+
+    Ein Commit-Hash waere die naheliegende Antwort und die schlechtere:
+    Der Deploy packt ein tar aus, das mitgelieferte `.git` bleibt auf
+    einem alten Stand stehen — genau daran habe ich am 2026-08-26 eine
+    Stunde verloren. Was man wirklich wissen will, ist nicht „welcher
+    Commit", sondern „kann diese Instanz X". Also antworte ich darauf.
+
+    Faellt der Import aus, bleibt die Liste leer statt den Health-Check
+    mitzureissen: Ein Gesundheitsbericht, der selbst krank werden
+    kann, ist keiner.
+    """
+    try:
+        from ai.routes.realtime_routes import READ_TOOL_NAMES
+        return sorted(READ_TOOL_NAMES)
+    except Exception:
+        return []
+
+
 @app.get("/health")
 def health_check():
     """Health check endpoint"""
     return {
         "status": "healthy",
         "service": "arkturian-ai-api",
-        "version": "1.0.0"
+        "version": "1.0.0",
+        "realtime_tools": _realtime_faehigkeiten(),
     }
 
 @app.get("/")
