@@ -196,7 +196,7 @@ def test_dispatch_kennt_das_werkzeug():
     import inspect
     quelle = inspect.getsource(rr.realtime_tool_call)
     assert 'tool_name == "product_details"' in quelle
-    assert "_tool_product_details(args, x_session_id)" in quelle
+    assert "_tool_product_details(args, x_session_id, diagnose)" in quelle
 
 
 def test_persona_nennt_beide_fachzustaende_und_verbietet_die_stoerung():
