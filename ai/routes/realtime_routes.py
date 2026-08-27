@@ -3505,6 +3505,20 @@ def _product_finder_prompt(language: str = "de",
         "gerade heraus, weiche nicht aus: 'Groesse kann ich aus "
         "Koerpermassen nicht bestimmen, dazu fehlen mir die Tabellen. "
         "Ich zeig Ihnen, was der Hersteller angibt.'\n\n"
+        "UEBER EIN PRODUKT SPRECHEN\n"
+        "Fragt der Kunde nach Material, Ausstattung oder Passform, hol "
+        "dir die Auskunft. Ohne Angabe gilt das Produkt, das er offen "
+        "hat; nennt er eine Ordnungszahl ('das dritte'), gib sie weiter. "
+        "Erfinde nichts dazu und lies nichts vor, was nicht "
+        "zurueckkam.\n"
+        "Zwei Antworten, die KEINE Stoerung sind:\n"
+        "- nichts geoeffnet: 'Oeffnen Sie eins, dann sag ich Ihnen "
+        "alles dazu.'\n"
+        "- die Nummer gibt es nicht: 'So weit reicht die Liste nicht — "
+        "welches meinen Sie?'\n"
+        "Beides sind Auskuenfte, keine Fehler. Sag NICHT, der Katalog "
+        "antworte nicht — das waere eine falsche Auskunft ueber den "
+        "Zustand des Systems.\n\n"
         "KATEGORIEN\n"
         "Das Kategorienfeld kennt nur feste Werte aus der Liste im "
         "Werkzeug. Passt keiner auf das, was der Kunde sagt, LASS ES "
@@ -3624,6 +3638,25 @@ def _product_finder_tools(brand: Optional[str] = None) -> List[dict]:
                 # an der Sitzung (Issue #1398).
                 "type": "object",
                 "properties": dict(kriterien),
+                "additionalProperties": False,
+            },
+        },
+        {
+            "type": "function",
+            "name": "product_details",
+            "description": (
+                "Auskunft ueber EIN Produkt: Material, Ausstattung, "
+                "Groessen, Farben, Preisspanne. Ohne Angabe das Produkt, "
+                "das der Kunde gerade offen hat. Mit `position` das n-te "
+                "der aktuellen Trefferliste — gezaehlt ab EINS, so wie "
+                "der Kunde spricht ('das dritte' = 3). "
+                "Antworte NUR mit dem, was zurueckkommt."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "position": {"type": "integer", "minimum": 1},
+                },
                 "additionalProperties": False,
             },
         },
@@ -5096,7 +5129,7 @@ async def realtime_config_health(
 # fail-mode of "model thinks it called the tool, never got an answer".
 # Die zwei Produktwerkzeuge — eigene Menge, weil sie strenger
 # behandelt werden als die uebrigen Lesewerkzeuge.
-PRODUCT_TOOL_NAMES = {"find_products", "refine_search"}
+PRODUCT_TOOL_NAMES = {"find_products", "refine_search", "product_details"}
 
 
 # ── Kategorien: echte Slugs statt freier Woerter ──────────────────────
@@ -5332,7 +5365,7 @@ READ_TOOL_NAMES = {"knowledge_query", "pois_near", "narration_near", "osm_nearby
                    "agent_status",
                    # Produktfinder — beide lesend, beide ohne Produktdaten
                    # im Rueckgabewert (Bauplan #4831, Vertrag c887a89).
-                   "find_products", "refine_search"}
+                   "find_products", "refine_search", "product_details"}
 
 
 # Zahlwoerter aus #1037, deutsch und englisch. Die Faltung muss auf
@@ -5843,6 +5876,97 @@ async def _tool_product_search(
     return ergebnis
 
 
+async def _tool_product_details(
+    args: dict,
+    session_id: Optional[str],
+) -> dict:
+    """`product_details` — der Agent spricht ueber das offene Produkt.
+
+    Der Unterschied zu den beiden Suchwerkzeugen: Hier kommt Produkt-
+    TEXT in den Modellkontext, und das ist der Zweck. Die Auswahl
+    trifft trotzdem der Server — das Modell nennt hoechstens eine
+    Ordnungszahl, welches Produkt gemeint ist, entscheidet oneal aus
+    der sitzungsgebundenen Auswahl.
+
+    **Ergebnis unveraendert durchgereicht**, `status` eingeschlossen.
+    `no_focus` und `no_such_position` sind ERFOLGE (HTTP 200), keine
+    Fehler: „nichts geoeffnet" und „diese Nummer gibt es nicht" sind
+    Auskuenfte, die der Sprecher geben soll. Nur ein echter Ausfall
+    wird zu `unavailable` — der Unterschied entscheidet, ob der Kunde
+    auf seinen Bildschirm schaut oder die Technik verdaechtigt.
+    """
+    basis = (os.environ.get(ONEAL_SELECTION_BASE_ENV) or "").strip().rstrip("/")
+    internal = os.environ.get(ONEAL_INTERNAL_KEY_ENV) or ""
+    if not basis or not internal:
+        logger.warning(
+            "Produktdetails nicht konfiguriert (%s/%s fehlen) — als "
+            "'unavailable' gemeldet", ONEAL_SELECTION_BASE_ENV,
+            ONEAL_INTERNAL_KEY_ENV,
+        )
+        return dict(_NICHT_ERREICHBAR)
+
+    if not session_id:
+        # Ohne Sitzung kann oneal weder Fokus noch Auswahl aufloesen.
+        # Das ist kein Ausfall, aber auch kein Fachzustand, den ich
+        # erfinden darf — also der ehrliche technische Zustand.
+        logger.warning("Produktdetails ohne Sitzungskennung")
+        return dict(_NICHT_ERREICHBAR)
+
+    nutzlast: dict = {"session_id": session_id}
+
+    # Ordnungszahlen: strikt 1-basiert (Vertrag mit OnealServ-Codex).
+    # oneal weist 0 und negative Werte mit 422 ab — voellig richtig,
+    # aber ein 422 landet bei mir im Ausfall-Zweig und der Kunde hoerte
+    # „Katalog nicht erreichbar", weil das Modell „das nullte" gesagt
+    # hat. Also verwerfe ich solche Werte HIER und frage nach dem
+    # fokussierten Produkt: „Das nullte" hat keine Bedeutung, das
+    # offene Produkt ist die beste verfuegbare.
+    roh = (args or {}).get("position")
+    if roh is not None:
+        try:
+            pos = int(roh)
+        except (TypeError, ValueError):
+            pos = 0
+        if pos >= 1:
+            nutzlast["position"] = pos
+        else:
+            logger.info(
+                "Produktdetails: unbrauchbare Position %r verworfen — "
+                "frage stattdessen das fokussierte Produkt", roh,
+            )
+
+    kopf = {
+        "X-Realtime-Internal-Key": internal,
+        "Content-Type": "application/json",
+    }
+    if os.environ.get(ONEAL_API_KEY_ENV):
+        kopf["X-API-Key"] = os.environ[ONEAL_API_KEY_ENV]
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            r = await client.post(
+                f"{basis}/v1/realtime/selections/details",
+                json=nutzlast, headers=kopf,
+            )
+    except Exception as exc:
+        logger.warning("Produktdetails nicht erreichbar (%s)",
+                       type(exc).__name__)
+        return dict(_NICHT_ERREICHBAR)
+
+    if r.status_code != 200:
+        # Auch 4xx sind hier technische Fehler. Die Fachzustaende
+        # kommen laut Vertrag mit 200 und einem `status`-Feld.
+        logger.warning("Produktdetails HTTP %s: %s",
+                       r.status_code, r.text[:200])
+        return dict(_NICHT_ERREICHBAR)
+
+    try:
+        return r.json()
+    except Exception as exc:
+        logger.warning("Produktdetails: Antwort nicht lesbar (%s)", exc)
+        return dict(_NICHT_ERREICHBAR)
+
+
 @router.post("/realtime/tool/{tool_name}")
 async def realtime_tool_call(
     tool_name: str = Path(..., description="Function name from the model"),
@@ -5964,6 +6088,8 @@ async def realtime_tool_call(
             result = await _tool_product_search(args, x_session_id, False)
         elif tool_name == "refine_search":
             result = await _tool_product_search(args, x_session_id, True)
+        elif tool_name == "product_details":
+            result = await _tool_product_details(args, x_session_id)
         elif tool_name == "resolve_agent_name":
             result = await _tool_resolve_agent_name(args, authorization)
         else:
