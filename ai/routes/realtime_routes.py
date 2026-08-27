@@ -3488,14 +3488,18 @@ def _product_finder_prompt(language: str = "de",
         "EINEN Kriterium, das die Treffermenge am staerksten teilt — "
         "nicht nach allen auf einmal.\n\n"
         "WAS DU SIEHST UND WAS NICHT\n"
-        "Du bekommst die ANZAHL der Treffer und ein paar Eckwerte "
+        "Du bekommst die Anzahl der GEZEIGTEN Stuecke und ein paar Eckwerte "
         "(Preisspanne, vorkommende Groessen). Du siehst weder "
         "Produktnamen noch einzelne Preise. Der Kunde sieht die Karten "
         "auf dem Bildschirm — du sprichst ueber das, was er sieht, ohne "
         "es selbst zu kennen. Sag also 'vierunddreissig Stueck zwischen "
         "49 und 210 Euro'. Erfinde niemals einen Produktnamen.\n\n"
         "DREI ANTWORTEN, DIE NICHT VERWECHSELT WERDEN DUERFEN\n"
-        "- Es gibt Treffer: nenne Anzahl und Spanne.\n"
+        "- Es gibt Treffer: sag, WIE VIELE DU ZEIGST, und die Spanne. "
+        "Die Zahl ist die der gezeigten Stuecke, NICHT die des "
+        "Sortiments. Sag also 'ich zeig Ihnen fuenf', niemals 'wir "
+        "haben fuenf' oder 'ich habe fuenf gefunden' — wie viele es "
+        "insgesamt gibt, weisst du nicht.\n"
         "- Es gibt nachweislich nichts: 'In L fuehren wir davon nichts. "
         "Soll ich M mit anschauen?'\n"
         "- Der Katalog antwortet nicht: 'Der Katalog antwortet gerade "
@@ -3503,6 +3507,22 @@ def _product_finder_prompt(language: str = "de",
         "Der Unterschied zwischen den letzten beiden entscheidet: "
         "'Fuehren wir nicht' bei einer Stoerung ist eine FALSCHE "
         "AUSKUNFT ueber das Sortiment.\n\n"
+        "AUSWAHL UND REIHENFOLGE\n"
+        "Sagt der Kunde eine Zahl ('zeig mir fuenf', 'drei Stueck'), "
+        "setz sie als `limit`. Sagt er 'die besten', 'top' oder "
+        "'was empfiehlst du' ohne weitere Angabe: `sort` auf `newest` "
+        "und `limit` auf 5.\n"
+        "Nenn dabei, WONACH du sortiert hast — aber sag NICHT 'die "
+        "besten'. Der Katalog kennt keine Bewertung; neu und teuer ist "
+        "keine Qualitaet. Sag: 'Ich zeig Ihnen die fuenf neuesten, "
+        "teuerste zuerst.'\n"
+        "Was du aussprichst, liest du aus `applied_sort` und "
+        "`applied_limit` in den Eckwerten — nie aus dem, was du "
+        "angefragt hast. Fehlen die Angaben, sag nichts ueber die "
+        "Reihenfolge.\n"
+        "Bekommst du so wenige Stuecke, wie du angefragt hast, frag "
+        "NICHT nach der Groesse. Sag 'Schauen Sie sich die fuenf an' "
+        "und lass den Kunden schauen.\n\n"
         "GROESSE\n"
         "Du kannst nach Groesse filtern und die Tabelle des Herstellers "
         "zeigen lassen. Aus Koerpermassen eine Groesse zu empfehlen "
@@ -3524,6 +3544,18 @@ def _product_finder_prompt(language: str = "de",
         "Beides sind Auskuenfte, keine Fehler. Sag NICHT, der Katalog "
         "antworte nicht — das waere eine falsche Auskunft ueber den "
         "Zustand des Systems.\n\n"
+        "DAS GEWAEHLTE PRODUKT — ERST NACHSEHEN, DANN REDEN\n"
+        "Fragt der Kunde nach dem aktuellen, gewaehlten oder "
+        "geoeffneten Produkt, ruf IMMER zuerst das Auskunftswerkzeug. "
+        "Du kannst nicht sehen, was auf seinem Bildschirm offen ist — "
+        "nur das Werkzeug weiss es.\n"
+        "Behaupte NIE ohne Aufruf, es sei nichts geoeffnet. Erst wenn "
+        "die Antwort sagt, dass nichts gewaehlt ist, bittest du ihn, "
+        "eins zu oeffnen.\n"
+        "Steht in der Antwort eine gewaehlte Groesse oder Farbe, "
+        "antworte daraus. Frag dann NICHT nach der Groesse — er hat "
+        "sie schon gewaehlt, und danach zu fragen heisst, dass du "
+        "nicht hingesehen hast.\n\n"
         "KATEGORIEN\n"
         "Das Kategorienfeld kennt nur feste Werte aus der Liste im "
         "Werkzeug. Passt keiner auf das, was der Kunde sagt, LASS ES "
@@ -3588,6 +3620,15 @@ def _product_finder_tools(brand: Optional[str] = None) -> List[dict]:
         "category": {"type": "array",
                      "items": {"type": "string",
                                "enum": list(_oneal_kategorien())}},
+        # Auswahlsteuerung, laut Vertrag INNERHALB von `criteria`
+        # (OnealServ-Codex 2026-08-27): Der Basis-Token traegt den
+        # vollstaendigen normalisierten Kriterienzustand, damit
+        # `refine_search` Sortierung und Menge erbt. Mein vorhandener
+        # Kriterienpfad reicht sie deshalb unveraendert durch — kein
+        # Sonderweg, keine zweite Liste.
+        "limit": {"type": "integer", "minimum": 1, "maximum": 50},
+        "sort": {"type": "string",
+                 "enum": ["newest", "price_desc", "price_asc"]},
         "target_group": {"type": "string"},
         "body_part": {"type": "string"},
         "product_type": {"type": "string"},
@@ -4010,7 +4051,11 @@ async def mint_realtime_token(
         except Exception as e:
             logger.warning(f"Realtime: persona fetch failed ({e}); proceeding without")
 
-    api_key_env = os.getenv("OPENAI_API_KEY", "")
+    api_key_env, key_herkunft = _openai_key_fuer(grant.profile_id)
+    logger.info(
+        "Realtime mint: OpenAI-Konto=%s profile=%s",
+        key_herkunft, grant.profile_id,
+    )
     if not api_key_env:
         raise HTTPException(
             status_code=500,
@@ -5201,6 +5246,51 @@ def _sprachname(language: Optional[str]) -> str:
     """
     schluessel = (language or "").strip().lower()[:2]
     return SPRACHNAMEN.get(schluessel, "German")
+
+
+# ── Profilgebundener OpenAI-Schluessel ───────────────────────────────
+#
+# Der Produktfinder laeuft in der O'Neal-Demo auf dem Konto des Kunden
+# (agentos1), nicht auf Alex'. Bis heute las der Mint prozessweit genau
+# `OPENAI_API_KEY` — ein Konto fuer alle Profile.
+#
+# Muster wie beim Sitzungsdeckel: `OPENAI_API_KEY__<PROFIL>` gewinnt,
+# sonst der globale Schluessel. Kein Profil ohne eigenen Eintrag
+# aendert sein Verhalten.
+OPENAI_KEY_ENV = "OPENAI_API_KEY"
+
+
+def _profil_suffix(profile_id: Optional[str]) -> str:
+    """Profilkennung als Variablen-Suffix.
+
+    Bindestriche und Punkte werden zu Unterstrichen, alles gross.
+    Umgebungsvariablen tragen keine Bindestriche — ohne diese
+    Uebersetzung waere der Eintrag fuer `product-finder` unsetzbar,
+    und zwar lautlos: Er fiele auf den globalen Wert zurueck.
+    Dieselbe Regel wie in `realtime_budget_guard._session_budget_eur`;
+    ein Test haelt beide gegeneinander, damit sie nicht driften.
+    """
+    return (profile_id or "").strip().replace("-", "_").replace(".", "_").upper()
+
+
+def _openai_key_fuer(profile_id: Optional[str]) -> tuple:
+    """(Schluessel, Herkunft) fuer dieses Profil.
+
+    Herkunft ist `profile` oder `global` — sie geht in die Protokoll-
+    zeile des Mints. Ohne sie liesse sich hinterher nicht feststellen,
+    WELCHES Konto eine Sitzung bezahlt hat, und genau das ist die
+    Frage, um die es hier geht.
+
+    Ein leer gesetzter Profilschluessel gilt als NICHT gesetzt: Eine
+    leere Zeichenkette in der `.env` ist ein Tippfehler, kein Wunsch
+    nach einem Mint ohne Schluessel.
+    """
+    suffix = _profil_suffix(profile_id)
+    if suffix:
+        eigener = (os.environ.get(f"{OPENAI_KEY_ENV}__{suffix}") or "").strip()
+        if eigener:
+            return eigener, "profile"
+    return (os.environ.get(OPENAI_KEY_ENV) or "").strip(), "global"
 
 
 PRODUCT_TOOL_NAMES = {"find_products", "refine_search", "product_details"}
