@@ -4510,6 +4510,14 @@ async def reset_realtime_hard_cap(_: str = Depends(require_operator_key)):
 async def realtime_usage_report(
     report: RealtimeUsageReport,
     grant: VerifiedGrant = Depends(require_realtime_grant("usage")),
+    x_usage_response: Optional[str] = Header(
+        default=None,
+        alias="X-Usage-Response",
+        description=(
+            "`minimal` liefert NUR accepted/deduped/cost_eur. Alles "
+            "andere (auch fehlend) liefert die bisherige breite Form."
+        ),
+    ),
 ):
     """Browser-reported usage callback.
 
@@ -4589,9 +4597,29 @@ async def realtime_usage_report(
     # `None`, wenn nichts verbucht wurde (Nullmeldung oder Dublette):
     # eine 0.0 hier waere von „hat nichts gekostet" nicht zu
     # unterscheiden.
-    status["cost_eur"] = (
-        round(float(zeilen_eur), 6) if zeilen_eur is not None else None
-    )
+    kosten = round(float(zeilen_eur), 6) if zeilen_eur is not None else None
+    status["cost_eur"] = kosten
+
+    # Schmale Form auf Wunsch: NUR was der Aufrufer fuer seine eigene
+    # Buchhaltung braucht.
+    #
+    # Die breite Form traegt Gesamtausgaben, Monatsbudget und
+    # Tokenzahlen ueber ALLE Profile — mehr, als ein einzelner
+    # Aufrufer wissen muss. Gefaehrlich ist das hinter dem
+    # `usage`-Scope nicht, aber es ist dieselbe Form, die im August
+    # zugeschlagen hat, als `/ai/*/cost-status` Ausgaben und Budget
+    # des Eigentuemers offen ausgeliefert hat (AppDevV2, 2026-08-07).
+    #
+    # Opt-in und nicht Vorgabe, weil ein Beschneiden der Antwort jeden
+    # bestehenden Aufrufer braeche — und ich nicht sicher weiss, wer
+    # sie heute alles liest. Wenn niemand mehr die breite Form
+    # abruft, wird die schmale zur Vorgabe.
+    if (x_usage_response or "").strip().lower() == "minimal":
+        return {
+            "accepted": status["accepted"],
+            "deduped": status["deduped"],
+            "cost_eur": kosten,
+        }
     return status
 
 
