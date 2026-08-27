@@ -55,34 +55,64 @@ def test_echte_slugs_sind_drin():
 
 # ─────────────────────── Innenleben gehoert nicht ins Gespraech
 
-def test_ersatzteile_und_buchhaltung_bleiben_draussen():
+@pytest.mark.ohne_kundendaten
+def test_ersatzteile_und_buchhaltung_bleiben_draussen(monkeypatch):
     """`z-spare-parts-helmets` ist mit 1357 Eintraegen die GROESSTE
     Kategorie. Gaebe ich sie dem Modell, schluege eine Frage nach
     Helmen zuerst Ersatzvisiere vor."""
-    enum = rr._oneal_kategorien()
-    for slug in ("z-spare-parts-helmets", "z-merchandise", "displays",
-                 "old-brands", "revenue-without-material-usage"):
-        assert slug not in enum
+    # Der Server liefert sie mit `relevant_only=true` gar nicht mehr.
+    # Belegt wird jetzt, dass ich danach FRAGE — nicht, dass ich eine
+    # Ausschlussliste eines Kunden pflege.
+    monkeypatch.setenv(rr.ONEAL_SELECTION_BASE_ENV, "https://o.example")
+    monkeypatch.setenv(rr.ONEAL_API_KEY_ENV, "k")
+    gesehen = {}
+
+    class _A:
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return {"data": [{"slug": "helmets-mx"}]}
+
+    def _merk(url, params=None, headers=None, timeout=None):
+        gesehen["params"] = params
+        return _A()
+
+    monkeypatch.setattr(rr.httpx, "get", _merk)
+    rr._oneal_kategorien()
+    assert gesehen["params"] == {"relevant_only": "true"}
 
 
-@pytest.mark.parametrize("slug,erwartet", [
-    ("helmets-mx", True), ("gloves", True),
-    ("z-spare-parts-boots", False), ("displays", False),
-    ("", False),
-])
-def test_kundenkategorie_filter(slug, erwartet):
-    assert rr._ist_kundenkategorie(slug) is erwartet
+@pytest.mark.ohne_kundendaten
+def test_der_server_filtert_jetzt_statt_ich(monkeypatch):
+    """Bis 2026-08-27 stand hier eine Ausschlussliste mit Slugs eines
+    Kunden — dieselbe Sorte Leck wie die Abschrift daneben, nur
+    kleiner und deshalb übersehen, auch von meinem eigenen Wächter.
+
+    oneal beantwortet die Frage seit `c18a3de` selbst. Ich filtere
+    nicht mehr, ich frage präziser: `relevant_only=true`.
+    """
+    assert not hasattr(rr, "_ist_kundenkategorie")
+    assert not hasattr(rr, "_KATEGORIE_AUSSCHLUSS")
+    import inspect
+    quelle = inspect.getsource(rr._oneal_kategorien)
+    assert '"relevant_only": "true"' in quelle
 
 
 # ───────────────────────────── faellt nie aus, cacht aber
 
-def test_ohne_erreichbaren_katalog_kommt_die_rueckfallliste():
+@pytest.mark.ohne_kundendaten
+def test_ohne_katalog_gibt_es_keine_kategorien():
     """Ein Mint darf nicht daran scheitern, dass ein Katalogdienst
     langsam ist — das Werkzeug bliebe ohne Kategorien und der Kunde
     hoerte denselben Satz wie beim echten Fehler."""
-    assert rr._oneal_kategorien() == list(rr.ONEAL_KATEGORIEN_RUECKFALL)
+    # Seit dem Kundenschnitt gibt es KEINE Abschrift mehr. Eine leere
+    # Liste heisst „nicht beschaffbar" — das Werkzeug bietet dann kein
+    # Kategoriefeld an, statt mit einer veralteten Liste zu suchen.
+    assert rr._oneal_kategorien() == []
 
 
+@pytest.mark.ohne_kundendaten
 def test_leere_antwort_wird_nicht_uebernommen(monkeypatch):
     """Ein leeres Regal ist kein geraeumter Laden.
 
@@ -100,9 +130,13 @@ def test_leere_antwort_wird_nicht_uebernommen(monkeypatch):
             return []
 
     monkeypatch.setattr(rr.httpx, "get", lambda *a, **k: _A())
-    assert rr._oneal_kategorien() == list(rr.ONEAL_KATEGORIEN_RUECKFALL)
+    # Seit dem Kundenschnitt gibt es KEINE Abschrift mehr. Eine leere
+    # Liste heisst „nicht beschaffbar" — das Werkzeug bietet dann kein
+    # Kategoriefeld an, statt mit einer veralteten Liste zu suchen.
+    assert rr._oneal_kategorien() == []
 
 
+@pytest.mark.ohne_kundendaten
 def test_fehler_beim_abruf_ist_kein_absturz(monkeypatch):
     monkeypatch.setenv(rr.ONEAL_SELECTION_BASE_ENV, "https://oneal.example")
     monkeypatch.setenv(rr.ONEAL_API_KEY_ENV, "k")
@@ -111,9 +145,13 @@ def test_fehler_beim_abruf_ist_kein_absturz(monkeypatch):
         raise RuntimeError("Netz weg")
 
     monkeypatch.setattr(rr.httpx, "get", _kaputt)
-    assert rr._oneal_kategorien() == list(rr.ONEAL_KATEGORIEN_RUECKFALL)
+    # Seit dem Kundenschnitt gibt es KEINE Abschrift mehr. Eine leere
+    # Liste heisst „nicht beschaffbar" — das Werkzeug bietet dann kein
+    # Kategoriefeld an, statt mit einer veralteten Liste zu suchen.
+    assert rr._oneal_kategorien() == []
 
 
+@pytest.mark.ohne_kundendaten
 def test_lebende_liste_gewinnt_und_wird_gefiltert(monkeypatch):
     monkeypatch.setenv(rr.ONEAL_SELECTION_BASE_ENV, "https://oneal.example")
     monkeypatch.setenv(rr.ONEAL_API_KEY_ENV, "k")
@@ -123,14 +161,13 @@ def test_lebende_liste_gewinnt_und_wird_gefiltert(monkeypatch):
 
         @staticmethod
         def json():
-            return ["helmets-mx", "z-spare-parts-helmets", "neue-kategorie"]
+            return ["helmets-mx", "neue-kategorie"]
 
     monkeypatch.setattr(rr.httpx, "get", lambda *a, **k: _A())
-    werte = rr._oneal_kategorien()
-    assert werte == ["helmets-mx", "neue-kategorie"]
-    assert "z-spare-parts-helmets" not in werte
+    assert rr._oneal_kategorien() == ["helmets-mx", "neue-kategorie"]
 
 
+@pytest.mark.ohne_kundendaten
 def test_zweiter_aufruf_holt_nicht_nochmal(monkeypatch):
     """Sonst haenge ich an jedem Mint einen Fremdaufruf an."""
     monkeypatch.setenv(rr.ONEAL_SELECTION_BASE_ENV, "https://oneal.example")
@@ -167,6 +204,7 @@ def test_die_persona_sagt_was_bei_keinem_treffer_zu_tun_ist():
 
 # ═══════════ die ECHTE Antwortform, nicht die angenommene ═══════════
 
+@pytest.mark.ohne_kundendaten
 def test_die_echte_antwortform_von_oneal_wird_gelesen(monkeypatch):
     """Aufgezeichnet aus der Produktion am 2026-08-27 00:10.
 
@@ -193,16 +231,16 @@ def test_die_echte_antwortform_von_oneal_wird_gelesen(monkeypatch):
                 {"id": 29, "name": "Bags / Backpacks",
                  "slug": "bags---backpacks",
                  "name_de": "Taschen / Rucksäcke", "name_en": None},
-                {"id": 99, "name": "Z-Spare Parts Helmets",
-                 "slug": "z-spare-parts-helmets",
-                 "name_de": "Ersatzteile Helme", "name_en": None},
             ]}
 
     monkeypatch.setattr(rr.httpx, "get", lambda *a, **k: _A())
     werte = rr._oneal_kategorien()
     assert werte == ["adv-pants", "bags---backpacks"]
-    assert werte != list(rr.ONEAL_KATEGORIEN_RUECKFALL), \
-        "Rueckfallliste statt Live-Liste — der Abruf ist wirkungslos"
+    # Frueher stand hier zusaetzlich „nicht die Rueckfallliste". Seit
+    # dem Kundenschnitt gibt es keine mehr — ein leeres Ergebnis waere
+    # jetzt eine leere Liste, und die ist von einem gelungenen Abruf
+    # ohnehin unterscheidbar.
+    assert werte, "leere Liste heisst: der Abruf ist wirkungslos"
 
 
 def test_verworfene_kriterien_von_oneal_werden_protokolliert():

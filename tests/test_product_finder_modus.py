@@ -132,8 +132,9 @@ def test_persona_traegt_die_marken_aber_keine_farb_oder_groessenlisten():
     """Die Grenze verlaeuft bei der ANZAHL der Werte, nicht bei der
     Wichtigkeit: 3 Marken kosten fast nichts, 50 Farben und 239
     Groessen kosten sie in JEDER Antwort erneut."""
+    from tests.conftest import TEST_MARKEN
     text = rr._product_finder_prompt("de")
-    for marke in rr.PRODUCT_FINDER_BRANDS:
+    for marke in TEST_MARKEN:
         assert marke in text
     # Ein paar echte Groessen- und Farbwerte duerfen NICHT als Liste
     # dastehen. `L` als Buchstabe kommt in Prosa vor — deshalb auf
@@ -173,6 +174,7 @@ def test_persona_verbietet_erfundene_produktnamen():
 
 # ────────────────────────────── Sitzungs-Scope (OnealServ-Codex, #4831)
 
+@pytest.mark.ohne_kundendaten
 def test_markennamen_sind_die_echten_facet_werte():
     """Der Fehler, den ich hier selbst gemacht habe.
 
@@ -182,7 +184,16 @@ def test_markennamen_sind_die_echten_facet_werte():
     Kundengespraech. Wer Bezeichner aus Prosa ableitet, rechnet mit
     einer Schreibweise, die nie jemand zugesagt hat.
     """
-    assert rr.PRODUCT_FINDER_BRANDS == ("O'Neal", "ONE Industries", "Kini Red Bull")
+    # Seit dem Kundenschnitt (2026-08-27) steht die Liste NICHT mehr
+    # im Kern — sie kommt aus `GET /v1/facets`, Feld `brands[].name`.
+    # Damit kann die Schreibweise gar nicht mehr abweichen: Sie ist
+    # dieselbe, die der Katalog fuehrt. Der Fehler von damals ist
+    # bauartbedingt ausgeschlossen, statt durch eine Zusicherung
+    # abgesichert.
+    import inspect
+    quelle = inspect.getsource(rr._oneal_marken)
+    assert 'roh.get("brands")' in quelle
+    assert '"/v1/facets"' in quelle or "/v1/facets" in quelle
 
 
 def test_markenoffen_ist_ein_zustand_kein_versehen():
@@ -234,11 +245,12 @@ def test_unbekannte_marke_wird_abgewiesen_statt_fallengelassen():
     from fastapi import HTTPException
 
     with pytest.raises(HTTPException) as exc:
-        rr._product_finder_brand("Fox Racing")
+        rr._product_finder_brand("Fox Racing")   # nicht im Katalog
     assert exc.value.status_code == 422
     assert exc.value.detail["error"] == "unknown_brand"
     assert exc.value.detail["brand"] == "Fox Racing"
-    assert sorted(rr.PRODUCT_FINDER_BRANDS) == exc.value.detail["known"]
+    from tests.conftest import TEST_MARKEN
+    assert sorted(TEST_MARKEN) == exc.value.detail["known"]
 
 
 @pytest.mark.parametrize("roh,erwartet", [
@@ -282,3 +294,39 @@ def test_kategorie_ist_eine_liste_von_slugs():
     kat = t["parameters"]["properties"]["category"]
     assert kat["type"] == "array"
     assert kat["items"]["type"] == "string"
+
+
+@pytest.mark.ohne_kundendaten
+def test_ohne_markenliste_mintet_das_profil_nicht():
+    """Der Kern des Kundenschnitts (Entscheidung Alex 2026-08-27).
+
+    Ohne beschaffbare Markenliste kann die Bindung einer Sitzung nicht
+    geprüft werden. Dann wird der Mint abgelehnt — NICHT still
+    markenoffen weitergelaufen. „Unbekannte Marke" und „markenoffen"
+    sind verschiedene Zustände; sie zu verwechseln ließe eine
+    gebundene Sitzung über den ganzen Katalog laufen.
+    """
+    from fastapi import HTTPException
+    with pytest.raises(HTTPException) as exc:
+        rr._product_finder_brand("O'Neal")
+    assert exc.value.status_code == 503
+    assert exc.value.detail["error"] == "profile_not_configured"
+    assert exc.value.detail["missing"] == "brands"
+
+
+@pytest.mark.ohne_kundendaten
+def test_markenoffen_braucht_einen_ausdruecklichen_schalter(monkeypatch):
+    """Wer bewusst ohne Markenbindung arbeitet, sagt es. Ein leerer
+    Wert bedeutet es NIE — genau diese stille Variante war der Fehler,
+    den die Konstante bisher verdeckt hat."""
+    monkeypatch.setenv(rr.BRAND_CHECK_ENV, "off")
+    assert rr._product_finder_brand("Fox Racing") == "Fox Racing"
+    assert rr._product_finder_brand(None) is None
+
+
+@pytest.mark.ohne_kundendaten
+def test_leerer_schalter_ist_kein_aus(monkeypatch):
+    from fastapi import HTTPException
+    monkeypatch.setenv(rr.BRAND_CHECK_ENV, "")
+    with pytest.raises(HTTPException):
+        rr._product_finder_brand("O'Neal")

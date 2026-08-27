@@ -69,10 +69,16 @@ def _treffer() -> list:
                 zeilen = open(pfad, encoding="utf-8").read().splitlines()
             except Exception:
                 continue
-            for nr, zeile in enumerate(zeilen, 1):
+            for zeile in zeilen:
                 for muster, grund in MUSTER:
                     if re.search(muster, zeile):
-                        gefunden.append(f"{rel}:{nr}\t{grund}")
+                        # Bewusst OHNE Zeilennummer: Ein Waechter,
+                        # der Zeilen zaehlt, meldet nach jeder
+                        # Verschiebung alles als neu — dann ist er
+                        # Rauschen und wird abgeschaltet. Verglichen
+                        # wird Datei + Grund + der Treffertext.
+                        text = re.search(muster, zeile).group(0)
+                        gefunden.append(f"{rel}\t{grund}\t{text}")
                         break
     return sorted(set(gefunden))
 
