@@ -114,7 +114,16 @@ JWKS_URL = os.getenv(
     "REALTIME_AUTH_JWKS_URL",
     "https://auth-api.arkturian.com/api/v1/auth/.well-known/jwks.json",
 )
-GRANT_URL = "https://auth-api.arkturian.com/api/v1/auth/realtime-grant"
+# Der Tausch-Endpunkt gehoert zur selben Entscheidung wie Aussteller
+# und Schluesselquelle darueber — er war nur uebersehen worden. Wer
+# eine eigene auth-api betreibt, setzt ALLE DREI gemeinsam; zwei davon
+# waren konfigurierbar, dieser nicht, und damit tauschte eine fremde
+# Instanz weiterhin gegen arkturian. Das ist keine Pruefung, die nur
+# so aussieht — es ist gar keine eigene Instanz.
+GRANT_URL = os.getenv(
+    "REALTIME_AUTH_GRANT_URL",
+    "https://auth-api.arkturian.com/api/v1/auth/realtime-grant",
+)
 ALG_ALLOWLIST = ("RS256",)
 AUD_PREFIX = "ai-realtime:"
 GRANT_TIMEOUT_SEC = 5.0
