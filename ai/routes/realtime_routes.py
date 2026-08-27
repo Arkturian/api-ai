@@ -4550,6 +4550,7 @@ async def realtime_usage_report(
     # Charge the per-profile budget guard with the same usage. Skip if
     # this report was a dedup-replay (already counted). The cost in EUR
     # is taken from what the cost tracker just computed for this row.
+    zeilen_eur = None
     if result and result.get("accepted") and not result.get("deduped"):
         from ..services.openai_realtime_cost_tracker import openai_realtime_cost_tracker as _tracker
         # The tracker doesn't expose the per-row cost directly, but for
@@ -4566,11 +4567,12 @@ async def realtime_usage_report(
                 cached_text_input_tokens=report.cached_text_input_tokens,
                 cached_audio_input_tokens=report.cached_audio_input_tokens,
             )
+            zeilen_eur = float(per_row_eur)
             realtime_budget_guard.confirm_usage_charge(
                 profile_id=grant.profile_id,
                 user_id=grant.sub,
                 voice_session_id=report.voice_session_id or report.session_id or "",
-                cost_eur=float(per_row_eur),
+                cost_eur=zeilen_eur,
             )
         except Exception as exc:
             # Charging the guard must NEVER tank the usage report —
@@ -4581,6 +4583,15 @@ async def realtime_usage_report(
     status = openai_realtime_cost_tracker.get_status()
     status["deduped"] = bool(result and result.get("deduped"))
     status["accepted"] = bool(result and result.get("accepted"))
+    # Kosten DIESER Meldung. Ohne sie kann der Aufrufer die Kosten
+    # einer Sitzung nicht mitschreiben, ohne die Preistabelle zu
+    # kopieren — und eine zweite Preistabelle driftet gegen meine.
+    # `None`, wenn nichts verbucht wurde (Nullmeldung oder Dublette):
+    # eine 0.0 hier waere von „hat nichts gekostet" nicht zu
+    # unterscheiden.
+    status["cost_eur"] = (
+        round(float(zeilen_eur), 6) if zeilen_eur is not None else None
+    )
     return status
 
 
