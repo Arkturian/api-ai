@@ -561,6 +561,15 @@ class Prompt(BaseModel):
     # i.e. the historical "bare CLI" behaviour — kept as the default so
     # existing callers (storage/review/knowledge) are unaffected.
     persona_variant: Optional[str] = None
+    # Codex-Sandbox (nur /ai/chatgpt). Default None = bisheriges Verhalten
+    # (--dangerously-bypass-approvals-and-sandbox: volles Netz + Dateisystem,
+    # noetig fuer Aufrufer, deren Prompts URLs abrufen sollen).
+    # "read-only" = `codex exec -s read-only`: das Modell kann lesen, aber
+    # nichts ausfuehren/schreiben/netzen. Fuer Aufrufer, die FREMDEN Text
+    # durch Codex leiten (Kleinhirn-Derivator #4907: beliebiger Agent-Turn
+    # als Prompt), ist das Pflicht — sonst ist jeder verdichtete Turn eine
+    # Injektionsflaeche in eine werkzeugfaehige CLI ohne Sandbox (§14.5).
+    sandbox: Optional[str] = None
 
 
 class AIResponse(BaseModel):
@@ -885,6 +894,22 @@ async def claude_cost_status(_: str = Depends(require_operator_key)):
     return claude_cost_tracker.get_status()
 
 
+def _codex_sandbox_args(sandbox) -> list:
+    """Sandbox-Wahl fuer `codex exec` — verifiziert 2026-09-01 als Dienst-User:
+    `-s read-only` laeuft im exec-Modus ohne Haengen und ohne Rueckfrage.
+
+    Nur zwei Zustaende, bewusst keine weiteren Modi: entweder das historische
+    Vollzugriffs-Verhalten (Default, bestehende Aufrufer unberuehrt) oder
+    strikt lesend fuer Aufrufer, die fremden Text verdichten (Derivator).
+    Unbekannte Werte fallen auf read-only, nicht auf Vollzugriff — wer das
+    Feld anfasst, wollte einschraenken; ein Tippfehler darf die Sandbox
+    nicht heimlich oeffnen.
+    """
+    if sandbox is None or str(sandbox).strip() == "":
+        return ["--dangerously-bypass-approvals-and-sandbox"]
+    return ["-s", "read-only"]
+
+
 @router.post("/chatgpt", response_model=AIResponse)
 async def chatgpt_endpoint(
     prompt: Prompt,
@@ -944,8 +969,8 @@ async def chatgpt_endpoint(
         # filesystem access, no confirmation prompts. Needed for the
         # model to actually fetch URLs in the prompt instead of
         # filename-guessing.
-        cmd = ["codex", "exec", "--json", "--skip-git-repo-check",
-               "--dangerously-bypass-approvals-and-sandbox"]
+        cmd = (["codex", "exec", "--json", "--skip-git-repo-check"]
+               + _codex_sandbox_args(prompt.sandbox))
 
         # Only add model if explicitly specified by user
         # (ChatGPT subscription has limited model access, let Codex use its default)
