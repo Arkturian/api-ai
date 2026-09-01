@@ -126,3 +126,14 @@ def test_werkzeug_ist_in_allowlist_und_schema():
     schema = next(t for t in rr._arcturian_read_tools() if t["name"] == "frage_kleinhirn")
     assert schema["parameters"]["required"] == ["agent", "frage"]
     assert schema["parameters"]["additionalProperties"] is False
+
+
+def test_frage_kleinhirn_nicht_im_erzwungenen_status_lookup_zug():
+    """Im `status_lookup`-Zug ist `tool_choice: required` — das Modell kann
+    keinen Satz vorausschicken. Die Praesenzfrage (6-10 s) wuerde dort zu
+    hoerbarer Stille; sie gehoert nur auf den gesprochenen Zug."""
+    payload = rr._arcturian_status_lookup_payload()
+    namen = [t["name"] for t in payload["response"]["tools"]]
+    assert "agent_status" in namen
+    assert "frage_kleinhirn" not in namen
+    assert payload["response"]["tool_choice"] == "required"

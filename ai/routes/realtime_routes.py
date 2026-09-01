@@ -1760,7 +1760,16 @@ def _arcturian_status_lookup_payload() -> dict:
     return {
         "type": "response.create",
         "response": {
-            "tools": _arcturian_read_tools(),
+            # OHNE `frage_kleinhirn`: Dieser Zug ist `tool_choice: required`
+            # — das Modell KANN hier keinen Satz vorausschicken. Die
+            # Praesenzfrage braucht 6-10 s und traegt in ihrer
+            # Beschreibung ausdruecklich „erst ein Satz, dann das
+            # Werkzeug"; im erzwungenen Zug wuerde sie zu hoerbarer Stille.
+            # Sie gehoert nur auf den gesprochenen Zug (tool_choice auto),
+            # wo der Satz davor moeglich ist. (#4907 B5, AppDevV2-Einwand
+            # zur Zeile 8, 01.09.)
+            "tools": [t for t in _arcturian_read_tools()
+                      if t["name"] != "frage_kleinhirn"],
             # `required`, nicht `auto`: `auto` ist die gemessene 1-von-8-
             # Fassung. Wer diesen Zug schickt, WEISS bereits, dass
             # nachgeschlagen werden soll — die Wahl hat der Resolver
