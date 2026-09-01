@@ -137,3 +137,16 @@ def test_frage_kleinhirn_nicht_im_erzwungenen_status_lookup_zug():
     assert "agent_status" in namen
     assert "frage_kleinhirn" not in namen
     assert payload["response"]["tool_choice"] == "required"
+
+
+def test_bearer_des_menschen_wird_durchgereicht_nie_ersetzt(monkeypatch):
+    """Die Datengrenze (#4531 Z. 116) haengt daran, dass cloud-api den Bearer
+    des MENSCHEN sieht — ein Agenten-/Dienst-Token saehe die Foederation.
+    Jeder Aufruf an cloud-api muss exakt den eingehenden Bearer tragen."""
+    monkeypatch.setenv("REALTIME_GRANT_SERVICE_KEY", "dienst-token-der-NICHT-benutzt-werden-darf")
+    _FakeClient.sessions = [PRAESENZ]
+    _FakeClient.history_seq = [ALT, ALT, NEU]
+    _run({"agent": "CloudV2", "frage": "Was machst du?"}, auth="Bearer mensch-123")
+    url, body, hdrs = _FakeClient.posts[0]
+    assert hdrs == {"Authorization": "Bearer mensch-123"}
+    assert "dienst-token" not in str(hdrs)

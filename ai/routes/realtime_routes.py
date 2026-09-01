@@ -6516,6 +6516,11 @@ async def _tool_frage_kleinhirn(args: dict, authorization: Optional[str],
                 "hint": "`agent` und `frage` sind Pflicht."}
 
     base = os.getenv("CLOUD_API_URL", "https://cloud-api.arkserver.arkturian.com")
+    # INVARIANTE (Cloud, 01.09., #4907 t-51e0eb9b602e): Der Bearer des
+    # MENSCHEN wird durchgereicht, nie durch ein Dienst- oder Agenten-Token
+    # ersetzt. Beide cloud-api-Tore (/api/sessions/all, /input) filtern nur
+    # Menschen nach Owner/Tenant; ein Agenten-JWT sieht die Foederation.
+    # Die Datengrenze von #4531 Zeile 116 haengt an genau dieser Zeile.
     hdrs = {"Authorization": authorization}
     t0 = time.monotonic()
 
