@@ -25,9 +25,13 @@ def test_werkzeug_haengt_an_eigenem_opt_in():
     sobald ich ausliefere, und riefe ins Leere. Am 2026-08-11 hat die
     umgekehrte Reihenfolge Arcturian eine Stunde stillgelegt.
     """
-    assert [t["name"] for t in rr._arcturian_read_tools()] == ["agent_status"]
+    # `frage_kleinhirn` (#4907 B5) haengt am `read_tools`-Opt-in, weil die
+    # Reihenfolge dort stimmt: CloudV2 hat die Annahme (0.1262, 01.09.)
+    # VOR meiner Auslieferung gebaut. Die Regel bleibt: kein Werkzeug in
+    # dieser Liste, dessen Client es nicht schon kennt.
+    assert [t["name"] for t in rr._arcturian_read_tools()] == ["agent_status", "frage_kleinhirn"]
     mit = [t["name"] for t in rr._arcturian_read_tools(True)]
-    assert mit == ["agent_status", "resolve_agent_name"]
+    assert mit == ["agent_status", "frage_kleinhirn", "resolve_agent_name"]
 
 
 def test_werkzeug_ist_routbar():

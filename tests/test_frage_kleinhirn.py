@@ -1,11 +1,12 @@
-"""`frage_kleinhirn` — die Praesenz-Session eines Agenten befragen (#4907 B5).
+"""`frage_kleinhirn` — den Wahrnehmungsstand eines Agenten holen (#4907 B5).
 
-Der echte Fehler, gegen den diese Tests gehalten sind (Cloud, 01.09.):
-Praesenz NIE ueber den Namen aufloesen, nur ueber `runtime.presence_of`.
-Eine Session, die zufaellig `<Agent>-Presence` heisst, aber keine Praesenz
-ist, darf nicht angesprochen werden. Und: der Umschlag (ref, source_refs)
-geht in `diagnostics`, nie ins Ergebnis — das Modell soll Audit-Daten
-weder sehen noch bezahlen.
+Owner-Entscheid (Alex, 02.09. 08:22, #4909 q-143ca1a5523d): drei Sichten
+auf EINEN Agenten, keine Praesenz-Instanz. Das Werkzeug holt NUR den
+Kontextblock (`GET /api/sessions/<agent>/presence-context`); das
+Sprachmodell antwortet selbst. Die echten Fehler, gegen die hier gehalten
+wird: (1) nie eine Session ansprechen (kein POST, kein /input), (2) der
+Umschlag (ref, source_refs) geht in `diagnostics`, nie ins Ergebnis,
+(3) der Bearer des MENSCHEN wird durchgereicht, nie ersetzt.
 """
 
 import asyncio
@@ -24,10 +25,11 @@ class _Resp:
 
 
 class _FakeClient:
-    """Spielt cloud-api: Sessionliste, Eingabe, History-Sequenz."""
-    sessions = []
-    history_seq = []          # Liste von Turn-Dicts, je Abruf einer (letzter bleibt)
+    """Spielt cloud-api: nur presence-context."""
+    context = None            # (status_code, data) oder Exception
+    gets = []
     posts = []
+    params = []
 
     def __init__(self, *a, **k):
         pass
@@ -38,13 +40,14 @@ class _FakeClient:
     async def __aexit__(self, *a):
         return False
 
-    async def get(self, url, headers=None):
-        if url.endswith("/api/sessions/all"):
-            return _Resp(200, {"sessions": type(self).sessions})
-        if "/history?limit=1" in url:
-            seq = type(self).history_seq
-            turn = seq.pop(0) if len(seq) > 1 else (seq[0] if seq else None)
-            return _Resp(200, {"turns": [turn] if turn else []})
+    async def get(self, url, headers=None, params=None):
+        type(self).gets.append((url, headers))
+        type(self).params.append(params or {})
+        c = type(self).context
+        if isinstance(c, Exception):
+            raise c
+        if url.endswith("/presence-context") and c is not None:
+            return _Resp(*c)
         return _Resp(404, {})
 
     async def post(self, url, headers=None, json=None):
@@ -55,11 +58,10 @@ class _FakeClient:
 @pytest.fixture(autouse=True)
 def _schnell(monkeypatch):
     monkeypatch.setattr(rr.httpx, "AsyncClient", _FakeClient)
-    monkeypatch.setattr(rr, "_KLEINHIRN_POLL_S", 0.0)
-    monkeypatch.setattr(rr, "_KLEINHIRN_TIMEOUT_S", 0.5)
-    _FakeClient.sessions = []
-    _FakeClient.history_seq = []
+    _FakeClient.context = None
+    _FakeClient.gets = []
     _FakeClient.posts = []
+    _FakeClient.params = []
     yield
 
 
@@ -67,71 +69,82 @@ def _run(args, auth="Bearer x", diagnose=None):
     return asyncio.run(rr._tool_frage_kleinhirn(args, auth, diagnose))
 
 
-PRAESENZ = {"name": "CloudV2-Presence",
-            "runtime": {"kind": "presence", "presence_of": "CloudV2"}}
-ALT = {"uuid": "alt", "ended_at": "t0", "sections": [{"kind": "text", "content": "alt"}]}
-NEU = {"uuid": "neu", "ended_at": "t1",
-       "sections": [{"kind": "text", "content": "Ich arbeite gerade an der **Linse**."}],
-       "presence": {"ref": "abc123", "stand": "2026-09-01T20:13:00Z", "mode": "voice",
-                    "derivative_count": 8, "source_refs": [{}, {}, {}]}}
+KONTEXT = {
+    "ref": "abc123", "presence_of": "CloudV2", "mode": "text",
+    "stand": "2026-09-02T06:20:14.515Z", "derivative_count": 8,
+    "source_refs": [{}, {}, {}],
+    "block": "[PRESENCE-CONTEXT ref=abc123 of=CloudV2 stand=02.09._06:20]\n"
+             "▸ 02.09. 06:01 CloudV2 hat die Linse ausgeliefert.",
+}
 
 
 def test_ohne_bearer_keine_anonyme_frage():
     out = _run({"agent": "CloudV2", "frage": "Was machst du?"}, auth=None)
     assert out["ok"] is False and out["status"] == "no_caller_identity"
+    assert _FakeClient.gets == []
 
 
-def test_praesenz_nur_ueber_runtime_nicht_ueber_namen():
-    # Eine Session HEISST wie eine Praesenz, ist aber keine.
-    _FakeClient.sessions = [{"name": "CloudV2-Presence",
-                             "runtime": {"kind": "core", "presence_of": ""}}]
-    out = _run({"agent": "CloudV2", "frage": "Was machst du?"})
-    assert out["status"] == "no_presence"
-    assert _FakeClient.posts == []      # nichts angesprochen
-
-
-def test_happy_path_antwort_ohne_umschlag_umschlag_in_diagnose():
-    _FakeClient.sessions = [PRAESENZ]
-    _FakeClient.history_seq = [ALT, ALT, NEU]
+def test_happy_path_kontext_und_stand_umschlag_nur_in_diagnose():
+    _FakeClient.context = (200, KONTEXT)
     diag = {}
-    out = _run({"agent": "CloudV2", "frage": "Was machst du gerade?"}, diagnose=diag)
-    assert out["ok"] is True and out["status"] == "ok"
-    assert out["antwort"].startswith("Ich arbeite gerade an der Linse")
-    assert "**" not in out["antwort"]
-    assert out["stand"] == "2026-09-01T20:13:00Z" and out["mode"] == "voice"
-    assert out["derivative_count"] == 8
+    out = _run({"agent": "CloudV2", "frage": "Was macht er gerade?"}, diagnose=diag)
+    assert out["ok"] is True and out["status"] == "ok" and out["agent"] == "CloudV2"
+    assert out["kontext"].startswith("[PRESENCE-CONTEXT")
+    assert out["stand"] == "2026-09-02T06:20:14.515Z" and out["derivative_count"] == 8
     # Umschlag NICHT im Ergebnis, sondern daneben
-    assert "ref" not in out and "source_refs" not in out
+    assert "ref" not in out and "source_refs" not in out and "antwort" not in out
     assert diag["kleinhirn"]["ref"] == "abc123" and diag["kleinhirn"]["source_refs"] == 3
-    # Eingabe: Menschen-Pfad mit [SPRACHE], ohne _origin, mit client_message_id
-    url, body, hdrs = _FakeClient.posts[0]
-    assert url.endswith("/api/sessions/CloudV2-Presence/input")
-    assert body["data"].startswith("[SPRACHE] ") and "_origin" not in body
-    assert body["client_message_id"]
+    url, hdrs = _FakeClient.gets[0]
+    assert url.endswith("/api/sessions/CloudV2/presence-context")
     assert hdrs["Authorization"] == "Bearer x"
+    # Frage geht als Audit-Metadatum mit (generated_for_question), sonst nichts
+    assert _FakeClient.params[0] == {"question": "Was macht er gerade?"}
 
 
-def test_timeout_wird_unavailable_nicht_erfunden():
-    _FakeClient.sessions = [PRAESENZ]
-    _FakeClient.history_seq = [ALT]      # nie ein neuer fertiger Turn
+def test_keine_session_wird_angesprochen():
+    """Owner-Entscheid 02.09.: keine Praesenz-Instanz. Das Werkzeug darf
+    nie etwas in eine Session schreiben — kein /input, kein POST."""
+    _FakeClient.context = (200, KONTEXT)
+    _run({"agent": "CloudV2", "frage": "Was machst du?"})
+    assert _FakeClient.posts == []
+    assert all("/input" not in u and "/sessions/all" not in u for u, _ in _FakeClient.gets)
+
+
+def test_404_ist_no_context_nicht_erfunden():
+    _FakeClient.context = (404, {})
+    out = _run({"agent": "Niemand", "frage": "Was machst du?"})
+    assert out["ok"] is False and out["status"] == "no_context"
+    assert "kontext" not in out
+
+
+def test_leerer_block_ist_no_context():
+    _FakeClient.context = (200, {**KONTEXT, "block": "   "})
+    out = _run({"agent": "CloudV2", "frage": "Was machst du?"})
+    assert out["status"] == "no_context"
+
+
+def test_fehler_wird_unavailable_nicht_erfunden():
+    _FakeClient.context = RuntimeError("timeout")
     out = _run({"agent": "CloudV2", "frage": "Was machst du?"})
     assert out["ok"] is False and out["status"] == "unavailable"
-    assert "antwort" not in out
+    assert "kontext" not in out
+    _FakeClient.context = (502, {})
+    out = _run({"agent": "CloudV2", "frage": "Was machst du?"})
+    assert out["status"] == "unavailable" and out["http"] == 502
 
 
 def test_werkzeug_ist_in_allowlist_und_schema():
     assert "frage_kleinhirn" in rr.READ_TOOL_NAMES
-    namen = [t["name"] for t in rr._arcturian_read_tools()]
-    assert "frage_kleinhirn" in namen
     schema = next(t for t in rr._arcturian_read_tools() if t["name"] == "frage_kleinhirn")
     assert schema["parameters"]["required"] == ["agent", "frage"]
     assert schema["parameters"]["additionalProperties"] is False
+    # Das Sprachmodell antwortet SELBST — die Anweisung steht im Schema.
+    assert "SELBST" in schema["description"] and "nie als sein Ich" in schema["description"]
 
 
 def test_frage_kleinhirn_nicht_im_erzwungenen_status_lookup_zug():
     """Im `status_lookup`-Zug ist `tool_choice: required` — das Modell kann
-    keinen Satz vorausschicken. Die Praesenzfrage (6-10 s) wuerde dort zu
-    hoerbarer Stille; sie gehoert nur auf den gesprochenen Zug."""
+    keinen Satz vorausschicken; die Liste bleibt einelementig (#4531 Z. 8)."""
     payload = rr._arcturian_status_lookup_payload()
     namen = [t["name"] for t in payload["response"]["tools"]]
     assert "agent_status" in namen
@@ -141,12 +154,10 @@ def test_frage_kleinhirn_nicht_im_erzwungenen_status_lookup_zug():
 
 def test_bearer_des_menschen_wird_durchgereicht_nie_ersetzt(monkeypatch):
     """Die Datengrenze (#4531 Z. 116) haengt daran, dass cloud-api den Bearer
-    des MENSCHEN sieht — ein Agenten-/Dienst-Token saehe die Foederation.
-    Jeder Aufruf an cloud-api muss exakt den eingehenden Bearer tragen."""
+    des MENSCHEN sieht — ein Agenten-/Dienst-Token saehe die Foederation."""
     monkeypatch.setenv("REALTIME_GRANT_SERVICE_KEY", "dienst-token-der-NICHT-benutzt-werden-darf")
-    _FakeClient.sessions = [PRAESENZ]
-    _FakeClient.history_seq = [ALT, ALT, NEU]
+    _FakeClient.context = (200, KONTEXT)
     _run({"agent": "CloudV2", "frage": "Was machst du?"}, auth="Bearer mensch-123")
-    url, body, hdrs = _FakeClient.posts[0]
+    url, hdrs = _FakeClient.gets[0]
     assert hdrs == {"Authorization": "Bearer mensch-123"}
     assert "dienst-token" not in str(hdrs)

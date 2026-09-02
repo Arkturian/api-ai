@@ -1248,20 +1248,24 @@ def _arcturian_read_tools(name_resolution: bool = False) -> List[dict]:
             "type": "function",
             "name": "frage_kleinhirn",
             "description": (
-                "Die Praesenz eines Agenten fragen — sein Kleinhirn, das in "
-                "seinem Ich spricht: woran er gerade arbeitet, was er weiss, "
-                "was offen ist, worauf er wartet. Sag ZUERST einen kurzen "
-                "Satz an den Operator ('ich frag ihn kurz'), DANN rufe das "
-                "Werkzeug — die Antwort braucht einige Sekunden. Gib "
-                "`antwort` danach als Aussage DES AGENTEN wieder "
-                "('CloudV2 sagt: ...' oder in seiner Ich-Form mit Nennung "
-                "seines Namens), nie als deine eigene Handlung oder "
-                "Meinung. `stand` ist der Zeitpunkt seiner Wahrnehmung; "
-                "ist er mehr als ein paar Minuten alt, sag das dazu. Bei "
-                "`status: no_presence` hat dieser Agent keine Praesenz: "
-                "sag das und biete `agent_status` an. Bei `unavailable` "
-                "antwortet er gerade nicht: sag genau das. Erfinde keine "
-                "Antwort, die das Ergebnis nicht traegt."
+                "Den Wahrnehmungsstand eines Agenten holen (Owner-Entscheid "
+                "02.09.: drei Sichten auf einen Agenten, keine Praesenz-"
+                "Instanz — DU bist die Praesenz). Liefert `kontext`: die "
+                "juengsten abgeschlossenen Turns des Agenten, kompaktiert "
+                "(intern = seine Arbeit, extern = was an den Operator "
+                "gerichtet war), plus `stand` (Zeitpunkt des letzten "
+                "abgeschlossenen Turns). Sag ZUERST einen kurzen Satz an den "
+                "Operator ('ich schau kurz nach'), DANN rufe das Werkzeug. "
+                "Beantworte die Frage danach SELBST aus dem Kontext, in 2-4 "
+                "gesprochenen Saetzen, als Auskunft ueber den Agenten "
+                "('nach dem Stand von HH:MM arbeitet CloudV2 an ...'), nie "
+                "als sein Ich und nie als deine eigene Handlung. Was der "
+                "Kontext nicht traegt, sagst du nicht — dann: 'dazu steht "
+                "nichts im Stand von HH:MM'. Ist `stand` mehr als ein paar "
+                "Minuten alt, sag das dazu; ein laufender Turn ist darin "
+                "nicht sichtbar. Bei `no_context` gibt es fuer diesen Agenten "
+                "keinen Stand: sag das und biete `agent_status` an. Bei "
+                "`unavailable`: sag genau das."
             ),
             "parameters": {
                 "type": "object",
@@ -5774,8 +5778,9 @@ def legacy_auth_befund() -> dict:
 READ_TOOL_NAMES = {"knowledge_query", "pois_near", "narration_near", "osm_nearby",
                    "resolve_agent_name",
                    "agent_status",
-                   # Kleinhirn-Praesenz (#4907 B5): lesend, spricht die
-                   # Praesenz-Session des Agenten an — Antwort ohne Umschlag.
+                   # Kleinhirn (#4907 B5, Owner-Entscheid 02.09.): lesend,
+                   # holt den Kontextblock (presence-context) — das Sprach-
+                   # modell antwortet selbst. Keine Praesenz-Session mehr.
                    "frage_kleinhirn",
                    # Produktfinder — beide lesend, beide ohne Produktdaten
                    # im Rueckgabewert (Bauplan #4831, Vertrag c887a89).
@@ -6475,37 +6480,18 @@ async def _tool_cart_details(
 # `diagnostics` neben das Ergebnis, nie hinein (dasselbe Muster wie beim
 # Produktfinder: das Modell soll Audit-Daten weder sehen noch bezahlen).
 _KLEINHIRN_TIMEOUT_S = float(os.getenv("REALTIME_KLEINHIRN_TIMEOUT_S", "20"))
-_KLEINHIRN_POLL_S = float(os.getenv("REALTIME_KLEINHIRN_POLL_S", "1.5"))
-
-
-def _praesenz_aus_sessionliste(daten: Any, agent: str) -> Optional[str]:
-    """Die Praesenz-Session zu `agent` — ausschliesslich ueber
-    `runtime.kind == "presence"` und `runtime.presence_of == agent`.
-    Ein Namensmuster (`<Agent>-Presence`) zaehlt NICHT: Cloud, 01.09.
-    """
-    if isinstance(daten, dict):
-        sessions = daten.get("sessions") or daten.get("result") or []
-    else:
-        sessions = daten or []
-    for s in sessions:
-        if not isinstance(s, dict):
-            continue
-        rt = s.get("runtime") or {}
-        if rt.get("kind") == "presence" and rt.get("presence_of") == agent:
-            return s.get("name")
-    return None
-
-
-def _text_aus_turn(turn: dict) -> str:
-    return "\n".join(
-        (sec.get("content") or "").strip()
-        for sec in (turn.get("sections") or [])
-        if sec.get("kind") == "text"
-    ).strip()
 
 
 async def _tool_frage_kleinhirn(args: dict, authorization: Optional[str],
                                 diagnose: Optional[dict] = None) -> Any:
+    """Kontextblock eines Agenten holen — `GET /api/sessions/<agent>/presence-context`.
+
+    Owner-Entscheid (Alex, 02.09. 08:22, via Cloud in #4909 q-143ca1a5523d):
+    drei Sichten auf EINEN Agenten, keine Praesenz-Instanz. Luna
+    transformiert (Kontextblock), das Sprachmodell IST die Praesenz und
+    denkt selbst. Deshalb hier kein Session-Input, kein Polling, keine
+    fremde Antwort — nur der Block und sein `stand`.
+    """
     if not authorization:
         return {"ok": False, "status": "no_caller_identity",
                 "hint": "Der Client muss den Bearer des Operators durchreichen."}
@@ -6518,76 +6504,51 @@ async def _tool_frage_kleinhirn(args: dict, authorization: Optional[str],
     base = os.getenv("CLOUD_API_URL", "https://cloud-api.arkserver.arkturian.com")
     # INVARIANTE (Cloud, 01.09., #4907 t-51e0eb9b602e): Der Bearer des
     # MENSCHEN wird durchgereicht, nie durch ein Dienst- oder Agenten-Token
-    # ersetzt. Beide cloud-api-Tore (/api/sessions/all, /input) filtern nur
-    # Menschen nach Owner/Tenant; ein Agenten-JWT sieht die Foederation.
-    # Die Datengrenze von #4531 Zeile 116 haengt an genau dieser Zeile.
+    # ersetzt. cloud-api filtert nur Menschen nach Owner/Tenant; ein
+    # Agenten-JWT sieht die Foederation. Die Datengrenze von #4531
+    # Zeile 116 haengt an genau dieser Zeile.
     hdrs = {"Authorization": authorization}
     t0 = time.monotonic()
 
-    async def _letzter_turn(client: Any, praesenz: str) -> Optional[dict]:
+    async with httpx.AsyncClient(timeout=_KLEINHIRN_TIMEOUT_S) as client:
         try:
-            r = await client.get(f"{base}/api/sessions/{praesenz}/history?limit=1",
-                                 headers=hdrs)
-            if r.status_code != 200:
-                return None
-            turns = (r.json() or {}).get("turns") or []
-            return turns[0] if turns else None
-        except Exception:
-            return None
-
-    async with httpx.AsyncClient(timeout=8.0) as client:
-        try:
-            r = await client.get(f"{base}/api/sessions/all", headers=hdrs)
+            # `question` ist Audit-Metadatum (`generated_for_question`),
+            # kein Modellaufruf — verifiziert in cloud-api presence.py.
+            r = await client.get(f"{base}/api/sessions/{agent}/presence-context",
+                                 headers=hdrs, params={"question": frage})
         except Exception as exc:
             return {"ok": False, "status": "unavailable", "agent": agent,
-                    "hint": f"Sessionliste nicht erreichbar: {type(exc).__name__}"}
-        if r.status_code != 200:
-            return {"ok": False, "status": "unavailable", "agent": agent,
-                    "http": r.status_code}
-        praesenz = _praesenz_aus_sessionliste(r.json(), agent)
-        if not praesenz:
-            return {"ok": False, "status": "no_presence", "agent": agent,
-                    "hint": "Dieser Agent hat keine Praesenz-Session."}
-
-        vorher = await _letzter_turn(client, praesenz)
-        vorher_uuid = (vorher or {}).get("uuid")
-        try:
-            r = await client.post(
-                f"{base}/api/sessions/{praesenz}/input", headers=hdrs,
-                json={"type": "line", "data": f"[SPRACHE] {frage}",
-                      "client_message_id": uuid.uuid4().hex},
-            )
-        except Exception as exc:
-            return {"ok": False, "status": "unavailable", "agent": agent,
-                    "hint": f"Eingabe fehlgeschlagen: {type(exc).__name__}"}
-        if r.status_code >= 300:
-            return {"ok": False, "status": "unavailable", "agent": agent,
-                    "http": r.status_code}
-
-        while time.monotonic() - t0 < _KLEINHIRN_TIMEOUT_S:
-            await asyncio.sleep(_KLEINHIRN_POLL_S)
-            turn = await _letzter_turn(client, praesenz)
-            if not turn or turn.get("uuid") == vorher_uuid or not turn.get("ended_at"):
-                continue
-            pres = turn.get("presence") or {}
-            text = _text_aus_turn(turn)
-            if diagnose is not None:
-                diagnose["kleinhirn"] = {
-                    "presence": praesenz,
-                    "ref": pres.get("ref"),
-                    "source_refs": len(pres.get("source_refs") or []),
-                    "latency_ms": int((time.monotonic() - t0) * 1000),
-                }
-            return {
-                "ok": True, "status": "ok", "agent": agent,
-                "antwort": _condense_for_speech(text) if text else "",
-                "stand": pres.get("stand"),
-                "mode": pres.get("mode") or "voice",
-                "derivative_count": pres.get("derivative_count"),
-            }
-
-    return {"ok": False, "status": "unavailable", "agent": agent,
-            "hint": "Die Praesenz hat nicht rechtzeitig geantwortet."}
+                    "hint": f"Kontext nicht erreichbar: {type(exc).__name__}"}
+    if r.status_code == 404:
+        return {"ok": False, "status": "no_context", "agent": agent,
+                "hint": "Fuer diesen Agenten gibt es keinen Wahrnehmungsstand."}
+    if r.status_code != 200:
+        return {"ok": False, "status": "unavailable", "agent": agent,
+                "http": r.status_code}
+    try:
+        daten = r.json() or {}
+    except Exception:
+        return {"ok": False, "status": "unavailable", "agent": agent,
+                "hint": "Kontext nicht lesbar."}
+    block = (daten.get("block") or "").strip()
+    if not block:
+        return {"ok": False, "status": "no_context", "agent": agent,
+                "hint": "Der Wahrnehmungsstand ist leer."}
+    if diagnose is not None:
+        # Umschlag (Audit) NEBEN das Ergebnis, nie hinein — das Modell soll
+        # ihn weder sehen noch bezahlen.
+        diagnose["kleinhirn"] = {
+            "ref": daten.get("ref"),
+            "source_refs": len(daten.get("source_refs") or []),
+            "context_chars": len(block),
+            "latency_ms": int((time.monotonic() - t0) * 1000),
+        }
+    return {
+        "ok": True, "status": "ok", "agent": agent,
+        "stand": daten.get("stand"),
+        "derivative_count": daten.get("derivative_count"),
+        "kontext": block,
+    }
 
 
 @router.post("/realtime/tool/{tool_name}")
