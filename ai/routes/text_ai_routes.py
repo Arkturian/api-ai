@@ -18,6 +18,7 @@ from typing import Optional, List, Dict, Any, Union
 import asyncio
 import logging
 import os
+import subprocess
 import time
 from pathlib import Path
 from ai.clients.storage_client import storage_api_key
@@ -582,6 +583,12 @@ class AIResponse(BaseModel):
     # Aufrufer nicht genannt hat. Damit die Vorgabe nicht STILL ist:
     # Wer sie sieht, kann sie beim naechsten Mal selbst waehlen.
     effort_applied: Optional[str] = None
+    # Reasoning-Tokens des Modells (codex: `reasoning_output_tokens`, agy:
+    # `thinking_tokens`). Der einzige verlaessliche Fingerabdruck dafuer, ob
+    # ein Effort WIRKT — `tokens_used` ist dafuer blind (Automation, 02.09.:
+    # low vs. ultra unterschieden sich um 1 %, weil 14k davon Systemprompt
+    # sind und die Reasoning-Tokens verworfen wurden).
+    thinking_tokens: Optional[int] = None
 
     def __init__(self, **data):
         super().__init__(**data)
@@ -894,6 +901,77 @@ async def claude_cost_status(_: str = Depends(require_operator_key)):
     return claude_cost_tracker.get_status()
 
 
+_CODEX_KATALOG_TTL_S = 3600.0
+_codex_katalog_cache: dict = {"at": 0.0, "katalog": None}
+
+
+def _codex_katalog_parsen(daten: Any) -> Optional[dict]:
+    """`codex debug models` (JSON) -> {slug: {"default": str, "levels": [str]}}.
+
+    `codex models` ist KEIN Unterbefehl (bricht mit "stdin is not a
+    terminal" ab) — der echte heisst `codex debug models` und steht nur in
+    `codex completion bash` (Automation, 02.09.). Rein, damit testbar.
+    """
+    try:
+        modelle = daten if isinstance(daten, list) else (daten or {}).get("models") or []
+        out = {}
+        for m in modelle:
+            slug = (m.get("slug") or "").strip()
+            if not slug:
+                continue
+            levels = [str(l.get("effort")).strip() for l in (m.get("supported_reasoning_levels") or [])
+                      if isinstance(l, dict) and l.get("effort")]
+            out[slug] = {"default": (m.get("default_reasoning_level") or None), "levels": levels}
+        return out or None
+    except Exception:
+        return None
+
+
+def _codex_katalog() -> Optional[dict]:
+    """Effort-Katalog je Modell, 1 h gecacht; None wenn nicht lesbar (dann
+    wird NICHT geblockt — ein fehlender Katalog darf keinen Aufruf kosten)."""
+    import time as _t
+    now = _t.monotonic()
+    if _codex_katalog_cache["katalog"] is not None and now - _codex_katalog_cache["at"] < _CODEX_KATALOG_TTL_S:
+        return _codex_katalog_cache["katalog"]
+    try:
+        env = os.environ.copy()
+        env["NO_COLOR"] = "1"
+        r = subprocess.run(["codex", "debug", "models"], capture_output=True, text=True,
+                           timeout=15, env=env)
+        import json as _json
+        katalog = _codex_katalog_parsen(_json.loads(r.stdout)) if r.returncode == 0 and r.stdout else None
+    except Exception as exc:
+        logger.warning("codex debug models nicht lesbar: %s: %s", type(exc).__name__, exc)
+        katalog = None
+    if katalog:
+        _codex_katalog_cache.update({"at": now, "katalog": katalog})
+    return katalog
+
+
+def _codex_effort_pruefen(katalog: Optional[dict], model: Optional[str],
+                          effort: Optional[str]) -> tuple:
+    """-> (ok, effort_applied, available).
+
+    Fail-closed gegen STILLE Degradation: `-c model_reasoning_effort=ultra`
+    auf gpt-5.6-luna nimmt codex ohne Fehler an, das Modell rechnet dann
+    ohne Reasoning (reasoning_output_tokens=0, Antwort falsch), wir
+    antworteten 200. Gemessen 02.09. Unbekannte Stufe fuer ein bekanntes
+    Modell -> nicht ok. Unbekanntes Modell oder kein Katalog -> ok, ohne
+    Behauptung (effort_applied = die angeforderte Stufe oder None).
+    """
+    e = (effort or "").strip().lower() or None
+    eintrag = (katalog or {}).get((model or "").strip()) if katalog and model else None
+    if eintrag is None:
+        return True, e, None
+    levels = eintrag.get("levels") or []
+    if e is None:
+        return True, eintrag.get("default"), levels
+    if levels and e not in levels:
+        return False, None, levels
+    return True, e, levels
+
+
 def _codex_sandbox_args(sandbox) -> list:
     """Sandbox-Wahl fuer `codex exec` — verifiziert 2026-09-01 als Dienst-User:
     `-s read-only` laeuft im exec-Modus ohne Haengen und ohne Rueckfrage.
@@ -1002,6 +1080,16 @@ async def chatgpt_endpoint(
         # medium, high, xhigh. `minimal` is GPT-5-only — older models will
         # reject and the upstream error surfaces verbatim via our 400/502
         # mapping.
+        _ok, _effort_applied, _available = _codex_effort_pruefen(
+            _codex_katalog(), selected_model, prompt.effort)
+        if not _ok:
+            raise HTTPException(
+                status_code=422,
+                detail={"error": "unsupported_effort", "model": selected_model,
+                        "effort": prompt.effort, "available": _available,
+                        "hint": "codex wuerde diese Stufe still verwerfen und ohne "
+                                "Reasoning rechnen; nimm eine aus `available`."},
+            )
         if prompt.effort:
             cmd.extend(["-c", f"model_reasoning_effort={prompt.effort}"])
 
@@ -1099,6 +1187,7 @@ async def chatgpt_endpoint(
         response_text = ""
         input_tokens = 0
         output_tokens = 0
+        reasoning_tokens: Optional[int] = None
         model_name = selected_model or "codex-default"  # Track as codex-default if no model specified
         upstream_error: Optional[str] = None  # captured if Codex emits a turn.failed
 
@@ -1119,6 +1208,8 @@ async def chatgpt_endpoint(
                     usage = event.get("usage", {})
                     input_tokens = usage.get("input_tokens", 0)
                     output_tokens = usage.get("output_tokens", 0)
+                    if usage.get("reasoning_output_tokens") is not None:
+                        reasoning_tokens = int(usage.get("reasoning_output_tokens") or 0)
 
                 # Capture upstream error so we can return a useful message
                 # instead of an opaque 500. Codex emits either a top-level
@@ -1174,14 +1265,17 @@ async def chatgpt_endpoint(
 
         logger.info(
             f"Codex CLI response: {len(response_text)} chars, "
-            f"{tokens_used} tokens ({input_tokens}in/{output_tokens}out)"
+            f"{tokens_used} tokens ({input_tokens}in/{output_tokens}out, "
+            f"reasoning={reasoning_tokens}, effort={_effort_applied})"
         )
 
         return AIResponse(
             response=response_text,
             model=model_name,
             tokens_used=tokens_used,
-            finish_reason="stop"
+            finish_reason="stop",
+            effort_applied=_effort_applied,
+            thinking_tokens=reasoning_tokens,
         )
 
     except subprocess.TimeoutExpired:
