@@ -88,3 +88,18 @@ def test_antwort_traegt_thinking_tokens_feld():
     r = t.AIResponse(response="OK", model="gpt-5.6-luna", tokens_used=1,
                      effort_applied="xhigh", thinking_tokens=53)
     assert r.thinking_tokens == 53 and r.effort_applied == "xhigh"
+
+
+def test_config_toml_vorgabe_schlaegt_modellvorgabe(tmp_path):
+    """Ohne `-c` nimmt codex `model_reasoning_effort` aus config.toml, nicht
+    das default_reasoning_level des Modells. Gemessen 02.09.: config "high",
+    Katalog "medium" -> codex rechnet high. Gemeldet wird, was gilt."""
+    cfg = tmp_path / "config.toml"
+    cfg.write_text('model = "gpt-5.6-sol"\nmodel_reasoning_effort = "high"\n\n[tui]\nmodel_reasoning_effort = "low"\n')
+    assert t._codex_config_effort(str(cfg)) == "high"        # Top-Level, nicht [tui]
+    k = t._codex_katalog_parsen(KATALOG_JSON)
+    assert t._codex_effort_pruefen(k, "gpt-5.6-luna", None, "high") == (True, "high", ["low", "medium", "high", "xhigh", "max"])
+    assert t._codex_effort_pruefen(k, "gpt-5.6-luna", None, None)[1] == "medium"   # ohne config: Modell
+    assert t._codex_effort_pruefen(k, "gpt-5.6-luna", "low", "high")[1] == "low"   # -c schlaegt config
+    assert t._codex_effort_pruefen(None, None, None, "high") == (True, "high", None)
+    assert t._codex_config_effort(str(tmp_path / "fehlt.toml")) is None

@@ -949,8 +949,30 @@ def _codex_katalog() -> Optional[dict]:
     return katalog
 
 
+def _codex_config_effort(config_path: Optional[str] = None) -> Optional[str]:
+    """`model_reasoning_effort` aus codex' config.toml — die Vorgabe, die
+    codex OHNE `-c` nimmt. Sie schlaegt das `default_reasoning_level` des
+    Modells (gemessen 02.09.: config sagt "high", Katalog "medium" — ohne
+    Angabe rechnet codex mit high). Rangfolge: -c > config.toml > Modell."""
+    try:
+        path = config_path or os.path.join(
+            os.getenv("CODEX_HOME") or os.path.join(os.path.expanduser("~"), ".codex"),
+            "config.toml")
+        with open(path, "r", encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if line.startswith("["):
+                    break  # nur der Top-Level-Block zaehlt
+                m = re.match(r'^model_reasoning_effort\s*=\s*"([^"]+)"', line)
+                if m:
+                    return m.group(1).strip().lower()
+    except Exception:
+        return None
+    return None
+
+
 def _codex_effort_pruefen(katalog: Optional[dict], model: Optional[str],
-                          effort: Optional[str]) -> tuple:
+                          effort: Optional[str], config_effort: Optional[str] = None) -> tuple:
     """-> (ok, effort_applied, available).
 
     Fail-closed gegen STILLE Degradation: `-c model_reasoning_effort=ultra`
@@ -963,10 +985,10 @@ def _codex_effort_pruefen(katalog: Optional[dict], model: Optional[str],
     e = (effort or "").strip().lower() or None
     eintrag = (katalog or {}).get((model or "").strip()) if katalog and model else None
     if eintrag is None:
-        return True, e, None
+        return True, (e or config_effort), None
     levels = eintrag.get("levels") or []
     if e is None:
-        return True, eintrag.get("default"), levels
+        return True, (config_effort or eintrag.get("default")), levels
     if levels and e not in levels:
         return False, None, levels
     return True, e, levels
@@ -1081,7 +1103,7 @@ async def chatgpt_endpoint(
         # reject and the upstream error surfaces verbatim via our 400/502
         # mapping.
         _ok, _effort_applied, _available = _codex_effort_pruefen(
-            _codex_katalog(), selected_model, prompt.effort)
+            _codex_katalog(), selected_model, prompt.effort, _codex_config_effort())
         if not _ok:
             raise HTTPException(
                 status_code=422,
