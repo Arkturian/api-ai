@@ -64,7 +64,7 @@ def _get_cli_semaphore(provider: str) -> asyncio.Semaphore:
     return sem
 
 
-def _run_cli_with_pgid(cmd, env, timeout=300, cwd="/"):
+def _run_cli_with_pgid(cmd, env, timeout=300, cwd="/", input=None):
     """Run a CLI subprocess as its own process-group leader.
 
     Two reasons we don't just use ``subprocess.run`` here:
@@ -90,6 +90,11 @@ def _run_cli_with_pgid(cmd, env, timeout=300, cwd="/"):
     import subprocess
     proc = subprocess.Popen(
         cmd,
+        # `input` (Prompt ueber stdin statt argv): argv ist auf ~128 KB
+        # begrenzt (MAX_ARG_STRLEN), ein Kleinhirn-Spannenkontext oder ein
+        # langes Dokument sprengt das mit "Argument list too long". codex
+        # liest die Anweisung von stdin, wenn das Prompt-Argument `-` ist.
+        stdin=subprocess.PIPE if input is not None else None,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         env=env,
@@ -98,7 +103,7 @@ def _run_cli_with_pgid(cmd, env, timeout=300, cwd="/"):
         start_new_session=True,  # own pgid for clean group-kill
     )
     try:
-        stdout, stderr = proc.communicate(timeout=timeout)
+        stdout, stderr = proc.communicate(input=input, timeout=timeout)
     except subprocess.TimeoutExpired:
         # Take out the whole process group, not just the direct child
         try:
@@ -1165,7 +1170,8 @@ async def chatgpt_endpoint(
         # `-- <prompt>` → clean).
         if "-i" in cmd:
             cmd.append("--")
-        cmd.append(prompt_text)
+        # Prompt ueber stdin (`-`), nicht als argv — siehe _run_cli_with_pgid.
+        cmd.append("-")
 
         # Call codex exec in subprocess
         def run_codex_cli():
@@ -1180,7 +1186,7 @@ async def chatgpt_endpoint(
             env.pop("OPENAI_API_KEY", None)
 
             # Own-pgid + killpg-on-timeout — see _run_cli_with_pgid docstring
-            result = _run_cli_with_pgid(cmd, env=env, timeout=300)
+            result = _run_cli_with_pgid(cmd, env=env, timeout=300, input=prompt_text)
             return result
 
         sem = await _acquire_cli_slot("codex")
