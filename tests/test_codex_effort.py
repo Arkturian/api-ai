@@ -103,3 +103,21 @@ def test_config_toml_vorgabe_schlaegt_modellvorgabe(tmp_path):
     assert t._codex_effort_pruefen(k, "gpt-5.6-luna", "low", "high")[1] == "low"   # -c schlaegt config
     assert t._codex_effort_pruefen(None, None, None, "high") == (True, "high", None)
     assert t._codex_config_effort(str(tmp_path / "fehlt.toml")) is None
+
+
+def test_config_wird_wie_beim_cli_lauf_aufgeloest(tmp_path, monkeypatch):
+    """CODEX_HOME zuerst, sonst CLI_HOME/.codex — dieselbe Aufloesung wie
+    run_codex_cli. arkturian (CLI_HOME=/root, kein CODEX_HOME, keine Vorgabe
+    in config.toml) meldet zu Recht die Modellvorgabe; arkserver (CODEX_HOME
+    =/home/alex/.codex, config high) meldet high."""
+    (tmp_path / "a" / ".codex").mkdir(parents=True)
+    (tmp_path / "a" / ".codex" / "config.toml").write_text('model_reasoning_effort = "low"\n')
+    (tmp_path / "b").mkdir()
+    (tmp_path / "b" / "config.toml").write_text('model_reasoning_effort = "xhigh"\n')
+    monkeypatch.delenv("CODEX_HOME", raising=False)
+    monkeypatch.setenv("CLI_HOME", str(tmp_path / "a"))
+    assert t._codex_config_effort() == "low"
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "b"))
+    assert t._codex_config_effort() == "xhigh"
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "leer"))
+    assert t._codex_config_effort() is None

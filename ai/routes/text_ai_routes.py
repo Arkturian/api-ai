@@ -956,9 +956,13 @@ def _codex_config_effort(config_path: Optional[str] = None) -> Optional[str]:
     Modells (gemessen 02.09.: config sagt "high", Katalog "medium" — ohne
     Angabe rechnet codex mit high). Rangfolge: -c > config.toml > Modell."""
     try:
+        # Dieselbe Aufloesung wie der CLI-Lauf (run_codex_cli): CODEX_HOME,
+        # sonst <CLI_HOME oder pw_dir>/.codex — NICHT expanduser("~"), das
+        # waere das HOME des Dienstprozesses, nicht das des CLI-Laufs.
+        import pwd as _pwd
+        cli_home = os.getenv("CLI_HOME") or _pwd.getpwuid(os.getuid()).pw_dir
         path = config_path or os.path.join(
-            os.getenv("CODEX_HOME") or os.path.join(os.path.expanduser("~"), ".codex"),
-            "config.toml")
+            os.getenv("CODEX_HOME") or os.path.join(cli_home, ".codex"), "config.toml")
         with open(path, "r", encoding="utf-8") as fh:
             for line in fh:
                 line = line.strip()
