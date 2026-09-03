@@ -404,6 +404,18 @@ class RealtimeTokenRequest(BaseModel):
             "away from its cause. arcturian mode only."
         ),
     )
+    presence_agent: Optional[str] = Field(
+        default=None,
+        description=(
+            "Nur fuer companion_mode='agent-presence': Name des Agenten, "
+            "dessen Stimme diese Sitzung ist (z.B. 'CloudV2'). Der Mint "
+            "laedt seinen Wahrnehmungsstand (presence-context) mit dem "
+            "Bearer des Menschen in die Anweisung; `frage_kleinhirn` laedt "
+            "ihn im Gespraech nach. Owner-Entscheid 03.09.: je Agent ein "
+            "Realtime-Agent, der DIESER Agent ist; Arcturian bleibt die "
+            "foederationsweite Stimme."
+        ),
+    )
     conversation_id: Optional[str] = Field(
         default=None,
         description=(
@@ -789,6 +801,7 @@ SUPPORTED_COMPANION_MODES = {
     "agent-transparent",
     "arcturian",
     "product-finder",
+    "agent-presence",
 }
 SUPPORTED_DETAIL_LEVELS = {"brief", "balanced", "technical", "flowing"}
 
@@ -2723,6 +2736,69 @@ def _companion_arcturian_tools() -> List[dict]:
     ]
 
 
+async def _fetch_presence_context(agent: str, authorization: str) -> Optional[dict]:
+    """Wahrnehmungsstand eines Agenten fuer den Mint — dieselbe Quelle wie
+    `frage_kleinhirn` (`GET /api/sessions/<agent>/presence-context`), mit
+    dem Bearer des MENSCHEN (nie ein Dienst-Token: cloud-api filtert nur
+    Menschen nach Tenant). Never raises: ohne Stand startet die Sitzung
+    ehrlich („ich habe gerade keinen Stand“), nicht gar nicht."""
+    if not agent or not authorization:
+        return None
+    base = os.getenv("CLOUD_API_URL", "https://cloud-api.arkserver.arkturian.com")
+    try:
+        async with httpx.AsyncClient(timeout=8.0) as client:
+            r = await client.get(f"{base}/api/sessions/{agent}/presence-context",
+                                 headers={"Authorization": authorization},
+                                 params={"question": "[mint] agent-presence"})
+        if r.status_code != 200:
+            logger.warning("Realtime: presence-context %s -> HTTP %s", agent, r.status_code)
+            return None
+        d = r.json() or {}
+        if not (d.get("block") or "").strip():
+            return None
+        return d
+    except Exception as exc:
+        logger.warning("Realtime: presence-context %s failed: %s", agent, type(exc).__name__)
+        return None
+
+
+def _agent_presence_tools() -> List[dict]:
+    """Die Stimme eines Agenten hat genau ein Werkzeug: den eigenen Stand
+    nachladen. Kein agent_status (das fragt ANDERE), kein Senden."""
+    return [t for t in _arcturian_read_tools() if t["name"] == "frage_kleinhirn"]
+
+
+_AGENT_PRESENCE_PERSONA_PATH = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "personas", "agent_presence.de.txt")
+
+
+def _agent_presence_instructions(agent: str, ctx: Optional[dict],
+                                 language: str = "de") -> str:
+    """Anweisung fuer companion_mode='agent-presence' (Owner-Entscheid Alex,
+    03.09.): Die Sprachsitzung IST der Agent — nicht Arcturian, der ueber
+    ihn Auskunft gibt. Der Persona-TEXT liegt als Datei je Profil
+    (`ai/personas/agent_presence.de.txt`, Leak-Guard: Persona als Text,
+    nicht als Code); hier wird nur gefuellt und der Stand angehaengt.
+
+    Drei Grenzen, die die Stimme selbst ausspricht: (1) sie weiss nur, was
+    der Stand traegt; (2) ein laufender Schritt ist darin unsichtbar; (3)
+    sie fuehrt nichts aus und gibt nichts weiter — der Rueckweg zum
+    Grosshirn ist noch nicht gebaut, und das sagt sie."""
+    stand = (ctx or {}).get("stand") or ""
+    stand_kurz = stand[11:16] if len(stand) >= 16 else (stand or "unbekannt")
+    n = (ctx or {}).get("derivative_count")
+    block = ((ctx or {}).get("block") or "").strip()
+    with open(_AGENT_PRESENCE_PERSONA_PATH, "r", encoding="utf-8") as fh:
+        kopf = fh.read().format(agent=agent, stand_kurz=stand_kurz, language=(language or "de"))
+    if block:
+        return kopf + f"WAHRNEHMUNGSSTAND (Stand {stand_kurz}, {n or '?'} Ableitungen):\n{block}\n"
+    return kopf + (
+        "WAHRNEHMUNGSSTAND: keiner geladen. Sag das offen ('Ich habe gerade "
+        "keinen Stand meiner Arbeit') und lade ihn mit frage_kleinhirn nach, "
+        "bevor du etwas ueber deine Arbeit sagst.\n"
+    )
+
+
 def _companion_arcturian_prompt(language: str = "de") -> str:
     """System prompt for the `arcturian` companion mode.
 
@@ -4045,6 +4121,7 @@ async def mint_realtime_token(
             },
         )
     companion_tools_override: Optional[List[dict]] = None
+    presence_meta: Optional[dict] = None
     if companion_mode == "narrator-only":
         instructions = _companion_narrator_prompt(request.language or "de")
         instructions += _detail_level_addendum(detail_level)
@@ -4264,6 +4341,31 @@ async def mint_realtime_token(
             f"detail_level={detail_level}->ignored "
             f"session_tools=[] "
             f"per_turn_tools={[t['name'] for t in _resolver_defs]} "
+            f"({len(instructions)} chars)"
+        )
+    elif companion_mode == "agent-presence":
+        _pa = (request.presence_agent or "").strip()
+        if not _pa:
+            raise HTTPException(
+                status_code=422,
+                detail={"error": "presence_agent_missing",
+                        "hint": "companion_mode='agent-presence' braucht `presence_agent` "
+                                "(z.B. 'CloudV2')."},
+            )
+        _ctx = await _fetch_presence_context(_pa, authorization or "")
+        instructions = _agent_presence_instructions(_pa, _ctx, request.language or "de")
+        companion_tools_override = _agent_presence_tools()
+        presence_meta = {
+            "agent": _pa,
+            "stand": (_ctx or {}).get("stand"),
+            "derivative_count": (_ctx or {}).get("derivative_count"),
+            "ref": (_ctx or {}).get("ref"),
+            "loaded": bool(_ctx),
+        }
+        logger.info(
+            f"Realtime: companion_mode=agent-presence agent={_pa} "
+            f"stand={presence_meta['stand']} loaded={presence_meta['loaded']} "
+            f"tools={[t['name'] for t in companion_tools_override]} "
             f"({len(instructions)} chars)"
         )
     elif companion_mode == "guide-ptt":
@@ -4611,7 +4713,7 @@ async def mint_realtime_token(
     # silently prefacing them would be a capability nobody asked for.
     preface_items: List[dict] = []
     prefaced_through_revision: Optional[int] = None
-    if request.conversation_id and companion_mode == "arcturian":
+    if request.conversation_id and companion_mode in ("arcturian", "agent-presence"):
         preface_items, prefaced_through_revision = (
             await _fetch_conversation_preface(
                 request.conversation_id, authorization or "",
@@ -4640,6 +4742,7 @@ async def mint_realtime_token(
         # makes a duplicated spoken answer impossible rather than merely
         # unlikely. Null means "nothing was prefaced, project everything".
         "prefaced_through_revision": prefaced_through_revision,
+        "presence": presence_meta,
         # The id the reservation was actually booked under. Echoed so the
         # client can heartbeat and report usage with exactly this value
         # instead of assuming which of its own fields we picked — the
