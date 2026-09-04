@@ -84,7 +84,11 @@ jobs:
       - name: Upload archive to arkserver
         uses: appleboy/scp-action@v0.1.7
         with:
-          host: ${{ secrets.DEPLOY_HOST_ARKSERVER }}
+          # Self-hosted Runner LAEUFT auf arkserver: die oeffentliche IP ist
+          # von innen nicht erreichbar (Router ohne Hairpin, i/o timeout
+          # 04.09.), die LAN-Adresse schon — auch aus dem Docker-Container
+          # der scp/ssh-Action (gemessen). GitHub-hosted nimmt das Secret.
+          host: ${{ vars.RUNNER_LABEL && '10.192.26.50' || secrets.DEPLOY_HOST_ARKSERVER }}
           username: ${{ secrets.DEPLOY_USER_ARKSERVER }}
           key: ${{ secrets.DEPLOY_SSH_KEY_ARKSERVER }}
           port: ${{ secrets.DEPLOY_PORT_ARKSERVER || 22 }}
@@ -95,7 +99,11 @@ jobs:
       - name: Deploy to arkserver
         uses: appleboy/ssh-action@v1.0.3
         with:
-          host: ${{ secrets.DEPLOY_HOST_ARKSERVER }}
+          # Self-hosted Runner LAEUFT auf arkserver: die oeffentliche IP ist
+          # von innen nicht erreichbar (Router ohne Hairpin, i/o timeout
+          # 04.09.), die LAN-Adresse schon — auch aus dem Docker-Container
+          # der scp/ssh-Action (gemessen). GitHub-hosted nimmt das Secret.
+          host: ${{ vars.RUNNER_LABEL && '10.192.26.50' || secrets.DEPLOY_HOST_ARKSERVER }}
           username: ${{ secrets.DEPLOY_USER_ARKSERVER }}
           key: ${{ secrets.DEPLOY_SSH_KEY_ARKSERVER }}
           port: ${{ secrets.DEPLOY_PORT_ARKSERVER || 22 }}
