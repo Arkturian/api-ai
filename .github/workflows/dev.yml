@@ -15,7 +15,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Setup Python
+      # Self-hosted Runner (arkserver, Debian 12, Alex 04.09.): setup-python
+      # kennt Debian nicht; dort System-Python 3.11.2 + eigenes venv, damit
+      # nichts in die Benutzerumgebung des Runners installiert wird.
+      - name: Setup Python (nur GitHub-hosted)
+        if: ${{ !vars.RUNNER_LABEL }}
         uses: actions/setup-python@v4
         with:
           python-version: '3.11'
@@ -23,8 +27,9 @@ jobs:
 
       - name: Install dependencies
         run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          python3 -m venv .venv
+          .venv/bin/python -m pip install --upgrade pip --quiet
+          .venv/bin/pip install -r requirements.txt --quiet
 
       - name: Check Python syntax (recursive, fail on error)
         run: |
@@ -32,13 +37,13 @@ jobs:
           # SyntaxError. Quiet flag suppresses per-file success lines.
           # `-q -q` = only errors. No `|| echo` fallback — a syntax
           # error here MUST fail the job and block the PR.
-          python -m compileall -q -q .
+          .venv/bin/python -m compileall -q -q .
 
       - name: Run basic tests
         run: |
           echo "✅ Python API - syntax check passed"
-          python --version
-          pip list | grep fastapi
+          .venv/bin/python --version
+          .venv/bin/pip list | grep fastapi
 
       - name: Validate OpenAPI schema
         run: |

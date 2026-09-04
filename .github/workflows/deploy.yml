@@ -25,12 +25,17 @@ jobs:
     runs-on: ${{ vars.RUNNER_LABEL || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@v4
-      - name: Setup Python
+      # Self-hosted Runner (arkserver, Debian 12, Alex 04.09.): setup-python
+      # kennt Debian nicht ("version '3.11' ... not found for Debian 12") und
+      # blockierte JEDEN Deploy. Dort ist python3 = 3.11.2 = Produktion;
+      # setup-python nur noch auf GitHub-gehosteten Runnern.
+      - name: Setup Python (nur GitHub-hosted)
+        if: ${{ !vars.RUNNER_LABEL }}
         uses: actions/setup-python@v4
         with:
           python-version: '3.11'
       - name: Recursive compileall (fail on SyntaxError)
-        run: python -m compileall -q -q .
+        run: python3 -m compileall -q -q .
 
   # ============================================================================
   # Build archive (shared by all deployments)

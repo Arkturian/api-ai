@@ -11,7 +11,12 @@ jobs:
     runs-on: ${{ vars.RUNNER_LABEL || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@v4
-      - name: Setup Python
+      # Self-hosted Runner (arkserver, Debian 12, Alex 04.09.): setup-python
+      # kennt Debian nicht ("version '3.11' ... not found for Debian 12") und
+      # blockierte JEDEN Deploy. Dort ist python3 = 3.11.2 = Produktion;
+      # setup-python nur noch auf GitHub-gehosteten Runnern.
+      - name: Setup Python (nur GitHub-hosted)
+        if: ${{ !vars.RUNNER_LABEL }}
         uses: actions/setup-python@v4
         with:
           python-version: '3.11'
@@ -21,7 +26,7 @@ jobs:
           # quotes) slipped past CI because the old check used
           # `|| echo`. compileall walks all .py and fails the job
           # on the first SyntaxError. No fallback, no swallowing.
-          python -m compileall -q -q .
+          python3 -m compileall -q -q .
 
   build-archive:
     runs-on: ${{ vars.RUNNER_LABEL || 'ubuntu-latest' }}
