@@ -228,6 +228,45 @@ if os.path.isdir(os.path.join(_STATIC_DIR, "realtime-test")):
     )
 
 # Health check
+_CLI_STATUS_TTL_S = 300.0
+_cli_status_cache: dict = {}
+
+
+def _cli_status(name: str = "codex") -> dict:
+    """Ist das CLI, an dem ein ganzer Pfad haengt, aufrufbar — mit dem
+    Environment DIESES Prozesses (PATH der Unit, CODEX_HOME)?
+
+    Anlass 2026-09-04 (Automation/Guardian): auf arkturian zog der
+    naechtliche Updater codex 0.153.2 ohne Plattformpaket, `codex
+    --version` warf, jeder /ai/chatgpt-Aufruf endete mit 500 — und /health
+    sagte weiter „healthy“, der Katalog „einsatzbereit“. Ein Health-Check,
+    der das CLI nicht anfasst, prueft nur den Python-Prozess. 5 min
+    Cache, damit Monitore den Dienst nicht mit npm-Starts fluten."""
+    import subprocess
+    import time as _t
+    now = _t.monotonic()
+    c = _cli_status_cache.get(name)
+    if c and now - c["at"] < _CLI_STATUS_TTL_S:
+        return c["status"]
+    env = os.environ.copy()
+    env["NO_COLOR"] = "1"
+    try:
+        r = subprocess.run([name, "--version"], capture_output=True, text=True,
+                           timeout=10, env=env)
+        out = (r.stdout or "").strip()
+        err = (r.stderr or "").strip()
+        ok = r.returncode == 0 and bool(out)
+        status = {"ok": ok, "version": out.split()[-1] if ok else None,
+                  "error": None if ok else (err or out or f"exit {r.returncode}")[-300:]}
+    except FileNotFoundError:
+        status = {"ok": False, "version": None, "error": f"{name}: not found on PATH"}
+    except Exception as exc:
+        status = {"ok": False, "version": None, "error": f"{type(exc).__name__}: {exc}"[:300]}
+    status["checked_at"] = _t.strftime("%Y-%m-%dT%H:%M:%S%z")
+    _cli_status_cache[name] = {"at": now, "status": status}
+    return status
+
+
 def _realtime_faehigkeiten() -> list:
     """Welche Realtime-Werkzeuge diese Instanz kennt.
 
@@ -260,6 +299,9 @@ def health_check():
         "service": "arkturian-ai-api",
         "version": "1.0.0",
         "realtime_tools": _realtime_faehigkeiten(),
+        # Der codex-Pfad (Kleinhirn, Prosa, Sol/Luna) haengt an einem
+        # Node-CLI; ein gebrochenes CLI ist ein gebrochener Dienst.
+        "clis": {"codex": _cli_status("codex")},
     }
 
 @app.get("/")
