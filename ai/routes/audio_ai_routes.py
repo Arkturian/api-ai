@@ -14,6 +14,7 @@ from fastapi.encoders import jsonable_encoder
 from pydantic import BaseModel
 from typing import Optional
 import logging
+import time
 import re
 import io
 import os
@@ -467,6 +468,32 @@ _CODEC_TO_EXT = {
 }
 
 
+def _audio_duration_seconds(data: bytes) -> Optional[float]:
+    """Dauer der Aufnahme per ffprobe (format=duration), None wenn nicht
+    lesbar. Fuer comm-api (#4931): Sprachnachrichten tragen Dauer im Verlauf
+    und im Preis (STT wird je Minute abgerechnet)."""
+    import subprocess
+    import tempfile
+    try:
+        # Datei statt stdin: ffprobe muss fuer die Dauer im Container
+        # springen koennen (WAV/OGG mit unbekannter Laenge im Kopf liefert
+        # ueber stdin nur N/A).
+        with tempfile.NamedTemporaryFile(suffix=".audio", delete=True) as tf:
+            tf.write(data); tf.flush()
+            probe = subprocess.run(
+                ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+                 "-of", "default=noprint_wrappers=1:nokey=1", tf.name],
+                capture_output=True, timeout=15,
+            )
+        if probe.returncode == 0:
+            val = (probe.stdout or b"").decode("utf-8", "ignore").strip().splitlines()
+            if val and val[0] not in ("", "N/A"):
+                return round(float(val[0]), 2)
+    except Exception as e:
+        logger.warning(f"ffprobe duration failed: {e}")
+    return None
+
+
 def _normalize_audio_for_openai(data: bytes, basename: str = "audio") -> tuple[bytes, str]:
     """Ensure ``data`` is in a format OpenAI's audio.transcriptions accepts.
 
@@ -577,6 +604,7 @@ async def _transcribe_with_whisper(
     # Voice-Memos .m4a-with-quirks, browser-uploaded blobs etc.
     base, _ = os.path.splitext(file.filename or "audio")
     data, ext = _normalize_audio_for_openai(data, base)
+    duration_seconds = _audio_duration_seconds(data)
     audio_buffer = io.BytesIO(data)
     audio_buffer.name = (base or "audio") + ext
 
@@ -588,8 +616,16 @@ async def _transcribe_with_whisper(
         kwargs["prompt"] = prompt
     if language:
         kwargs["language"] = language
+    # Sprache erkennen (comm-api #4931: Alex spricht deutsch, manchmal
+    # englisch/italienisch): whisper-1 liefert die erkannte Sprache und die
+    # Dauer nur im `verbose_json`; die gpt-4o-*-Modelle kennen dieses Format
+    # nicht (400) — dort bleibt `language` das, was der Aufrufer vorgab.
+    auto_verbose = (not response_format) and model == "whisper-1"
     if response_format:
         kwargs["response_format"] = response_format
+    elif auto_verbose:
+        kwargs["response_format"] = "verbose_json"
+    t0 = time.monotonic()
 
     # Diarization models REQUIRE chunking_strategy. Without it OpenAI returns
     # 400: 'chunking_strategy is required for diarization models'. Default to
@@ -613,20 +649,30 @@ async def _transcribe_with_whisper(
             "diarized": raw,
         }
 
+    latency_ms = int((time.monotonic() - t0) * 1000)
     text = getattr(result, "text", None)
     if text is None:
         return {
             "model": model,
             "filename": file.filename,
             "raw": jsonable_encoder(result),
+            "duration_seconds": duration_seconds,
+            "latency_ms": latency_ms,
         }
 
+    detected = getattr(result, "language", None) if auto_verbose else None
+    api_duration = getattr(result, "duration", None) if auto_verbose else None
     return {
         "text": text,
         "model": model,
         "prompt": prompt,
-        "language": language,
+        # erkannte Sprache (whisper-1 ohne Vorgabe), sonst die Vorgabe
+        "language": detected or language,
+        "language_source": "detected" if detected else ("requested" if language else None),
         "filename": file.filename,
+        "duration_seconds": duration_seconds if duration_seconds is not None else (
+            round(float(api_duration), 2) if api_duration is not None else None),
+        "latency_ms": latency_ms,
     }
 
 
