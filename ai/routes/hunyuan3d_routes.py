@@ -28,6 +28,7 @@ import time
 from pathlib import Path
 import uuid
 from ai.clients.storage_client import storage_api_key
+from ai.provider_config import provider_missing
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -88,10 +89,7 @@ async def _tc_call(action: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     secret_id = os.getenv("TENCENT_SECRET_ID", "")
     secret_key = os.getenv("TENCENT_SECRET_KEY", "")
     if not secret_id or not secret_key:
-        raise HTTPException(
-            status_code=500,
-            detail="TENCENT_SECRET_ID / TENCENT_SECRET_KEY not configured on this host",
-        )
+        raise provider_missing("tencent_3d")
     import httpx
     body = json.dumps(payload, separators=(",", ":")).encode()
     headers = _tc3_headers(action, body, host, service, version, region, secret_id, secret_key)

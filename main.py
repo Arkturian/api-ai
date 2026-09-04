@@ -24,6 +24,7 @@ from fastapi.staticfiles import StaticFiles
 import hmac
 import logging
 import os
+from ai.provider_config import providers_status as _providers_status
 
 # Import routes
 from ai.routes import text_ai_routes, image_ai_routes, audio_ai_routes, dialog_routes, video_ai_routes, narration_routes, image_generation_routes, translate_routes, internal_routes, dashboard_routes, music_ai_routes, realtime_routes, hunyuan3d_routes, kling_routes
@@ -302,6 +303,9 @@ def health_check():
         # Der codex-Pfad (Kleinhirn, Prosa, Sol/Luna) haengt an einem
         # Node-CLI; ein gebrochenes CLI ist ein gebrochener Dienst.
         "clis": {"codex": _cli_status("codex")},
+        # Welche Provider DIESE Instanz konfiguriert hat — read-only, ohne
+        # Geheimnisse, ohne Erzeugung (Kundeninstanzen ohne unsere Toepfe).
+        "providers": _providers_status(),
     }
 
 @app.get("/")

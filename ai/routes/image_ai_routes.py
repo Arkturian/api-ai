@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field
 from typing import List, Optional
 import logging
 from ai.clients.storage_client import storage_api_key
+from ai.provider_config import provider_missing
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -236,13 +237,7 @@ async def generate_with_openai_image(
 
     api_key = os.getenv("OPENAI_API_KEY", "")
     if not api_key:
-        raise HTTPException(
-            status_code=500,
-            detail={
-                "error": "openai_api_key_missing",
-                "hint": "OPENAI_API_KEY not configured in service env.",
-            },
-        )
+        raise provider_missing("openai")
 
     use_edits = bool(reference_image_urls)
     if use_edits and model == "dall-e-3":

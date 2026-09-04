@@ -33,6 +33,7 @@ from typing import Any, Optional
 
 import httpx
 from fastapi import HTTPException
+from ai.provider_config import provider_missing
 
 logger = logging.getLogger(__name__)
 
@@ -46,15 +47,7 @@ def _api_key() -> str:
     """
     key = os.getenv("MINIMAX_MULTIMODAL_API_KEY", "")
     if not key:
-        raise HTTPException(
-            status_code=500,
-            detail={
-                "error": "minimax_api_key_missing",
-                "hint": ("MINIMAX_MULTIMODAL_API_KEY not configured. "
-                         "Set it in /var/www/api-ai.arkturian.com/.env "
-                         "and restart api-ai.service."),
-            },
-        )
+        raise provider_missing("minimax")
     return key
 
 

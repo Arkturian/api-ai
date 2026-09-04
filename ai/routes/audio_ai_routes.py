@@ -34,6 +34,7 @@ from ai.clients.storage_client import StorageObject
 from ai.routes.music_generation import generate_music_stable_audio, generate_music_elevenlabs
 from openai import AsyncOpenAI
 from ai.clients.storage_client import storage_api_key
+from ai.provider_config import provider_missing
 
 
 # Response Models
@@ -589,7 +590,7 @@ async def _transcribe_with_whisper(
 ):
     """Transcribe audio using OpenAI Whisper / GPT-4o transcribe family."""
     if not os.getenv("OPENAI_API_KEY"):
-        raise HTTPException(status_code=500, detail="OpenAI API key not configured.")
+        raise provider_missing("openai")
 
     data = await file.read()
     if not data:
@@ -687,7 +688,7 @@ async def _transcribe_with_gemini(
     from ai.services.cost_tracker import cost_tracker
 
     if not os.getenv("GOOGLE_API_KEY"):
-        raise HTTPException(status_code=500, detail="Google API key not configured.")
+        raise provider_missing("google")
 
     # Check budget before processing
     if cost_tracker.should_block_request():

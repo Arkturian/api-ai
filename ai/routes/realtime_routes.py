@@ -73,6 +73,7 @@ from ..services.realtime_budget_guard import (
     BudgetGuardError,
     Reservation,
 )
+from ai.provider_config import provider_missing
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -3385,13 +3386,7 @@ async def _mint_elevenlabs_token(request: RealtimeTokenRequest) -> dict:
     api_key_env = os.getenv("ELEVENLABS_API_KEY", "").strip('"').strip("'")
     agent_id = request.agent_id or os.getenv("ELEVENLABS_AGENT_ID", "")
     if not api_key_env:
-        raise HTTPException(
-            status_code=500,
-            detail={
-                "error": "elevenlabs_api_key_missing",
-                "hint": "ELEVENLABS_API_KEY not set on this api-ai host.",
-            },
-        )
+        raise provider_missing("elevenlabs")
     if not agent_id:
         raise HTTPException(
             status_code=500,
@@ -4419,13 +4414,7 @@ async def mint_realtime_token(
         key_herkunft, grant.profile_id,
     )
     if not api_key_env:
-        raise HTTPException(
-            status_code=500,
-            detail={
-                "error": "openai_api_key_missing",
-                "hint": "OPENAI_API_KEY not configured in service env.",
-            },
-        )
+        raise provider_missing("openai")
 
     # Unconditional mint audit line. Previously only the companion_mode
     # branches logged, so a mint WITHOUT a mode passed through silently

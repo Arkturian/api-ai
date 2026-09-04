@@ -20,6 +20,7 @@ from ai.services.narration_service import (
     NarrationRequest,
     NarrationResponse,
 )
+from ai.provider_config import provider_missing
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -48,10 +49,7 @@ async def elevenlabs_subscription(api_key: str = Depends(get_api_key)):
 
     key = os.getenv("ELEVENLABS_API_KEY", "").strip('"').strip("'")
     if not key:
-        raise HTTPException(
-            status_code=503,
-            detail={"error": "elevenlabs_api_key_missing"},
-        )
+        raise provider_missing("elevenlabs")
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
             r = await client.get(

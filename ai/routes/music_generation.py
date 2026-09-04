@@ -11,6 +11,7 @@ from fastapi import HTTPException
 from ai.clients.storage_client import save_file_and_record
 from typing import Optional
 import base64 as _b64
+from ai.provider_config import provider_missing
 
 
 async def generate_music_stable_audio(prompt: str, duration_ms: Optional[int] = 30000) -> dict:
@@ -19,7 +20,7 @@ async def generate_music_stable_audio(prompt: str, duration_ms: Optional[int] = 
 
     aimlapi_key = (os.getenv("AIMLAPI_KEY") or "").strip()
     if not aimlapi_key:
-        raise HTTPException(status_code=500, detail="AIMLAPI_KEY is not configured on the server.")
+        raise provider_missing("aimlapi")
 
     payload = {
         "model": "stable-audio",
@@ -118,7 +119,7 @@ async def generate_music_elevenlabs(prompt: str, duration_ms: Optional[int] = 30
 
     eleven_key = (os.getenv("ELEVENLABS_API_KEY") or "").strip()
     if not eleven_key:
-        raise HTTPException(status_code=500, detail="ELEVENLABS_API_KEY is not configured on the server.")
+        raise provider_missing("elevenlabs")
 
     payload = {
         "prompt": prompt,

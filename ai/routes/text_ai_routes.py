@@ -23,6 +23,7 @@ import subprocess
 import time
 from pathlib import Path
 from ai.clients.storage_client import storage_api_key
+from ai.provider_config import provider_missing
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -2344,13 +2345,7 @@ async def m3_endpoint(
 
     api_key_val = os.getenv("MINIMAX_MULTIMODAL_API_KEY", "")
     if not api_key_val:
-        raise HTTPException(
-            status_code=500,
-            detail={
-                "error": "minimax_api_key_missing",
-                "hint": "MINIMAX_MULTIMODAL_API_KEY not configured in service env.",
-            },
-        )
+        raise provider_missing("minimax")
 
     if isinstance(prompt.prompt, str):
         user_text = prompt.prompt
@@ -2460,13 +2455,7 @@ async def deepseek_endpoint(
 
     api_key_val = os.getenv("DEEPSEEK_API_KEY", "")
     if not api_key_val:
-        raise HTTPException(
-            status_code=500,
-            detail={
-                "error": "deepseek_api_key_missing",
-                "hint": "DEEPSEEK_API_KEY not configured in service env.",
-            },
-        )
+        raise provider_missing("deepseek")
 
     if isinstance(prompt.prompt, str):
         user_text = prompt.prompt
