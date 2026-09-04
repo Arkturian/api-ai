@@ -8,7 +8,7 @@ on:
 
 jobs:
   validate-syntax:
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.RUNNER_LABEL || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@v4
       - name: Setup Python
@@ -24,7 +24,7 @@ jobs:
           python -m compileall -q -q .
 
   build-archive:
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.RUNNER_LABEL || 'ubuntu-latest' }}
     needs: validate-syntax
     outputs:
       artifact-name: deploy-archive-arkserver
@@ -60,7 +60,7 @@ jobs:
     if: |
       vars.ENABLE_ARKSERVER_DEPLOY == 'true' &&
       github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.RUNNER_LABEL || 'ubuntu-latest' }}
     environment:
       name: arkserver
       url: https://api-ai.arkserver.arkturian.com
