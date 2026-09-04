@@ -52,7 +52,11 @@ jobs:
       - name: Create deployment archive
         run: |
           echo "📦 Creating deployment archive..."
-          tar --warning=no-file-changed --ignore-failed-read -czf deploy.tar.gz \
+          # Archiv AUSSERHALB des Baums schreiben und tar-Exit 1 (nur
+          # Warnungen: "file changed"/"file is the archive") nicht als Fehler
+          # werten — auf dem self-hosted Runner (Debian 12) brach der Job
+          # hier mit Exit 1 ohne Meldung ab (04.09.); Exit 2 bleibt fatal.
+          tar --warning=no-file-changed --ignore-failed-read -czf "$RUNNER_TEMP/deploy.tar.gz" \
             --exclude='.git' \
             --exclude='.devops' \
             --exclude='.github' \
@@ -62,7 +66,8 @@ jobs:
             --exclude='venv' \
             --exclude='.env' \
             --exclude='*.log' \
-            .
+            . || [ "$?" -eq 1 ]
+          mv "$RUNNER_TEMP/deploy.tar.gz" ./deploy.tar.gz
           echo "✅ Archive created: $(du -h deploy.tar.gz)"
 
       - name: Upload artifact
