@@ -7026,12 +7026,23 @@ async def _tool_osm_nearby(args: dict) -> dict:
     # Compact endpoint returns {text, count, cached}. Pass it through
     # mostly verbatim — the text is the voice-payload, the rest is
     # diagnostic.
-    return {
+    out = {
         "text": data.get("text") or "",
         "count": int(data.get("count") or 0),
         "cached": bool(data.get("cached") or False),
         "budget_s": budget_s,
     }
+    # Quelle degradiert (alle Overpass-Spiegel gescheitert): ArTrack liefert
+    # 200 mit count=0 + degraded. Ohne Durchreichen saehe das Modell "nichts
+    # in der Naehe" und wuerde es so sagen — falsch. Mit dem Feld sagt es
+    # "Umgebung gerade nicht abrufbar" (GuideDevBot2, 05.09.).
+    if data.get("degraded"):
+        out["degraded"] = True
+        out["degraded_reason"] = str(data.get("degraded_reason") or "")[:200]
+        out["hint"] = ("Umgebungsdaten gerade nicht abrufbar (Quelle degradiert) — "
+                       "NICHT 'hier ist nichts' sagen, sondern dass die Karte "
+                       "gerade nicht antwortet.")
+    return out
 
 
 OSM_BUDGET_DEFAULT_S = 12.0

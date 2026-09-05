@@ -49,3 +49,21 @@ def test_unbrauchbares_budget_faellt_auf_default():
     assert rr._osm_budget_s(None) == 12.0
     assert rr._osm_budget_s(float("nan")) == 12.0
     assert rr._osm_budget_s(0.1) == 0.5
+
+
+def test_degradierte_quelle_wird_durchgereicht_nicht_als_leer_verkauft(monkeypatch):
+    """ArTrack 200 + count 0 + degraded (alle Spiegel gescheitert) ist KEIN
+    'nichts in der Naehe' — gemessen am Goldenen Dachl 05.09. 14:58."""
+    store = {}
+
+    class _C:
+        def __init__(self, *a, **k): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return False
+        async def get(self, url, params=None):
+            return _Resp({"text": "", "count": 0, "cached": False, "degraded": True,
+                          "degraded_reason": "all Overpass mirrors failed: https://maps.mail.ru/…"})
+    monkeypatch.setattr(rr.httpx, "AsyncClient", _C)
+    out = asyncio.run(rr._tool_osm_nearby({"lat": 47.2685, "lng": 11.3933}))
+    assert out["count"] == 0 and out["degraded"] is True
+    assert "mirrors failed" in out["degraded_reason"] and "NICHT" in out["hint"]
