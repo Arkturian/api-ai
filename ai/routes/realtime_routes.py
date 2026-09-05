@@ -6992,7 +6992,14 @@ async def _tool_osm_nearby(args: dict) -> dict:
     # mentions what's around). The compact endpoint caps at 20 hits
     # internally so a slightly larger radius doesn't blow up tokens.
     radius_m = float(args.get("radius_m", 500))
-    params = {"lat": lat, "lng": lng, "radius_m": radius_m}
+    # Zeitbudget der QUELLE (ArTrack verteilt es seit 33feabf/bfa5bca auf
+    # die Overpass-Spiegel; unter 6 s bekommt jeder < 2 s und keiner wird
+    # unter Drosselung fertig — GuideDevBot2, T17: 9/9 ok:false nach 5,06 s).
+    # Default 12 wie guide-api (18df6a1); das Modell darf es senden. Der
+    # Proxy-Timeout liegt IMMER ueber dem Budget, sonst misst man den
+    # Deckel des Proxys statt der Quelle.
+    budget_s = _osm_budget_s(args.get("budget_s"))
+    params = {"lat": lat, "lng": lng, "radius_m": radius_m, "budget_s": budget_s}
     url = f"{_artrack_api_base()}/osm/nearby/compact"
     # Timeout posture: 5.0s (PR #90, 2026-06-28). Cold Overpass queries
     # after the 1h ArTrack cache TTL can briefly exceed 2.5s
@@ -7004,7 +7011,7 @@ async def _tool_osm_nearby(args: dict) -> dict:
     # in ~17ms so the worst-case is rare per user-area. Honest hang
     # with real data beats smooth fallback to hallucinated knowledge.
     t_start = time.monotonic()
-    async with httpx.AsyncClient(timeout=5.0) as client:
+    async with httpx.AsyncClient(timeout=budget_s + 3.0) as client:
         r = await client.get(url, params=params)
         r.raise_for_status()
         data = r.json()
@@ -7023,7 +7030,24 @@ async def _tool_osm_nearby(args: dict) -> dict:
         "text": data.get("text") or "",
         "count": int(data.get("count") or 0),
         "cached": bool(data.get("cached") or False),
+        "budget_s": budget_s,
     }
+
+
+OSM_BUDGET_DEFAULT_S = 12.0
+
+
+def _osm_budget_s(raw) -> float:
+    """`budget_s` aus den Werkzeug-Argumenten: Default 12, geklemmt auf
+    ArTracks Grenzen (0.5–30). Unbrauchbares (Text, None) -> Default,
+    nie ein Fehler — ein Zahlendreher des Modells darf keine Antwort kosten."""
+    try:
+        v = float(raw)
+    except (TypeError, ValueError):
+        return OSM_BUDGET_DEFAULT_S
+    if v != v:  # NaN
+        return OSM_BUDGET_DEFAULT_S
+    return max(0.5, min(30.0, v))
 
 
 async def _tool_narration_near(args: dict) -> dict:
