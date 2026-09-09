@@ -259,6 +259,8 @@ def _cli_status(name: str = "codex") -> dict:
         ok = r.returncode == 0 and bool(out)
         status = {"ok": ok, "version": out.split()[-1] if ok else None,
                   "error": None if ok else (err or out or f"exit {r.returncode}")[-300:]}
+        if name == "codex":
+            status["auth"] = _codex_auth_status()
     except FileNotFoundError:
         status = {"ok": False, "version": None, "error": f"{name}: not found on PATH"}
     except Exception as exc:
@@ -266,6 +268,55 @@ def _cli_status(name: str = "codex") -> dict:
     status["checked_at"] = _t.strftime("%Y-%m-%dT%H:%M:%S%z")
     _cli_status_cache[name] = {"at": now, "status": status}
     return status
+
+
+def _codex_auth_status() -> dict:
+    """Anmeldezustand des codex-CLI — nur Metadaten aus auth.json, nie ein
+    Token. Anlass pdrei 09.09. (Automation): Binary ok, /health gruen, aber
+    die Anmeldung seit 14.07. nicht erneuert -> jeder Aufruf 502 "access
+    token could not be refreshed". Aufloesung wie der CLI-Lauf: CODEX_HOME,
+    sonst <CLI_HOME oder pw_dir>/.codex."""
+    import base64
+    import json as _json
+    import pwd as _pwd
+    import time as _t
+    try:
+        cli_home = os.getenv("CLI_HOME") or _pwd.getpwuid(os.getuid()).pw_dir
+        home = os.getenv("CODEX_HOME") or os.path.join(cli_home, ".codex")
+        path = os.path.join(home, "auth.json")
+        if not os.path.exists(path):
+            return {"ok": False, "reason": "auth.json fehlt", "path": path}
+        d = _json.load(open(path, "r", encoding="utf-8"))
+        tokens = d.get("tokens") or {}
+        exp = None
+        tok = tokens.get("access_token") if isinstance(tokens, dict) else None
+        if tok and tok.count(".") >= 2:
+            pl = tok.split(".")[1]
+            pl += "=" * (-len(pl) % 4)
+            exp = (_json.loads(base64.urlsafe_b64decode(pl)) or {}).get("exp")
+        now = _t.time()
+        mtime = os.path.getmtime(path)
+        out = {
+            "auth_mode": d.get("auth_mode"),
+            "last_refresh": d.get("last_refresh"),
+            "access_token_expires_at": _t.strftime("%Y-%m-%dT%H:%M:%SZ", _t.gmtime(exp)) if exp else None,
+            "age_days": round((now - mtime) / 86400, 1),
+            "has_refresh_token": bool(isinstance(tokens, dict) and tokens.get("refresh_token")),
+        }
+        if d.get("auth_mode") == "apikey" or (not tokens and d.get("OPENAI_API_KEY")):
+            out["ok"] = True
+        elif exp is None:
+            out["ok"] = False
+            out["reason"] = "kein lesbarer Access-Token"
+        elif exp > now:
+            out["ok"] = True
+        else:
+            out["ok"] = False
+            out["reason"] = ("Access-Token abgelaufen; Erneuerung beim naechsten Aufruf nur, "
+                             "wenn der Refresh-Token noch gilt — sonst 502. `codex login` als Dienstbenutzer.")
+        return out
+    except Exception as exc:
+        return {"ok": False, "reason": f"{type(exc).__name__}: {exc}"[:200]}
 
 
 def _realtime_faehigkeiten() -> list:

@@ -52,3 +52,46 @@ def test_health_traegt_das_feld(monkeypatch):
     monkeypatch.setattr(subprocess, "run", lambda *a, **k: _R(0, "codex-cli 0.153.2"))
     h = main.health_check()
     assert h["clis"]["codex"]["ok"] is True and h["clis"]["codex"]["version"] == "0.153.2"
+
+
+def _jwt(exp):
+    import base64, json as _j
+    b = lambda o: base64.urlsafe_b64encode(_j.dumps(o).encode()).rstrip(b"=").decode()
+    return f"{b({'alg':'none'})}.{b({'exp': exp})}.sig"
+
+
+def test_codex_auth_abgelaufen_ist_nicht_ok(tmp_path, monkeypatch):
+    """pdrei 09.09.: Binary 0.153.4 ok, Anmeldung vom 14.07. -> 502 beim Aufruf."""
+    import json as _j, time as _t
+    (tmp_path / "auth.json").write_text(_j.dumps({"auth_mode": "chatgpt", "last_refresh": "2026-07-14T10:00:00Z",
+        "tokens": {"access_token": _jwt(int(_t.time()) - 86400 * 40), "refresh_token": "r"}}))
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+    a = main._codex_auth_status()
+    assert a["ok"] is False and "abgelaufen" in a["reason"]
+    assert a["last_refresh"].startswith("2026-07-14") and a["has_refresh_token"] is True
+    assert "r" != a.get("refresh_token") and "access_token" not in a      # nie ein Token im Health
+
+
+def test_codex_auth_gueltig_ist_ok(tmp_path, monkeypatch):
+    import json as _j, time as _t
+    (tmp_path / "auth.json").write_text(_j.dumps({"auth_mode": "chatgpt", "last_refresh": "2026-09-04T07:07:23Z",
+        "tokens": {"access_token": _jwt(int(_t.time()) + 86400 * 5), "refresh_token": "r"}}))
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+    a = main._codex_auth_status()
+    assert a["ok"] is True and a["access_token_expires_at"].endswith("Z")
+
+
+def test_codex_auth_fehlt(tmp_path, monkeypatch):
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "leer"))
+    assert main._codex_auth_status()["ok"] is False
+
+
+def test_health_codex_traegt_auth(tmp_path, monkeypatch):
+    import json as _j, time as _t
+    _reset()
+    (tmp_path / "auth.json").write_text(_j.dumps({"auth_mode": "chatgpt",
+        "tokens": {"access_token": _jwt(int(_t.time()) + 3600)}}))
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: _R(0, "codex-cli 0.153.4"))
+    h = main.health_check()
+    assert h["clis"]["codex"]["auth"]["ok"] is True
