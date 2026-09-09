@@ -67,7 +67,7 @@ def test_codex_auth_abgelaufen_ist_nicht_ok(tmp_path, monkeypatch):
         "tokens": {"access_token": _jwt(int(_t.time()) - 86400 * 40), "refresh_token": "r"}}))
     monkeypatch.setenv("CODEX_HOME", str(tmp_path))
     a = main._codex_auth_status()
-    assert a["ok"] is False and "abgelaufen" in a["reason"]
+    assert a["ok"] is False and a["reason"] == "expired" and "abgelaufen" in a["hint"]
     assert a["last_refresh"].startswith("2026-07-14") and a["has_refresh_token"] is True
     assert "r" != a.get("refresh_token") and "access_token" not in a      # nie ein Token im Health
 
@@ -83,7 +83,18 @@ def test_codex_auth_gueltig_ist_ok(tmp_path, monkeypatch):
 
 def test_codex_auth_fehlt(tmp_path, monkeypatch):
     monkeypatch.setenv("CODEX_HOME", str(tmp_path / "leer"))
-    assert main._codex_auth_status()["ok"] is False
+    a = main._codex_auth_status()
+    assert a["ok"] is False and a["reason"] == "absent" and a["expected"] is True
+
+
+def test_codex_auth_bewusst_nicht_eingerichtet(tmp_path, monkeypatch):
+    """pdrei: kein Konsument -> CODEX_AUTH_EXPECTED=false; Waechter liest
+    expected=false und schweigt, statt taeglich 'absent' zu melden."""
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "leer"))
+    monkeypatch.setenv("CODEX_AUTH_EXPECTED", "false")
+    a = main._codex_auth_status()
+    assert a["ok"] is False and a["reason"] == "absent" and a["expected"] is False
+    assert "kein Konsument" in a["note"]
 
 
 def test_health_codex_traegt_auth(tmp_path, monkeypatch):

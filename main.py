@@ -284,8 +284,18 @@ def _codex_auth_status() -> dict:
         cli_home = os.getenv("CLI_HOME") or _pwd.getpwuid(os.getuid()).pw_dir
         home = os.getenv("CODEX_HOME") or os.path.join(cli_home, ".codex")
         path = os.path.join(home, "auth.json")
+        # Instanz-Entscheid (Automation, 09.09.): auf pdrei nutzt niemand den
+        # codex-Pfad (1 Aufruf in 30 Tagen, der war die Sonde) — dort ist
+        # "keine Anmeldung" der beschlossene Zustand, kein Befund. Ein Waechter
+        # liest `expected: false` und schweigt, statt taeglich dasselbe zu melden.
+        expected = (os.getenv("CODEX_AUTH_EXPECTED", "true").strip().lower()
+                    not in ("0", "false", "no", "nein"))
+        base = {"expected": expected}
+        if not expected:
+            base["note"] = ("codex auf dieser Instanz bewusst ohne Anmeldung — kein "
+                            "Konsument (Entscheid 2026-09-09, AiApi/Automation)")
         if not os.path.exists(path):
-            return {"ok": False, "reason": "auth.json fehlt", "path": path}
+            return {**base, "ok": False, "reason": "absent", "path": path}
         d = _json.load(open(path, "r", encoding="utf-8"))
         tokens = d.get("tokens") or {}
         exp = None
@@ -303,20 +313,23 @@ def _codex_auth_status() -> dict:
             "age_days": round((now - mtime) / 86400, 1),
             "has_refresh_token": bool(isinstance(tokens, dict) and tokens.get("refresh_token")),
         }
+        out.update(base)
         if d.get("auth_mode") == "apikey" or (not tokens and d.get("OPENAI_API_KEY")):
             out["ok"] = True
         elif exp is None:
             out["ok"] = False
-            out["reason"] = "kein lesbarer Access-Token"
+            out["reason"] = "unreadable"
+            out["hint"] = "kein lesbarer Access-Token in auth.json"
         elif exp > now:
             out["ok"] = True
         else:
             out["ok"] = False
-            out["reason"] = ("Access-Token abgelaufen; Erneuerung beim naechsten Aufruf nur, "
-                             "wenn der Refresh-Token noch gilt — sonst 502. `codex login` als Dienstbenutzer.")
+            out["reason"] = "expired"
+            out["hint"] = ("Access-Token abgelaufen; Erneuerung beim naechsten Aufruf nur, wenn "
+                           "der Refresh-Token noch gilt — sonst 502. Fix: `codex login` als Dienstbenutzer.")
         return out
     except Exception as exc:
-        return {"ok": False, "reason": f"{type(exc).__name__}: {exc}"[:200]}
+        return {"ok": False, "reason": "unreadable", "hint": f"{type(exc).__name__}: {exc}"[:200]}
 
 
 def _realtime_faehigkeiten() -> list:
