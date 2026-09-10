@@ -1005,6 +1005,45 @@ def _codex_effort_pruefen(katalog: Optional[dict], model: Optional[str],
     return True, e, levels
 
 
+_CODEX_PSEUDO_MODELS = ("codex-default", "default", "auto", "codex")
+
+
+def _codex_model_or_none(model):
+    """Pseudo-Aliasse ("codex-default", "default", "auto", "codex") heissen
+    "Abo-Standard, kein --model" — auch wenn sie ueber CODEX_VISION_MODEL
+    kommen. Vorher lief die Vision-Vorgabe NACH dem Mapping und setzte das
+    None wieder auf ein Modell (Storage, 10.09.: 26 Safety-Checks 400)."""
+    if not model:
+        return None
+    m = str(model).strip()
+    return None if m.lower() in _CODEX_PSEUDO_MODELS else m
+
+
+def _codex_vision_model() -> Optional[str]:
+    """Modell fuer Bild-Aufrufe ohne Pin. gpt-5.4-mini ist im Abo seit
+    September nicht mehr auswaehlbar ("Model metadata … not found" -> 400 ueber
+    den ChatGPT-Pfad); gpt-5.6-luna nimmt Bilder (gemessen 10.09.) und ist
+    schnell. CODEX_VISION_MODEL=codex-default heisst: kein --model."""
+    return _codex_model_or_none(os.getenv("CODEX_VISION_MODEL", "gpt-5.6-luna"))
+
+
+_CODEX_MODEL_REJECTED_MARKERS = (
+    "not supported when using Codex with a ChatGPT account",
+    "does not support model selection",
+    "Model metadata for",
+)
+
+
+def _codex_model_rejected(stdout: str) -> bool:
+    """Hat codex das --model abgelehnt? Dann ist ein zweiter Lauf OHNE --model
+    die richtige Antwort — der Abo-Standard kann alles, was hier gefragt ist —
+    statt eines 400, das beim Safety-Gate als "konnte nicht pruefen" =
+    oeffentlich ausliefern endet."""
+    if not stdout:
+        return False
+    return any(m in stdout for m in _CODEX_MODEL_REJECTED_MARKERS) and "agent_message" not in stdout
+
+
 def _codex_sandbox_args(sandbox) -> list:
     """Sandbox-Wahl fuer `codex exec` — verifiziert 2026-09-01 als Dienst-User:
     `-s read-only` laeuft im exec-Modus ohne Haengen und ohne Rueckfrage.
@@ -1093,17 +1132,13 @@ async def chatgpt_endpoint(
         # pass `--model codex-default` to the codex CLI, which rejects it with
         # "does not support model selection". Treat these known pseudo-aliases
         # as "use the subscription default" → don't pass --model at all.
-        if selected_model and selected_model.strip().lower() in (
-            "codex-default", "default", "auto", "codex",
-        ):
-            selected_model = None
-        # Vision default: image-bearing calls want a fast multimodal model, not
-        # the top reasoning model. Default to gpt-5.4-mini (env CODEX_VISION_MODEL)
-        # unless the caller pinned a model — verified 2026-07-14 with Automation
-        # as the sweet spot for KG image description (fast, multimodal, Pro-incl.,
-        # matches Alex' "not the top model"). Non-image calls keep the default.
+        selected_model = _codex_model_or_none(selected_model)
+        # Vision default: image-bearing calls without Pin nehmen ein schnelles
+        # multimodales Modell — seit 10.09. gpt-5.6-luna (gpt-5.4-mini ist im
+        # Abo nicht mehr auswaehlbar). Das Mapping laeuft DANACH nochmal, damit
+        # CODEX_VISION_MODEL=codex-default wirklich "kein --model" heisst.
         if image_paths and not selected_model:
-            selected_model = os.getenv("CODEX_VISION_MODEL", "gpt-5.4-mini")
+            selected_model = _codex_vision_model()
         if selected_model:
             cmd.extend(["--model", selected_model])
 
@@ -1193,6 +1228,18 @@ async def chatgpt_endpoint(
         sem = await _acquire_cli_slot("codex")
         try:
             result = await asyncio.to_thread(run_codex_cli)
+            # Modell abgelehnt (Abo bietet es nicht mehr)? Einmal ohne --model
+            # nachsetzen statt 400 — Storage 10.09.: 26 Safety-Checks endeten
+            # als "failed" = Quarantaene-Gate laesst durch.
+            if selected_model and "--model" in cmd and _codex_model_rejected(result.stdout or ""):
+                logger.warning(
+                    f"codex: model={selected_model!r} abgelehnt — zweiter Lauf ohne --model "
+                    f"(Abo-Standard)"
+                )
+                _i = cmd.index("--model")
+                del cmd[_i:_i + 2]
+                selected_model = None
+                result = await asyncio.to_thread(run_codex_cli)
         finally:
             sem.release()
             for _u, _p in _imgs:
