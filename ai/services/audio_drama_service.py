@@ -201,7 +201,7 @@ class AudioDramaGenerator(SpeechGenerator):
             prompt_size = len(analysis_prompt.encode('utf-8'))
         except Exception:
             prompt_size = len(analysis_prompt)
-        print(f"DIALOG[{self.request.id}]: Claude prompt bytes={prompt_size}")
+        print(f"DIALOG[{self.request.id}]: prompt bytes={prompt_size}")
 
         # Ueber den eigenen /ai/chatgpt-Pfad (codex-CLI, ChatGPT-Abo).
         #
