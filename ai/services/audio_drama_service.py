@@ -547,7 +547,10 @@ class AudioDramaGenerator(SpeechGenerator):
                             "-c:a", "libmp3lame", "-q:a", "2", str(combined.resolve())
                         ]
                         try:
-                            subprocess.run(cmd, check=True, capture_output=True, text=True)
+                            await asyncio.to_thread(
+                                subprocess.run, cmd,
+                                check=True, capture_output=True, text=True,
+                            )
                             music_path = combined
                             try:
                                 from ai.routes.dialog_routes import set_dialog_status
@@ -573,7 +576,7 @@ class AudioDramaGenerator(SpeechGenerator):
                         except Exception:
                             return 0.0
                     try:
-                        dur = _probe_dur(music_path)
+                        dur = await asyncio.to_thread(_probe_dur, music_path)
                         from ai.routes.dialog_routes import set_dialog_status
                         set_dialog_status(self.request.id, phase="generate", subphase="music_manual_downloaded", bytes=int(music_path.stat().st_size), duration_s=round(dur,3))
                     except Exception:
@@ -638,7 +641,8 @@ class AudioDramaGenerator(SpeechGenerator):
 
         if music_path:
             try:
-                leading_silence_s = _probe_music_leading_silence_seconds(music_path)
+                leading_silence_s = await asyncio.to_thread(
+                    _probe_music_leading_silence_seconds, music_path)
                 total_intro_ms_needed = int((music_delay_ms or 0)) + int(leading_silence_s * 1000) + int(intro_pause_ms or 0)
                 # Compute current intro silence before the first dialog in our sequence
                 current_intro_ms = 0
@@ -687,7 +691,8 @@ class AudioDramaGenerator(SpeechGenerator):
             except Exception:
                 return 0.0
 
-        durations = [probe_duration_seconds(p) for p in final_sequence_paths]
+        durations = await asyncio.to_thread(
+            lambda: [probe_duration_seconds(p) for p in final_sequence_paths])
         start_times = []
         current_start = 0.0
         for i in range(len(final_sequence_paths)):
@@ -726,7 +731,7 @@ class AudioDramaGenerator(SpeechGenerator):
             total_dialog_duration = float(sum(durations))
         # Include music track as separate timeline layer if present
         if music_path:
-            music_duration = probe_duration_seconds(music_path)
+            music_duration = await asyncio.to_thread(probe_duration_seconds, music_path)
             mix_timeline.append({
                 "index": len(mix_timeline),
                 "kind": "music",
@@ -758,7 +763,7 @@ class AudioDramaGenerator(SpeechGenerator):
                     'kind': 'music',
                     'path': str(music_path.resolve()),
                     'start_s': round((music_delay_ms or 0)/1000.0, 3),
-                    'duration_s': probe_duration_seconds(music_path),
+                    'duration_s': await asyncio.to_thread(probe_duration_seconds, music_path),
                     'meta': {'label':'music'}
                 })
             register_temp_dialog_chunks(self.request.id, registry)
@@ -967,7 +972,7 @@ class AudioDramaGenerator(SpeechGenerator):
                 temp_file.write(audio_bytes)
                 temp_path = Path(temp_file.name)
 
-            mean_volume = tts_service.analyze_audio_level(temp_path)
+            mean_volume = await asyncio.to_thread(tts_service.analyze_audio_level, temp_path)
             print(f"--- Audio Drama: SFX audio level: {mean_volume} dB")
 
             # Discard silent or near-silent SFX
