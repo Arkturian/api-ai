@@ -19,12 +19,16 @@ from ai.services import narration_service as n
 from ai.services import tts_service
 
 
-def _anfrage(with_timestamps):
+def _anfrage(with_timestamps, save=None):
+    """Mit Zeitstempeln ist Speichern Pflicht (seit 13.09.): Vorgabe {}."""
+    if save is None and with_timestamps:
+        save = {}
     return n.NarrationRequest(
         text="Mira trat durch das alte Steintor.",
         character=n.NarrationCharacter(name="Erzaehler", voice_id="voice-test"),
         config=n.NarrationConfig(preprocessing=False, with_timestamps=with_timestamps,
                                  language_code="de"),
+        save_options=save,
     )
 
 
@@ -32,6 +36,11 @@ def _anfrage(with_timestamps):
 def _keine_dauer(monkeypatch):
     monkeypatch.setattr(n.NarrationService, "_measure_audio_duration",
                         staticmethod(lambda b, f: 1.25))
+
+    async def fake_save(self, audio_bytes, request):
+        return 4711, "https://api-storage.arkturian.com/storage/media/4711"
+
+    monkeypatch.setattr(n.NarrationService, "_save_audio", fake_save)
 
 
 @pytest.mark.asyncio
@@ -136,3 +145,68 @@ async def test_kaputte_eintraege_werden_gezaehlt_nicht_durchgereicht(monkeypatch
     antwort = await n.NarrationService().generate(_anfrage(True))
     assert antwort.word_timestamps == [{"word": "Mira", "start": 0.0, "end": 0.3}]
     assert antwort.word_timestamps_dropped == 1
+
+
+# ---------------------------------------------------- Speichern sichtbar
+# Story/Story-Codex (13.09.): ohne save_options wird gesprochen, aber nicht
+# gespeichert — Zeichen verbraucht, audio_id null, nichts Bindbares. Und
+# Zeitstempel ohne Datei bedeuten nichts.
+
+
+@pytest.mark.asyncio
+async def test_zeitstempel_ohne_speichern_werden_vor_dem_sprechen_abgewiesen(monkeypatch):
+    from fastapi import HTTPException
+
+    async def darf_nicht(*a, **k):
+        raise AssertionError("gesprochen, obwohl 422 vorher faellig war")
+
+    monkeypatch.setattr(tts_service, "generate_elevenlabs_tts", darf_nicht)
+    with pytest.raises(HTTPException) as exc:
+        req = _anfrage(True); req.save_options = None
+        await n.NarrationService().generate(req)
+    assert exc.value.status_code == 422
+    assert exc.value.detail["error"] == "timestamps_require_save"
+
+
+@pytest.mark.asyncio
+async def test_leeres_save_options_heisst_speichern(monkeypatch):
+    async def fake(text, cfg, with_timestamps=False):
+        return b"MP3", [{"word": "Mira", "start": 0.0, "end": 0.3}]
+
+    gespeichert = {}
+
+    async def fake_save(self, audio_bytes, request):
+        gespeichert["bytes"] = audio_bytes
+        return 4711, "https://api-storage.arkturian.com/storage/media/4711"
+
+    monkeypatch.setattr(tts_service, "generate_elevenlabs_tts", fake)
+    monkeypatch.setattr(n.NarrationService, "_save_audio", fake_save)
+    req = _anfrage(True)
+    req.save_options = {}
+    antwort = await n.NarrationService().generate(req)
+    assert gespeichert["bytes"] == b"MP3"
+    assert antwort.saved is True and antwort.audio_id == 4711
+
+
+@pytest.mark.asyncio
+async def test_ohne_speichern_sagt_die_antwort_es(monkeypatch):
+    """Streaming-Pfad ohne save_options bleibt erlaubt — aber sichtbar."""
+    import sys
+
+    class _Stream:
+        def __aiter__(self):
+            async def gen():
+                yield b"MP3"
+            return gen()
+
+    class _Client:
+        def __init__(self, *a, **k):
+            self.text_to_speech = types.SimpleNamespace(convert=lambda **kw: _Stream())
+
+    stub_paket = types.ModuleType("elevenlabs"); stub_client = types.ModuleType("elevenlabs.client")
+    stub_client.AsyncElevenLabs = _Client; stub_paket.client = stub_client
+    monkeypatch.setitem(sys.modules, "elevenlabs", stub_paket)
+    monkeypatch.setitem(sys.modules, "elevenlabs.client", stub_client)
+
+    antwort = await n.NarrationService().generate(_anfrage(False))
+    assert antwort.saved is False and antwort.audio_id is None

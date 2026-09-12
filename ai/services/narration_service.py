@@ -23,6 +23,8 @@ import asyncio
 from io import BytesIO
 from typing import List, Optional
 
+from fastapi import HTTPException
+
 from pydub import AudioSegment
 from pydantic import BaseModel, Field
 
@@ -106,6 +108,11 @@ class NarrationResponse(BaseModel):
     # der unter audio_id gespeicherten Datei — gespeichert wird der
     # unveraenderte Strom, nichts wird geschnitten.
     timestamp_granularity: Optional[str] = None
+    # Ob die Datei im Storage liegt. Ohne `save_options` wird gesprochen,
+    # aber nicht gespeichert — ElevenLabs-Zeichen verbraucht, nichts
+    # Bindbares hinterlassen (Story/Story-Codex, 13.09.). Sichtbar statt
+    # aus `audio_id: null` zu erraten.
+    saved: bool = False
     # Eintraege, die den Konsumentenvertrag (story-api, 13.09.) verletzen
     # wuerden — 0 <= start < end, endliche Zahlen, nichtleeres Wort —
     # werden verworfen und hier gezaehlt statt still durchgereicht.
@@ -201,6 +208,25 @@ class NarrationService:
         """Full pipeline: preprocess → TTS → optional save."""
         t_start = time.time()
 
+        # `{}` ist eine ausdrueckliche Entscheidung zu speichern (mit
+        # Vorgaben), `None` ist keine. Bis 13.09. galt `if save_options:`,
+        # und ein leeres Objekt hiess: nicht speichern.
+        speichern = request.save_options is not None
+
+        # Wort-Zeitstempel beziehen sich per Vertrag auf die gespeicherte
+        # Datei unter audio_id. Ohne Datei bedeuten sie nichts — und die
+        # Zeichen waeren trotzdem verbraucht. Deshalb 422 VOR dem Sprechen.
+        if request.config.with_timestamps and not speichern:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "error": "timestamps_require_save",
+                    "hint": ("with_timestamps=true verlangt save_options (z.B. {}), "
+                             "weil die Zeiten auf die gespeicherte Datei unter "
+                             "audio_id bezogen sind."),
+                },
+            )
+
         # Step 1: Dramatic preprocessing (optional)
         if request.config.preprocessing:
             dramatic_script = await self._preprocess_text(request)
@@ -223,7 +249,7 @@ class NarrationService:
         # Step 3: Optional save to Storage API
         audio_id = None
         audio_url = None
-        if request.save_options:
+        if speichern:
             audio_id, audio_url = await self._save_audio(audio_bytes, request)
             logger.info(f"[Narration] Saved to storage: id={audio_id}")
 
@@ -237,6 +263,7 @@ class NarrationService:
             word_timestamps=word_timestamps,
             timestamps_source="elevenlabs_alignment" if word_timestamps is not None else None,
             timestamp_granularity="word" if word_timestamps is not None else None,
+            saved=audio_id is not None,
             word_timestamps_dropped=verworfen if word_timestamps is not None else None,
         )
 
