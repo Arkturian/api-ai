@@ -103,3 +103,46 @@ async def test_fremde_adresse_wird_anonym_geholt():
     async with _client(gesehen) as client:
         await g._hole_referenz(client, "https://fremder-host.example/storage/media/1", SCHLUESSEL)
     assert gesehen[0][1] is None
+
+
+# ---------------------------------------------------- Ursprung, nicht Hostname
+# Restfall von Story-Codex (#1794, 12.09. nach dem ersten Fix): die erste
+# Fassung verglich den Hostnamen und warf den Port weg. Ein fremder
+# Dienst auf demselben Host, anderer Port, bekam den Schluessel.
+
+
+def test_anderer_port_am_erlaubten_host_bekommt_ihn_nicht():
+    assert g._darf_schluessel_sehen("https://api-storage.arkturian.com/storage/media/1")
+    assert not g._darf_schluessel_sehen("https://api-storage.arkturian.com:8443/storage/media/1")
+    assert not g._darf_schluessel_sehen("https://api-storage.arkturian.com:444/storage/media/1")
+
+
+def test_ausdruecklicher_port_443_ist_derselbe_ursprung():
+    """Nachbarfall: 443 ausgeschrieben ist kein anderer Ursprung."""
+    assert g._darf_schluessel_sehen("https://api-storage.arkturian.com:443/storage/media/1")
+
+
+def test_konfigurierter_port_zaehlt(monkeypatch):
+    monkeypatch.setenv("STORAGE_API_URL", "https://api-storage.oneal.eu:8443")
+    assert g._darf_schluessel_sehen("https://api-storage.oneal.eu:8443/storage/media/1")
+    assert not g._darf_schluessel_sehen("https://api-storage.oneal.eu/storage/media/1")
+
+
+def test_unsinniger_port_wird_abgewiesen():
+    assert not g._darf_schluessel_sehen("https://api-storage.arkturian.com:99999/storage/media/1")
+
+
+@pytest.mark.asyncio
+async def test_umleitung_auf_anderen_port_traegt_den_schluessel_nicht_mit():
+    gesehen = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        gesehen.append((str(request.url), request.headers.get("x-api-key")))
+        if request.url.port is None:
+            return httpx.Response(302, headers={"location": "https://api-storage.arkturian.com:8443/storage/media/1"})
+        return httpx.Response(200, content=b"\x89PNG", headers={"content-type": "image/png"})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler), follow_redirects=False) as client:
+        await g._hole_referenz(client, "https://api-storage.arkturian.com/storage/media/1", SCHLUESSEL)
+    assert gesehen[0][1] == SCHLUESSEL
+    assert gesehen[1][1] is None

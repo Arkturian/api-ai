@@ -154,53 +154,74 @@ def is_openai_image_model(model: str) -> bool:
     return model.startswith("gpt-image-") or model == "dall-e-3"
 
 
-def _storage_hosts() -> set:
-    """Hosts, die den Storage-Schluessel sehen duerfen.
+def _ursprung(url: str):
+    """(Host, effektiver Port) einer https-Adresse — oder None.
 
-    Quelle ist die konfigurierte Storage-Adresse; weitere Hosts nur
-    ausdruecklich ueber STORAGE_EXTRA_HOSTS (Komma-Liste). Eine
-    Instanz mit eigenem Storage (oneal) traegt ihren dort ein.
+    Der Port gehoert zum Ursprung. `api-storage.arkturian.com:8443` ist
+    ein anderer Dienst als `api-storage.arkturian.com`, auch wenn der
+    Hostname gleich lautet (Story-Codex, #1794 Restfall: die erste
+    Fassung verglich nur den Hostnamen und gab dem fremden Port den
+    Schluessel).
+    """
+    from urllib.parse import urlparse
+
+    p = urlparse(url or "")
+    if p.scheme != "https":
+        return None
+    host = (p.hostname or "").lower()
+    if not host:
+        return None
+    try:
+        port = p.port or 443
+    except ValueError:
+        return None
+    return (host, port)
+
+
+def _storage_urspruenge() -> set:
+    """Urspruenge (Host, Port), die den Storage-Schluessel sehen duerfen.
+
+    Quelle ist die konfigurierte Storage-Adresse; weitere nur
+    ausdruecklich ueber STORAGE_EXTRA_HOSTS (Komma-Liste, mit oder ohne
+    Schema/Port). Eine Instanz mit eigenem Storage (oneal) traegt ihren
+    dort ein.
     """
     import os
-    from urllib.parse import urlparse
 
     roh = [os.getenv("STORAGE_API_URL", "https://api-storage.arkturian.com")]
     roh += [t for t in (os.getenv("STORAGE_EXTRA_HOSTS", "") or "").split(",") if t.strip()]
-    hosts = set()
+    urspruenge = set()
     for eintrag in roh:
         eintrag = eintrag.strip()
         if not eintrag:
             continue
         if "//" not in eintrag:
             eintrag = "https://" + eintrag
-        h = (urlparse(eintrag).hostname or "").lower()
-        if h:
-            hosts.add(h)
-    return hosts
+        u = _ursprung(eintrag)
+        if u:
+            urspruenge.add(u)
+    return urspruenge
 
 
 def _darf_schluessel_sehen(url: str) -> bool:
     """Darf DIESE Adresse den Storage-Schluessel bekommen?
 
-    Geprueft wird der HOST, nicht ein Teilstueck des Pfades. Der frühere
-    Test ``"/storage/media/" in url`` traf jede fremde Adresse, die
-    diesen Pfad nur nachbaut — `https://fremder-host/storage/media/1`
-    bekam den Schluessel (Issue #1794, beim Story-Abnahme-Review
-    isoliert nachgestellt).
+    Geprueft wird der URSPRUNG (https, Host, effektiver Port), nicht ein
+    Teilstueck des Pfades. Der fruehere Test ``"/storage/media/" in url``
+    traf jede fremde Adresse, die diesen Pfad nur nachbaut —
+    `https://fremder-host/storage/media/1` bekam den Schluessel (Issue
+    #1794, beim Story-Abnahme-Review isoliert nachgestellt).
 
-    Zusaetzlich Pflicht: https. Ueber http waere der Schluessel auf der
-    Leitung lesbar, und ein erzwungener Rueckfall auf http ist der
-    billigste Weg, ihn abzugreifen.
+    https ist Pflicht: ueber http waere der Schluessel auf der Leitung
+    lesbar, und ein erzwungener Rueckfall auf http ist der billigste Weg,
+    ihn abzugreifen.
     """
     from urllib.parse import urlparse
 
-    p = urlparse(url or "")
-    if p.scheme != "https":
+    u = _ursprung(url)
+    if u is None or u not in _storage_urspruenge():
         return False
-    host = (p.hostname or "").lower()
-    if host not in _storage_hosts():
-        return False
-    return "/storage/" in (p.path or "")
+    return "/storage/" in (urlparse(url).path or "")
 
 
 async def _hole_referenz(client, url: str, storage_key: str, max_spruenge: int = 3):
