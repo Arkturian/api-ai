@@ -213,6 +213,8 @@ async def generate_sfx_endpoint(
         from elevenlabs.client import AsyncElevenLabs
 
         print(f"--- SFX Gen: Generating SFX for prompt: '{request.prompt[:80]}...'")
+        from ai.services.elevenlabs_cost_tracker import elevenlabs_cost_tracker
+        elevenlabs_cost_tracker.pre_check(0, endpoint="gensfx")
         client = AsyncElevenLabs(api_key=os.getenv("ELEVENLABS_API_KEY"))
 
         audio_stream = client.text_to_sound_effects.convert(text=request.prompt)
@@ -220,6 +222,7 @@ async def generate_sfx_endpoint(
         audio_bytes = b""
         async for chunk in audio_stream:
             audio_bytes += chunk
+        elevenlabs_cost_tracker.track_sfx(caller="gensfx")
 
         if not audio_bytes:
             raise HTTPException(status_code=500, detail="ElevenLabs SFX generation returned no data.")

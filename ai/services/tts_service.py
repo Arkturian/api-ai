@@ -544,6 +544,12 @@ async def generate_elevenlabs_tts(text: str, config: ElevenLabsTTSConfig, with_t
         all_words = []
         time_offset = 0.0
 
+        # Zaehler VOR dem ersten Stueck: der ganze Text zaehlt, nicht nur
+        # das erste Stueck — sonst spraeche ein langer Text sein erstes
+        # Stueck und scheiterte am zweiten, mit verbrauchten Zeichen.
+        from ai.services.elevenlabs_cost_tracker import elevenlabs_cost_tracker
+        elevenlabs_cost_tracker.pre_check(len(text), endpoint="elevenlabs-tts")
+
         for i, chunk_text_str in enumerate(text_chunks):
             if with_timestamps:
                 # Use REST API with-timestamps endpoint directly
@@ -569,6 +575,7 @@ async def generate_elevenlabs_tts(text: str, config: ElevenLabsTTSConfig, with_t
                 audio_b64 = data.get("audio_base64", "")
                 chunk_audio = base64.b64decode(audio_b64)
                 all_audio += chunk_audio
+                elevenlabs_cost_tracker.track_tts(len(chunk_text_str), caller="tts_service_timestamps")
 
                 # Parse character-level alignment into word-level timestamps
                 alignment = data.get("alignment") or {}
@@ -624,6 +631,7 @@ async def generate_elevenlabs_tts(text: str, config: ElevenLabsTTSConfig, with_t
                 async for audio_chunk in audio_stream:
                     chunk_audio += audio_chunk
                 all_audio += chunk_audio
+                elevenlabs_cost_tracker.track_tts(len(chunk_text_str), caller="tts_service")
                 print(f"--- ElevenLabs TTS: Chunk {i+1}/{len(text_chunks)}")
 
         if with_timestamps:

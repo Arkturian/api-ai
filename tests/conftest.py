@@ -16,6 +16,11 @@ import os
 import pytest
 
 os.environ.setdefault("OPENAI_API_KEY", "x")
+# Der ElevenLabs-Zaehler schreibt Monatsdateien; im Testbaum nie nach
+# /var/lib/api-ai (nicht beschreibbar, und es waere der Produktionsstand).
+import tempfile as _tempfile
+os.environ.setdefault("ELEVENLABS_COST_TRACKER_DATA_DIR", _tempfile.mkdtemp(prefix="eleven-usage-"))
+os.environ.setdefault("ELEVENLABS_BLOCK_BEYOND_INCLUDED", "false")
 
 TEST_MARKEN = ["O'Neal", "ONE Industries", "Kini Red Bull"]
 TEST_KATEGORIEN = ["helmets-mx", "jerseys-offroad", "gloves", "goggles",

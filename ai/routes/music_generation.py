@@ -121,6 +121,9 @@ async def generate_music_elevenlabs(prompt: str, duration_ms: Optional[int] = 30
     if not eleven_key:
         raise provider_missing("elevenlabs")
 
+    from ai.services.elevenlabs_cost_tracker import elevenlabs_cost_tracker
+    elevenlabs_cost_tracker.pre_check(0, endpoint="genmusic_eleven")
+
     payload = {
         "prompt": prompt,
         "musicLengthMs": duration_ms or 30000
@@ -175,6 +178,10 @@ async def generate_music_elevenlabs(prompt: str, duration_ms: Optional[int] = 30
             raise HTTPException(status_code=r.status_code, detail=f"ElevenLabs music API returned no audio data: {body}")
 
         music_bytes = await _attempt_request(payload)
+
+        if music_bytes:
+
+            elevenlabs_cost_tracker.track_music(caller="genmusic_eleven", seconds_requested=(duration_ms or 30000) / 1000.0)
 
     if not music_bytes:
         raise HTTPException(status_code=500, detail="ElevenLabs returned no music data")

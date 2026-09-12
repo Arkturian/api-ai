@@ -337,6 +337,9 @@ class NarrationService:
         except ModuleNotFoundError:
             raise RuntimeError("ElevenLabs package required. Install with 'pip install elevenlabs'.")
 
+        from ai.services.elevenlabs_cost_tracker import elevenlabs_cost_tracker
+        elevenlabs_cost_tracker.pre_check(len(text), endpoint="narrate")
+
         client = AsyncElevenLabs(api_key=os.getenv("ELEVENLABS_API_KEY"))
 
         # `language_code` NUR, wenn der Aufrufer ihn ausdruecklich setzt.
@@ -370,6 +373,7 @@ class NarrationService:
         async for chunk in audio_stream:
             audio_bytes += chunk
 
+        elevenlabs_cost_tracker.track_tts(len(text), caller="narrate")
         return audio_bytes, None
 
     async def _save_audio(self, audio_bytes: bytes, request: NarrationRequest) -> tuple:

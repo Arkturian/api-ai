@@ -394,6 +394,37 @@ async def deepseek_cost_shared_state_track(
     return status
 
 
+class _ElevenLabsSharedTrackPayload(BaseModel):
+    modality: str
+    caller: str = "unknown"
+    units: Optional[dict] = None
+    source_host: Optional[str] = None
+
+
+@router.get("/elevenlabs-cost-shared-state")
+async def elevenlabs_cost_shared_state_get(
+    x_internal_auth: Optional[str] = Header(default=None, alias="X-Internal-Auth"),
+):
+    """Master-Sicht des ElevenLabs-Zeichenzaehlers (arkturian fragt vor
+    jedem Aufruf). Gleicher Vertrag wie die Geschwister."""
+    _verify_shared_counter_auth(x_internal_auth)
+    from ..services.elevenlabs_cost_tracker import elevenlabs_cost_tracker
+    return elevenlabs_cost_tracker.get_status()
+
+
+@router.post("/elevenlabs-cost-shared-state")
+async def elevenlabs_cost_shared_state_track(
+    payload: _ElevenLabsSharedTrackPayload,
+    x_internal_auth: Optional[str] = Header(default=None, alias="X-Internal-Auth"),
+):
+    _verify_shared_counter_auth(x_internal_auth)
+    from ..services.elevenlabs_cost_tracker import elevenlabs_cost_tracker
+    units = payload.units or {}
+    # _track_local: der Master IST die Wahrheit, kein Weiterposten.
+    elevenlabs_cost_tracker._track_local(payload.modality, payload.caller, **units)
+    return elevenlabs_cost_tracker.get_status()
+
+
 @router.get("/openai-cost-shared-state")
 async def openai_cost_shared_state_get(
     x_internal_auth: Optional[str] = Header(default=None, alias="X-Internal-Auth"),

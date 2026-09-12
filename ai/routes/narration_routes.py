@@ -87,6 +87,21 @@ async def elevenlabs_subscription(api_key: str = Depends(get_api_key)):
     }
 
 
+@router.get("/tts/elevenlabs/cost-status")
+async def elevenlabs_cost_status():
+    """Unser Zeichenzaehler plus ElevenLabs' eigene Abrechnung nebeneinander.
+
+    Story (13.09.): eine Tonengine, die je Szene fuenf Spuren erzeugt,
+    multipliziert Aufrufe auf einem Topf, der bis heute in keinem Zaehler
+    stand. Hier steht er — und die Sperre greift in jedem Pfad VOR dem
+    Sprechen (429 unser Deckel, 402 Kontingent beim Anbieter).
+    """
+    from ai.services.elevenlabs_cost_tracker import elevenlabs_cost_tracker
+    status = elevenlabs_cost_tracker.get_status()
+    status["subscription"] = elevenlabs_cost_tracker.subscription_snapshot()
+    return status
+
+
 @router.post("/tts/narrate", response_model=NarrationResponse)
 async def narrate(req: NarrationRequest, api_key: str = Depends(get_api_key)):
     """
