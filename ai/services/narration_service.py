@@ -100,6 +100,16 @@ class NarrationResponse(BaseModel):
     # ab Audiobeginn, ueber Textstuecke hinweg fortlaufend.
     word_timestamps: Optional[List[dict]] = None
     timestamps_source: Optional[str] = None
+    # "word": ElevenLabs liefert Zeichen-Alignment; die Uebersetzung in
+    # Wortintervalle passiert bei uns (Wortgrenze am Leerzeichen, erstes
+    # Zeichen = start, letztes Zeichen = end). Nullpunkt ist der Anfang
+    # der unter audio_id gespeicherten Datei — gespeichert wird der
+    # unveraenderte Strom, nichts wird geschnitten.
+    timestamp_granularity: Optional[str] = None
+    # Eintraege, die den Konsumentenvertrag (story-api, 13.09.) verletzen
+    # wuerden — 0 <= start < end, endliche Zahlen, nichtleeres Wort —
+    # werden verworfen und hier gezaehlt statt still durchgereicht.
+    word_timestamps_dropped: Optional[int] = None
 
 
 # ── Dramatic Script Agent ────────────────────────────────────────
@@ -148,6 +158,42 @@ ORIGINALTEXT:
 AUFBEREITETER TEXT:"""
 
 
+def bereinige_wortzeiten(woerter) -> tuple:
+    """Haelt den Vertrag des Konsumenten (story-api production_windows,
+    von Story am 13.09. woertlich uebermittelt): `word` str und nicht
+    leer, `start`/`end` int|float, kein bool, endlich, `0 <= start < end`,
+    Sekunden. Was das verletzt, fliegt raus und wird gezaehlt — ein
+    einziger kaputter Eintrag wuerde dort den ganzen Lauf mit 422 kippen.
+
+    Ein Wort gehoert im Konsumenten zum Fenster seines `start`; `start`
+    muss also verlaesslicher sein als `end`. Deshalb wird ein `end`, das
+    nicht groesser als `start` ist, NICHT repariert, sondern der Eintrag
+    verworfen: eine erfundene Dauer waere schlimmer als ein Loch.
+    """
+    import math
+
+    sauber = []
+    verworfen = 0
+    for w in woerter or []:
+        if not isinstance(w, dict):
+            verworfen += 1
+            continue
+        wort = w.get("word")
+        start, end = w.get("start"), w.get("end")
+        ok = (
+            isinstance(wort, str) and wort.strip() != ""
+            and isinstance(start, (int, float)) and not isinstance(start, bool)
+            and isinstance(end, (int, float)) and not isinstance(end, bool)
+            and math.isfinite(start) and math.isfinite(end)
+            and 0 <= start < end
+        )
+        if not ok:
+            verworfen += 1
+            continue
+        sauber.append({"word": wort, "start": float(start), "end": float(end)})
+    return sauber, verworfen
+
+
 class NarrationService:
     """Dramaturgical TTS — AI-enriched text → ElevenLabs → Audio."""
 
@@ -165,6 +211,9 @@ class NarrationService:
 
         # Step 2: Generate TTS via ElevenLabs
         audio_bytes, word_timestamps = await self._generate_tts(dramatic_script, request)
+        verworfen = 0
+        if word_timestamps is not None:
+            word_timestamps, verworfen = bereinige_wortzeiten(word_timestamps)
         duration_seconds = self._measure_audio_duration(
             audio_bytes,
             request.config.output_format,
@@ -187,6 +236,8 @@ class NarrationService:
             preprocessing_model="gemini" if request.config.preprocessing else None,
             word_timestamps=word_timestamps,
             timestamps_source="elevenlabs_alignment" if word_timestamps is not None else None,
+            timestamp_granularity="word" if word_timestamps is not None else None,
+            word_timestamps_dropped=verworfen if word_timestamps is not None else None,
         )
 
     @staticmethod

@@ -56,6 +56,8 @@ async def test_mit_schalter_kommen_woerter_aus_der_alignment_quelle(monkeypatch)
         {"word": "trat", "start": 0.35, "end": 0.6},
     ]
     assert antwort.timestamps_source == "elevenlabs_alignment"
+    assert antwort.timestamp_granularity == "word"
+    assert antwort.word_timestamps_dropped == 0
     assert antwort.duration_seconds == 1.25
 
 
@@ -98,3 +100,39 @@ async def test_ohne_schalter_bleibt_der_streaming_pfad(monkeypatch):
 
 def test_schalter_ist_standardmaessig_aus():
     assert n.NarrationConfig().with_timestamps is False
+
+
+# ---------------------------------------------------- Konsumentenvertrag
+# story-api production_windows() (Story, 13.09., woertlich): word str,
+# start/end int|float ohne bool, endlich, 0 <= start < end. Alles andere
+# kippt dort den ganzen Lauf mit 422.
+
+
+def test_bereinigung_haelt_den_vertrag():
+    roh = [
+        {"word": "Mira", "start": 0.0, "end": 0.3},        # gut
+        {"word": "", "start": 0.3, "end": 0.4},            # leeres Wort
+        {"word": "x", "start": 0.5, "end": 0.5},           # start == end
+        {"word": "y", "start": 0.7, "end": 0.6},           # rueckwaerts
+        {"word": "z", "start": -0.1, "end": 0.2},          # negativ
+        {"word": "n", "start": float("nan"), "end": 1.0},  # nicht endlich
+        {"word": "b", "start": True, "end": 2.0},          # bool
+        {"word": "trat", "start": 1, "end": 1.5},          # int ist erlaubt
+        "kaputt",
+    ]
+    sauber, verworfen = n.bereinige_wortzeiten(roh)
+    assert sauber == [{"word": "Mira", "start": 0.0, "end": 0.3},
+                      {"word": "trat", "start": 1.0, "end": 1.5}]
+    assert verworfen == 7
+
+
+@pytest.mark.asyncio
+async def test_kaputte_eintraege_werden_gezaehlt_nicht_durchgereicht(monkeypatch):
+    async def fake(text, cfg, with_timestamps=False):
+        return b"MP3", [{"word": "Mira", "start": 0.0, "end": 0.3},
+                        {"word": "x", "start": 0.4, "end": 0.4}]
+
+    monkeypatch.setattr(tts_service, "generate_elevenlabs_tts", fake)
+    antwort = await n.NarrationService().generate(_anfrage(True))
+    assert antwort.word_timestamps == [{"word": "Mira", "start": 0.0, "end": 0.3}]
+    assert antwort.word_timestamps_dropped == 1
