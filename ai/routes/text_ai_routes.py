@@ -649,6 +649,29 @@ def _pruefe_response_format(prompt: "Prompt", endpoint: str) -> Optional[Dict[st
                 "endpoint": endpoint,
             },
         )
+    if art == "json_object":
+        # Beide Anbieter verlangen das Wort "json" irgendwo in der
+        # Unterhaltung, sonst weisen sie den Aufruf ab. Gemessen am
+        # 12.09. gegen api.deepseek.com: 400 „Prompt must contain the
+        # word 'json' in some form". Ohne diese Pruefung kaeme das beim
+        # Aufrufer als 502 `deepseek_upstream_error` an — ein fremder
+        # Fehler in fremder Sprache fuer ein Versaeumnis, das er selbst
+        # in einem Wort beheben kann.
+        text = prompt.prompt if isinstance(prompt.prompt, str) else prompt.prompt.text
+        umfeld = f"{text or ''} {prompt.system or ''}"
+        for eintrag in (prompt.conversation_history or []):
+            umfeld += " " + str(eintrag.get("content") or "")
+        if "json" not in umfeld.lower():
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "error": "json_mode_needs_the_word_json",
+                    "hint": ("Bei response_format {\"type\": \"json_object\"} verlangt der "
+                             "Anbieter das Wort \"json\" im Prompt oder System-Prompt. "
+                             "Nenne dort das gewuenschte JSON-Format."),
+                    "endpoint": endpoint,
+                },
+            )
     return rf
 
 

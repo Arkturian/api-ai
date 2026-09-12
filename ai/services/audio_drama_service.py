@@ -151,7 +151,14 @@ class AudioDramaGenerator(SpeechGenerator):
             except Exception:
                 pass
             return override
-        print(f"DIALOG[{self.request.id}]: Analyzing script with Claude Opus…")
+        # Modell fuer die Analyse. Alexanders Vorgabe vom 12.09.: ueber das
+        # ChatGPT-Abo (codex-CLI, kostenfrei je Aufruf) statt ueber Claude
+        # Opus, und dort das staerkste Modell — gpt-6-astra mit Effort
+        # "high". Beides ist ueber die Umgebung anders setzbar, damit ein
+        # Modellwechsel kein Deploy braucht.
+        analyse_modell = os.getenv("DIALOG_ANALYSIS_MODEL", "gpt-6-astra")
+        analyse_effort = os.getenv("DIALOG_ANALYSIS_EFFORT", "high")
+        print(f"DIALOG[{self.request.id}]: Analyzing script with {analyse_modell} (effort={analyse_effort})…")
         try:
             from ai.routes.dialog_routes import set_dialog_status
             set_dialog_status(self.request.id, phase="analyze", subphase="start")
@@ -196,16 +203,23 @@ class AudioDramaGenerator(SpeechGenerator):
             prompt_size = len(analysis_prompt)
         print(f"DIALOG[{self.request.id}]: Claude prompt bytes={prompt_size}")
 
-        # Call Claude Opus via internal API endpoint
+        # Ueber den eigenen /ai/chatgpt-Pfad (codex-CLI, ChatGPT-Abo).
+        #
+        # `sandbox="read-only"` ist hier Pflicht, nicht Vorsicht: der zu
+        # analysierende Text kommt von aussen und laeuft ungefiltert in
+        # eine werkzeugfaehige CLI. Ohne Sandbox waere jeder eingereichte
+        # Dialog eine Einladung, Befehle statt Repliken zu schreiben.
         try:
-            async with httpx.AsyncClient(timeout=120) as client:
+            async with httpx.AsyncClient(timeout=300) as client:
                 resp = await client.post(
-                    "http://localhost:8000/ai/claude",
+                    "http://localhost:8000/ai/chatgpt",
                     json={
                         "prompt": analysis_prompt,
                         "system": system_prompt,
                         "max_tokens": 8000,
-                        "model": "opus"
+                        "model": analyse_modell,
+                        "effort": analyse_effort,
+                        "sandbox": "read-only",
                     },
                     headers={"X-API-Key": os.getenv("API_KEY", "")},
                 )
@@ -213,17 +227,17 @@ class AudioDramaGenerator(SpeechGenerator):
                 data = resp.json()
                 response_text = data.get("response") or data.get("message") or ""
 
-            print(f"DIALOG[{self.request.id}]: Claude Opus responded in {int((time.time()-t_start)*1000)}ms")
+            print(f"DIALOG[{self.request.id}]: {analyse_modell} responded in {int((time.time()-t_start)*1000)}ms")
             try:
                 from ai.routes.dialog_routes import set_dialog_status
-                set_dialog_status(self.request.id, phase="analyze", subphase="claude_done", duration_ms=int((time.time()-t_start)*1000))
+                set_dialog_status(self.request.id, phase="analyze", subphase="model_done", model=analyse_modell, effort=analyse_effort, duration_ms=int((time.time()-t_start)*1000))
             except Exception:
                 pass
         except Exception as e:
-            print(f"DIALOG[{self.request.id}][ERROR]: Claude call failed after {int((time.time()-t_start)*1000)}ms -> {e}")
+            print(f"DIALOG[{self.request.id}][ERROR]: {analyse_modell} call failed after {int((time.time()-t_start)*1000)}ms -> {e}")
             try:
                 from ai.routes.dialog_routes import set_dialog_status
-                set_dialog_status(self.request.id, phase="analyze", subphase="claude_error", error=str(e))
+                set_dialog_status(self.request.id, phase="analyze", subphase="model_error", model=analyse_modell, error=str(e))
             except Exception:
                 pass
             raise

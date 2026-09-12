@@ -51,7 +51,8 @@ def _umgebung(monkeypatch):
 
 
 def _prompt(**kw):
-    return t.Prompt(prompt="Gib mir JSON.", confirm_api_billing=True, **kw)
+    kw.setdefault("prompt", "Gib mir JSON.")
+    return t.Prompt(confirm_api_billing=True, **kw)
 
 
 @pytest.mark.asyncio
@@ -139,3 +140,56 @@ def test_cli_endpunkte_rufen_die_abweisung_auf(funktion, endpunkt):
     assert f'_weise_response_format_ab(prompt, endpoint="{endpunkt}")' in quelle
     vor_try = quelle.split("\n    try:")[0]
     assert "_weise_response_format_ab" in vor_try
+
+
+# --- Anbietervorgabe: das Wort "json" muss vorkommen -------------------
+# Gemessen am 12.09. gegen api.deepseek.com: ohne dieses Wort antwortet
+# der Anbieter mit 400. Ohne Vorpruefung kam das beim Aufrufer als 502
+# `deepseek_upstream_error` an — ein fremder Fehler fuer ein Versaeumnis,
+# das er in einem Wort beheben kann.
+
+
+@pytest.mark.asyncio
+async def test_json_modus_ohne_das_wort_json_wird_frueh_abgewiesen(_umgebung):
+    with pytest.raises(HTTPException) as exc:
+        await t.deepseek_endpoint(
+            t.Prompt(prompt="Nenne drei Farben.", confirm_api_billing=True,
+                     response_format={"type": "json_object"}),
+            model=None, api_key="placeholder",
+        )
+    assert exc.value.status_code == 422
+    assert exc.value.detail["error"] == "json_mode_needs_the_word_json"
+    assert "response_format" not in _umgebung
+
+
+@pytest.mark.asyncio
+async def test_das_wort_json_im_systemprompt_genuegt(_umgebung):
+    await t.deepseek_endpoint(
+        t.Prompt(prompt="Nenne drei Farben.", system="Antworte als JSON-Objekt.",
+                 confirm_api_billing=True,
+                 response_format={"type": "json_object"}),
+        model=None, api_key="placeholder",
+    )
+    assert _umgebung["response_format"] == {"type": "json_object"}
+
+
+@pytest.mark.asyncio
+async def test_das_wort_json_in_der_historie_genuegt(_umgebung):
+    await t.deepseek_endpoint(
+        t.Prompt(prompt="Und jetzt vier.", confirm_api_billing=True,
+                 conversation_history=[{"role": "user", "content": "Gib mir json."}],
+                 response_format={"type": "json_object"}),
+        model=None, api_key="placeholder",
+    )
+    assert _umgebung["response_format"] == {"type": "json_object"}
+
+
+@pytest.mark.asyncio
+async def test_textform_braucht_das_wort_nicht(_umgebung):
+    """Nachbarfall: die Vorgabe gilt nur fuer json_object."""
+    await t.deepseek_endpoint(
+        t.Prompt(prompt="Nenne drei Farben.", confirm_api_billing=True,
+                 response_format={"type": "text"}),
+        model=None, api_key="placeholder",
+    )
+    assert _umgebung["response_format"] == {"type": "text"}

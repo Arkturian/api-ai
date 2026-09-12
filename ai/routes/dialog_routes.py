@@ -294,10 +294,16 @@ async def start_dialog_job(
 
                 generator = AudioDramaGenerator(req, api_key, image_gen_func=None)
 
-                # Hard job TTL to avoid wedging a worker (e.g., 180s)
+                # Harte Laufzeitgrenze, damit kein Arbeiter haengenbleibt.
+                # 180 s reichten fuer die Analyse per Claude Opus; seit der
+                # Umstellung auf gpt-6-astra mit Effort "high" (Alexanders
+                # Vorgabe, 12.09.) denkt das Modell laenger, und danach
+                # kommt erst die eigentliche Produktion. Ueber die Umgebung
+                # setzbar, damit eine Grenze kein Deploy braucht.
+                _ttl = float(os.getenv("DIALOG_JOB_TTL_S", "900"))
                 saved_audio_obj, production_plan, generated_image_obj = await asyncio.wait_for(
                     generator.generate(),
-                    timeout=180
+                    timeout=_ttl
                 )
 
                 # Build response compatible with /ai/generate_speech
