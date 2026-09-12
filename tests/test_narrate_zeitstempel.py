@@ -1,0 +1,100 @@
+"""`/ai/tts/narrate` liefert Wort-Zeitstempel, wenn der Aufrufer sie will.
+
+Story (13.09.): "synchron zur Bildfolge" hatte bisher keinen Mechanismus —
+narrate gab nur Audio, Dauer und Skript zurueck. Die Faehigkeit lag im
+Haus: tts_service.generate_elevenlabs_tts(with_timestamps=True), vom
+Dialogpfad genutzt. Hier wird sie wiederverwendet, nicht nachgebaut.
+
+Ziel: mit Schalter kommen die Woerter der Alignment-Quelle zurueck.
+Gegenfall: ohne Schalter wird der Alignment-Pfad NICHT betreten und die
+Antwort traegt keine Zeitstempel — bestehende Aufrufer bleiben auf dem
+Streaming-Pfad (anderer Endpunkt bei ElevenLabs, anderer Klang moeglich).
+"""
+
+import types
+
+import pytest
+
+from ai.services import narration_service as n
+from ai.services import tts_service
+
+
+def _anfrage(with_timestamps):
+    return n.NarrationRequest(
+        text="Mira trat durch das alte Steintor.",
+        character=n.NarrationCharacter(name="Erzaehler", voice_id="voice-test"),
+        config=n.NarrationConfig(preprocessing=False, with_timestamps=with_timestamps,
+                                 language_code="de"),
+    )
+
+
+@pytest.fixture(autouse=True)
+def _keine_dauer(monkeypatch):
+    monkeypatch.setattr(n.NarrationService, "_measure_audio_duration",
+                        staticmethod(lambda b, f: 1.25))
+
+
+@pytest.mark.asyncio
+async def test_mit_schalter_kommen_woerter_aus_der_alignment_quelle(monkeypatch):
+    gesehen = {}
+
+    async def fake(text, cfg, with_timestamps=False):
+        gesehen["text"] = text
+        gesehen["cfg"] = cfg
+        gesehen["with_timestamps"] = with_timestamps
+        return b"MP3", [{"word": "Mira", "start": 0.0, "end": 0.31},
+                        {"word": "trat", "start": 0.35, "end": 0.6}]
+
+    monkeypatch.setattr(tts_service, "generate_elevenlabs_tts", fake)
+    antwort = await n.NarrationService().generate(_anfrage(True))
+
+    assert gesehen["with_timestamps"] is True
+    assert gesehen["cfg"].voice_id == "voice-test"
+    assert gesehen["cfg"].language_code == "de"     # der Zwang geht mit, nicht verloren
+    assert antwort.word_timestamps == [
+        {"word": "Mira", "start": 0.0, "end": 0.31},
+        {"word": "trat", "start": 0.35, "end": 0.6},
+    ]
+    assert antwort.timestamps_source == "elevenlabs_alignment"
+    assert antwort.duration_seconds == 1.25
+
+
+@pytest.mark.asyncio
+async def test_ohne_schalter_bleibt_der_streaming_pfad(monkeypatch):
+    async def darf_nicht(*a, **k):
+        raise AssertionError("Alignment-Pfad ohne Schalter betreten")
+
+    monkeypatch.setattr(tts_service, "generate_elevenlabs_tts", darf_nicht)
+
+    class _Stream:
+        def __init__(self, *a, **k):
+            pass
+
+        def __aiter__(self):
+            async def gen():
+                yield b"MP"
+                yield b"3"
+            return gen()
+
+    class _Client:
+        def __init__(self, *a, **k):
+            self.text_to_speech = types.SimpleNamespace(convert=lambda **kw: _Stream())
+
+    # Das Paket `elevenlabs` ist im Testbaum nicht installiert; der
+    # Streaming-Pfad importiert es erst beim Aufruf. Ein Stub-Modul reicht,
+    # um zu belegen, dass DIESER Pfad und nicht der Alignment-Pfad laeuft.
+    import sys
+    stub_paket = types.ModuleType("elevenlabs")
+    stub_client = types.ModuleType("elevenlabs.client")
+    stub_client.AsyncElevenLabs = _Client
+    stub_paket.client = stub_client
+    monkeypatch.setitem(sys.modules, "elevenlabs", stub_paket)
+    monkeypatch.setitem(sys.modules, "elevenlabs.client", stub_client)
+
+    antwort = await n.NarrationService().generate(_anfrage(False))
+    assert antwort.word_timestamps is None
+    assert antwort.timestamps_source is None
+
+
+def test_schalter_ist_standardmaessig_aus():
+    assert n.NarrationConfig().with_timestamps is False

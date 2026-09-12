@@ -21,7 +21,7 @@ import logging
 import time
 import asyncio
 from io import BytesIO
-from typing import Optional
+from typing import List, Optional
 
 from pydub import AudioSegment
 from pydantic import BaseModel, Field
@@ -69,6 +69,13 @@ class NarrationConfig(BaseModel):
     speed: float = Field(default=1.0, description="Speaking speed")
     preprocessing: bool = Field(default=True, description="Enable AI dramatic preprocessing")
     output_format: str = Field(default="mp3", description="Audio format")
+    # Wort-Zeitstempel aus ElevenLabs' Zeichen-Alignment — dieselbe
+    # Quelle wie im Dialogpfad. Story (13.09.) braucht sie fuer
+    # "synchron zur Bildfolge"; eine nachtraegliche Transkription
+    # lieferte Zeiten fuer das, was ein STT-Modell GEHOERT hat, nicht fuer
+    # das, was gesprochen wurde. Standard aus: bestehende Aufrufer
+    # bekommen weiter den Streaming-Pfad.
+    with_timestamps: bool = Field(default=False, description="Return word-level timestamps from ElevenLabs alignment (with-timestamps endpoint)")
 
 
 class NarrationRequest(BaseModel):
@@ -89,6 +96,10 @@ class NarrationResponse(BaseModel):
     dramatic_script: str = Field(description="The enriched script that was spoken")
     original_text: str = Field(description="Original input text")
     preprocessing_model: Optional[str] = None
+    # Nur bei config.with_timestamps: [{"word", "start", "end"}], Sekunden
+    # ab Audiobeginn, ueber Textstuecke hinweg fortlaufend.
+    word_timestamps: Optional[List[dict]] = None
+    timestamps_source: Optional[str] = None
 
 
 # ── Dramatic Script Agent ────────────────────────────────────────
@@ -153,7 +164,7 @@ class NarrationService:
         logger.info(f"[Narration] Script ready ({len(dramatic_script)} chars, {int((time.time()-t_start)*1000)}ms)")
 
         # Step 2: Generate TTS via ElevenLabs
-        audio_bytes = await self._generate_tts(dramatic_script, request)
+        audio_bytes, word_timestamps = await self._generate_tts(dramatic_script, request)
         duration_seconds = self._measure_audio_duration(
             audio_bytes,
             request.config.output_format,
@@ -174,6 +185,8 @@ class NarrationService:
             dramatic_script=dramatic_script,
             original_text=request.text,
             preprocessing_model="gemini" if request.config.preprocessing else None,
+            word_timestamps=word_timestamps,
+            timestamps_source="elevenlabs_alignment" if word_timestamps is not None else None,
         )
 
     @staticmethod
@@ -223,8 +236,24 @@ class NarrationService:
             logger.warning(f"[Narration] Preprocessing failed, using original text: {e}")
             return request.text  # Fallback: use original text
 
-    async def _generate_tts(self, text: str, request: NarrationRequest) -> bytes:
-        """Generate audio via ElevenLabs."""
+    async def _generate_tts(self, text: str, request: NarrationRequest) -> tuple:
+        """Generate audio via ElevenLabs. Returns (audio_bytes, word_timestamps|None)."""
+        if request.config.with_timestamps:
+            # Der Alignment-Pfad lebt in tts_service (with-timestamps-REST,
+            # Stueckelung mit fortlaufendem Zeitversatz) und wird vom
+            # Dialogpfad genutzt. Nicht nachbauen, wiederverwenden.
+            from ai.services import tts_service
+            cfg = tts_service.ElevenLabsTTSConfig(
+                model_id=request.config.model_id,
+                language_code=request.config.language_code,
+                voice_id=request.character.voice_id,
+                stability=request.config.stability,
+                clarity=request.config.clarity,
+            )
+            audio_bytes, words = await tts_service.generate_elevenlabs_tts(
+                text, cfg, with_timestamps=True
+            )
+            return audio_bytes, list(words or [])
         try:
             from elevenlabs.client import AsyncElevenLabs
         except ModuleNotFoundError:
@@ -263,7 +292,7 @@ class NarrationService:
         async for chunk in audio_stream:
             audio_bytes += chunk
 
-        return audio_bytes
+        return audio_bytes, None
 
     async def _save_audio(self, audio_bytes: bytes, request: NarrationRequest) -> tuple:
         """Save audio to Storage API. Returns (storage_id, url)."""

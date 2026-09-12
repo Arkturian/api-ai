@@ -14,7 +14,8 @@ def test_generate_returns_measured_audio_duration(monkeypatch):
     service = NarrationService()
 
     async def fake_generate_tts(_text, _request):
-        return b"generated-audio"
+        # seit with_timestamps (13.09.): (audio_bytes, word_timestamps|None)
+        return b"generated-audio", None
 
     async def fake_save_audio(_audio_bytes, _request):
         return 116819, "https://api-storage.arkturian.com/storage/media/116819"
