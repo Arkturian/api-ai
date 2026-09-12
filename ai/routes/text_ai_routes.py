@@ -585,6 +585,14 @@ class Prompt(BaseModel):
     # das Feld mit 422 abgewiesen statt still verschluckt, sonst haelt
     # der Aufrufer Prosa fuer JSON.
     response_format: Optional[Dict[str, Any]] = None
+    # Modellwahl im Rumpf. Der Abfrageparameter `?model=` bleibt der
+    # dokumentierte Weg und hat Vorrang; dieses Feld gibt es, weil
+    # Aufrufer es erwartungsgemaess in den Rumpf schreiben und Pydantic
+    # unbekannte Felder STILL verwirft. Gemessen am 12.09.: ein Aufruf
+    # mit {"model": "gpt-5.6-terra"} im Rumpf lief auf der Vorgabe und
+    # meldete `model: "codex-default"` zurueck — der Aufrufer hielt eine
+    # Auswertung fuer das Ergebnis eines Modells, das nie lief.
+    model: Optional[str] = None
 
 
 class AIResponse(BaseModel):
@@ -720,6 +728,7 @@ async def claude_endpoint(
     from ..services.claude_cost_tracker import claude_cost_tracker
 
     _weise_response_format_ab(prompt, endpoint="claude")
+    model = model or prompt.model
 
     try:
         # Extract prompt text
@@ -1172,6 +1181,7 @@ async def chatgpt_endpoint(
     from ..services.codex_cost_tracker import codex_cost_tracker
 
     _weise_response_format_ab(prompt, endpoint="chatgpt")
+    model = model or prompt.model
 
     try:
         # Extract prompt text and image paths
@@ -1507,6 +1517,7 @@ async def grok_endpoint(
     import json as json_module
 
     _weise_response_format_ab(prompt, endpoint="grok")
+    model = model or prompt.model
 
     try:
         if isinstance(prompt.prompt, str):
@@ -1775,6 +1786,7 @@ async def gemini_endpoint(
     from ..services.gemini_cli_cost_tracker import gemini_cli_cost_tracker
 
     _weise_response_format_ab(prompt, endpoint="gemini")
+    model = model or prompt.model
 
     # Extract prompt text and image paths
     prompt_text = ""
@@ -2095,6 +2107,8 @@ async def gemini_vision_endpoint(
     import base64
     import uuid
     import httpx
+
+    model = model or prompt.model
 
     # Vision runs over the gemini CLI / OAuth subscription (FREE) now — NOT the
     # paid Gemini Vision API. base64 images can't be handed to the CLI directly
@@ -2483,6 +2497,7 @@ async def m3_endpoint(
         prompt.confirm_api_billing, endpoint="m3"
     )
     ausgabeform = _pruefe_response_format(prompt, endpoint="m3")
+    model = model or prompt.model
 
     api_key_val = os.getenv("MINIMAX_MULTIMODAL_API_KEY", "")
     if not api_key_val:
@@ -2598,6 +2613,7 @@ async def deepseek_endpoint(
         prompt.confirm_api_billing, endpoint="deepseek"
     )
     ausgabeform = _pruefe_response_format(prompt, endpoint="deepseek")
+    model = model or prompt.model
 
     api_key_val = os.getenv("DEEPSEEK_API_KEY", "")
     if not api_key_val:
