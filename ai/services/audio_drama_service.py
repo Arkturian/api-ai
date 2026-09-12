@@ -16,6 +16,53 @@ from fastapi.encoders import jsonable_encoder
 import asyncio
 from ai.clients.storage_client import storage_api_key
 
+# Cue-Typen, die das Planungsmodell statt der beiden erwarteten Werte
+# liefert. Der Verbraucher (_produce_audio_drama) vergleicht strikt auf
+# 'dialog' bzw. 'sfx'; ein Plan mit "type": "speech" parst sauber, hat
+# aber null Dialogeinträge und lief bis 2026-09-12 in den
+# no_dialog_cues-Riegel. Aufgefallen an Alex' Dialog-Builder
+# (admin.arkturian.com/dialog.php, Analyze-Schritt).
+_DIALOG_TYPE_ALIASES = {
+    "dialog", "dialogue", "speech", "line", "spoken", "voice",
+    "narration", "narrator", "utterance", "text", "monolog", "monologue",
+}
+_SFX_TYPE_ALIASES = {"sfx", "sound", "sound_effect", "sound-effect", "soundeffect", "effect", "ambience", "ambient"}
+
+
+def normalize_production_cues(result: dict) -> int:
+    """Vereinheitlicht cue['type'] auf 'dialog' | 'sfx' | 'silence'.
+
+    Gibt die Anzahl der umgeschriebenen Einträge zurück. Ein Eintrag ohne
+    erkennbaren Typ wird nach seinen Feldern eingeordnet: mit ``text`` ist
+    er Dialog, mit ``description`` ohne ``text`` ein Geräusch. Was danach
+    immer noch keinem der beiden entspricht, bleibt unverändert — der
+    Riegel weiter unten soll echte Leerpläne weiterhin abweisen.
+    """
+    cues = result.get("production_cues")
+    if not isinstance(cues, list):
+        return 0
+    changed = 0
+    for cue in cues:
+        if not isinstance(cue, dict):
+            continue
+        raw = str(cue.get("type") or "").strip().lower().replace(" ", "_")
+        if raw in ("dialog", "sfx", "silence"):
+            continue
+        if raw in _DIALOG_TYPE_ALIASES:
+            cue["type"] = "dialog"
+            changed += 1
+        elif raw in _SFX_TYPE_ALIASES:
+            cue["type"] = "sfx"
+            changed += 1
+        elif str(cue.get("text") or "").strip():
+            cue["type"] = "dialog"
+            changed += 1
+        elif str(cue.get("description") or "").strip():
+            cue["type"] = "sfx"
+            changed += 1
+    return changed
+
+
 class AudioDramaGenerator(SpeechGenerator):
     def __init__(self, request: SpeechRequest, api_key: str, image_gen_func, db_session=None):
         super().__init__(request, api_key, image_gen_func, db_session)
@@ -133,8 +180,11 @@ class AudioDramaGenerator(SpeechGenerator):
             f"5. Background music: {music_requested}. If true, generate a detailed English music prompt (~30s track, genre, mood, tempo/BPM, instrumentation, no vocals).\n"
             f"6. Timing: pause_before_ms (0-300ms typical), pause_after_ms (100-400ms typical). Max 800ms for scene breaks. Default 0.\n"
             f"7. Output JSON with:\n"
-            f"   - 'production_cues': list of dialog cues (type, speaker, gender, voice_style, text, pause_before_ms, pause_after_ms)"
-            f" and SFX cues (type: 'sfx', description in English). SFX requested: {sfx_requested}.\n"
+            f"   - 'production_cues': list of cues. EVERY spoken line is one cue with"
+            f" \"type\": \"dialog\" exactly (fields: type, speaker, gender, voice_style, text,"
+            f" pause_before_ms, pause_after_ms). Sound effects are cues with \"type\": \"sfx\""
+            f" exactly (field: description, in English). No other value for 'type' is allowed,"
+            f" and the list must never be empty. SFX requested: {sfx_requested}.\n"
             f"   - 'music': empty list or one object with description, length_ms, start_offset_ms, intro_pause_ms.\n"
             + user_hint_text +
             f"\nTEXT TO ANALYZE:\n{self.request.content.text}"
@@ -181,6 +231,14 @@ class AudioDramaGenerator(SpeechGenerator):
         try:
             cleaned_text = response_text.strip().replace("```json", "").replace("```", "").strip()
             result = json.loads(cleaned_text)
+            _renamed = normalize_production_cues(result)
+            if _renamed:
+                print(f"DIALOG[{self.request.id}]: normalized {_renamed} cue type(s) to dialog/sfx")
+                try:
+                    from ai.routes.dialog_routes import set_dialog_status
+                    set_dialog_status(self.request.id, phase="analyze", subphase="cue_types_normalized", renamed=int(_renamed))
+                except Exception:
+                    pass
             # Enforce SFX off if not requested
             if not sfx_requested:
                 try:
@@ -276,7 +334,15 @@ class AudioDramaGenerator(SpeechGenerator):
                 set_dialog_status(self.request.id, phase="analyze", subphase="parse_error", error=str(e))
             except Exception:
                 pass
-            raise HTTPException(status_code=500, detail=f"Failed to parse production plan from Gemini. Raw response: {response.text}. Error: {e}")
+            raise HTTPException(
+                status_code=502,
+                detail={
+                    "error": "analysis_unparsable",
+                    "hint": "The planning model did not return valid JSON. Retry the request.",
+                    "raw_excerpt": (response_text or "")[:500],
+                    "exc": str(e)[:200],
+                },
+            )
 
 
     async def _produce_audio_drama(self, production_plan):

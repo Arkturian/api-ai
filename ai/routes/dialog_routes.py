@@ -331,6 +331,19 @@ async def start_dialog_job(
                 set_dialog_status(req.id, phase="cancelled")
             except asyncio.TimeoutError:
                 set_dialog_status(req.id, phase="error", error="deadline_exceeded")
+            except HTTPException as e:
+                # Fehlercode maschinenlesbar weitergeben statt ihn in einen
+                # String zu giessen: der Poller auf /ai/dialog/status soll
+                # "no_dialog_cues" auswerten koennen, ohne Text zu parsen.
+                _detail = e.detail
+                _code = _detail.get("error") if isinstance(_detail, dict) else None
+                set_dialog_status(
+                    req.id,
+                    phase="error",
+                    error=_code or str(_detail),
+                    error_status=e.status_code,
+                    error_detail=_detail if isinstance(_detail, dict) else {"message": str(_detail)},
+                )
             except Exception as e:
                 set_dialog_status(req.id, phase="error", error=str(e))
 

@@ -578,6 +578,13 @@ class Prompt(BaseModel):
     # als Prompt), ist das Pflicht — sonst ist jeder verdichtete Turn eine
     # Injektionsflaeche in eine werkzeugfaehige CLI ohne Sandbox (§14.5).
     sandbox: Optional[str] = None
+    # Strukturierte Ausgabe (3DPresenter, #1696). Wird 1:1 an die
+    # OpenAI-kompatiblen API-Pfade /ai/deepseek und /ai/m3
+    # durchgereicht. Die CLI-Pfade (/ai/claude, /ai/chatgpt,
+    # /ai/gemini, /ai/grok) kennen keinen solchen Schalter — dort wird
+    # das Feld mit 422 abgewiesen statt still verschluckt, sonst haelt
+    # der Aufrufer Prosa fuer JSON.
+    response_format: Optional[Dict[str, Any]] = None
 
 
 class AIResponse(BaseModel):
@@ -610,6 +617,61 @@ def get_api_key():
     return "placeholder"
 
 
+_ERLAUBTE_AUSGABEFORMEN = ("text", "json_object", "json_schema")
+
+
+def _pruefe_response_format(prompt: "Prompt", endpoint: str) -> Optional[Dict[str, Any]]:
+    """Gibt das durchzureichende ``response_format`` zurueck oder None.
+
+    Verworfen wird fail-closed: eine unbekannte Form ergibt 422 statt
+    eines Aufrufs, dessen Ausgabe der Anbieter frei formt.
+    """
+    rf = getattr(prompt, "response_format", None)
+    if rf is None:
+        return None
+    if not isinstance(rf, dict) or not rf.get("type"):
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "error": "invalid_response_format",
+                "hint": 'Expected an object with a "type" field, e.g. {"type": "json_object"}.',
+                "supported": list(_ERLAUBTE_AUSGABEFORMEN),
+            },
+        )
+    art = str(rf.get("type"))
+    if art not in _ERLAUBTE_AUSGABEFORMEN:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "error": "unsupported_response_format",
+                "given": art,
+                "supported": list(_ERLAUBTE_AUSGABEFORMEN),
+                "endpoint": endpoint,
+            },
+        )
+    return rf
+
+
+def _weise_response_format_ab(prompt: "Prompt", endpoint: str) -> None:
+    """CLI-Pfade koennen keine Ausgabeform erzwingen — 422 statt Stille."""
+    if getattr(prompt, "response_format", None) is None:
+        return
+    raise HTTPException(
+        status_code=422,
+        detail={
+            "error": "response_format_unsupported_on_endpoint",
+            "endpoint": endpoint,
+            "hint": (
+                "Dieser Pfad laeuft ueber ein CLI ohne Schalter fuer "
+                "strukturierte Ausgabe. Fuer erzwungenes JSON /ai/deepseek "
+                "oder /ai/m3 verwenden (beide abgerechnet), sonst das "
+                "Format im System-Prompt verlangen."
+            ),
+            "structured_endpoints": ["/ai/deepseek", "/ai/m3"],
+        },
+    )
+
+
 @router.post("/claude", response_model=AIResponse)
 async def claude_endpoint(
     prompt: Prompt,
@@ -633,6 +695,8 @@ async def claude_endpoint(
     import asyncio
     import json as json_module
     from ..services.claude_cost_tracker import claude_cost_tracker
+
+    _weise_response_format_ab(prompt, endpoint="claude")
 
     try:
         # Extract prompt text
@@ -1084,6 +1148,8 @@ async def chatgpt_endpoint(
     import json as json_module
     from ..services.codex_cost_tracker import codex_cost_tracker
 
+    _weise_response_format_ab(prompt, endpoint="chatgpt")
+
     try:
         # Extract prompt text and image paths
         prompt_text = ""
@@ -1417,6 +1483,8 @@ async def grok_endpoint(
     import subprocess
     import json as json_module
 
+    _weise_response_format_ab(prompt, endpoint="grok")
+
     try:
         if isinstance(prompt.prompt, str):
             prompt_text = prompt.prompt
@@ -1682,6 +1750,8 @@ async def gemini_endpoint(
     import os
     import json as json_module
     from ..services.gemini_cli_cost_tracker import gemini_cli_cost_tracker
+
+    _weise_response_format_ab(prompt, endpoint="gemini")
 
     # Extract prompt text and image paths
     prompt_text = ""
@@ -2389,6 +2459,7 @@ async def m3_endpoint(
     _check_minimax_billing_gate(
         prompt.confirm_api_billing, endpoint="m3"
     )
+    ausgabeform = _pruefe_response_format(prompt, endpoint="m3")
 
     api_key_val = os.getenv("MINIMAX_MULTIMODAL_API_KEY", "")
     if not api_key_val:
@@ -2426,13 +2497,17 @@ async def m3_endpoint(
         base_url=os.getenv("MINIMAX_TEXT_BASE_URL", "https://api.minimax.io/v1"),
     )
 
+    aufruf: Dict[str, Any] = {
+        "model": selected_model,
+        "messages": messages,
+        "max_tokens": prompt.max_tokens or 1000,
+        "temperature": prompt.temperature if prompt.temperature is not None else 0.7,
+    }
+    if ausgabeform:
+        aufruf["response_format"] = ausgabeform
+
     try:
-        resp = await client.chat.completions.create(
-            model=selected_model,
-            messages=messages,
-            max_tokens=prompt.max_tokens or 1000,
-            temperature=prompt.temperature if prompt.temperature is not None else 0.7,
-        )
+        resp = await client.chat.completions.create(**aufruf)
     except Exception as e:
         logger.error(f"MiniMax M3 upstream error: {e}")
         raise HTTPException(
@@ -2499,6 +2574,7 @@ async def deepseek_endpoint(
     _check_deepseek_billing_gate(
         prompt.confirm_api_billing, endpoint="deepseek"
     )
+    ausgabeform = _pruefe_response_format(prompt, endpoint="deepseek")
 
     api_key_val = os.getenv("DEEPSEEK_API_KEY", "")
     if not api_key_val:
@@ -2536,13 +2612,17 @@ async def deepseek_endpoint(
         base_url=os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1"),
     )
 
+    aufruf: Dict[str, Any] = {
+        "model": selected_model,
+        "messages": messages,
+        "max_tokens": prompt.max_tokens or 1000,
+        "temperature": prompt.temperature if prompt.temperature is not None else 0.7,
+    }
+    if ausgabeform:
+        aufruf["response_format"] = ausgabeform
+
     try:
-        resp = await client.chat.completions.create(
-            model=selected_model,
-            messages=messages,
-            max_tokens=prompt.max_tokens or 1000,
-            temperature=prompt.temperature if prompt.temperature is not None else 0.7,
-        )
+        resp = await client.chat.completions.create(**aufruf)
     except Exception as e:
         logger.error(f"DeepSeek upstream error: {e}")
         raise HTTPException(

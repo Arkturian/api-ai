@@ -174,6 +174,15 @@ async def generate_speech_endpoint(
                 "collection_id": saved_audio_obj.collection_id
             }
 
+    except HTTPException:
+        # Strukturierte Fehler unveraendert durchlassen. Der generische
+        # Zweig darunter fing sie bis 2026-09-12 mit ein und machte aus
+        # der 502 {"error": "no_dialog_cues", ...} eine 500 mit dem Dict
+        # als Text im detail — der Aufrufer sah nur noch "An error
+        # occurred during TTS generation: 502: {...}" und konnte weder
+        # Status noch Fehlercode auswerten. Aufgefallen an Alex'
+        # Dialog-Builder (admin.arkturian.com/dialog.php).
+        raise
     except Exception as e:
         print(f"--- ERROR [TTS Endpoint]: {e}")
         import traceback

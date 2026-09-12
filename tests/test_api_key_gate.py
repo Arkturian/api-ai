@@ -38,7 +38,9 @@ def test_fehlende_konfiguration_ist_laut():
     warnen — sonst haelt man sie fuer geschlossen."""
     quelle = inspect.getsource(main)
     assert 'ist NICHT gesetzt' in quelle
-    assert 'Zugangssperre (#1184) ist AUS' in quelle
+    assert 'Zugangssperre (#1184/#1755) ist AUS' in quelle
+    # Und sie nennt, WAS offen steht — eine Warnung ohne Umfang laedt zum Ueberlesen ein.
+    assert '_BEZAHLPFADE' in quelle.split('ist NICHT gesetzt')[1][:400]
 
 
 def test_gcp_webhook_bleibt_offen():
@@ -63,11 +65,44 @@ def test_abweisung_nennt_den_grund_ohne_den_schluessel_zu_verraten():
     assert 'erwartet' not in quelle.split('JSONResponse')[1]
 
 
-def test_nur_ai_pfade_sind_betroffen():
-    """`/health` und `/docs` muessen erreichbar bleiben — sonst meldet
-    jede Ueberwachung den Dienst als tot."""
+def test_nur_bezahlpfade_sind_betroffen():
+    """Seit #1755 greift die Sperre nach Kostenklasse, nicht auf allem
+    unter `/ai/`. `/health` und `/docs` muessen ohnehin erreichbar
+    bleiben — sonst meldet jede Ueberwachung den Dienst als tot."""
     quelle = inspect.getsource(main._require_api_key)
-    assert 'not pfad.startswith("/ai/")' in quelle
+    assert 'not _ist_bezahlpfad(pfad)' in quelle
+    assert not main._ist_bezahlpfad("/health")
+    assert not main._ist_bezahlpfad("/docs")
+
+
+def test_bezahlpfade_sind_erfasst():
+    """Der Befund aus #1755, Pfad fuer Pfad."""
+    for pfad in ("/ai/deepseek", "/ai/m3", "/ai/genimage",
+                 "/ai/genvideo/kling", "/ai/gen3d", "/ai/transcribe",
+                 "/ai/tts/narrate", "/ai/tts/minimax", "/ai/genmusic",
+                 "/ai/genmusic_eleven", "/ai/gensfx", "/ai/music",
+                 "/ai/scene/generate-images", "/ai/generate_speech",
+                 "/ai/dialog/start"):
+        assert main._ist_bezahlpfad(pfad), pfad
+
+
+def test_cli_pfade_bleiben_frei():
+    """Der Gegenfall — und der eigentliche Grund, warum das Tor ein Jahr
+    lang nicht scharf war: diese Pfade laufen ueber Abos, kosten je
+    Aufruf nichts und trugen am 01.09. 758 anonyme Aufrufe die Woche."""
+    for pfad in ("/ai/claude", "/ai/chatgpt", "/ai/gemini", "/ai/grok",
+                 "/ai/models", "/ai/claude/cost-status",
+                 "/ai/gemini/cost-status"):
+        assert not main._ist_bezahlpfad(pfad), pfad
+
+
+def test_praefix_endet_an_der_segmentgrenze():
+    """Nachbarfall: ein nackter Praefixvergleich faenge auch Namen, die
+    nur so anfangen — und sperrte spaeter etwas Unbeabsichtigtes."""
+    assert not main._ist_bezahlpfad("/ai/m3x")
+    assert not main._ist_bezahlpfad("/ai/musicbox")
+    assert not main._ist_bezahlpfad("/ai/transcribex")
+    assert main._ist_bezahlpfad("/ai/m3")
 
 
 # ----------------------------------------------------- Verhalten, nicht Form
@@ -83,16 +118,16 @@ def _client(monkeypatch, schluessel=None):
     return TestClient(main.app, raise_server_exceptions=False)
 
 
-def test_mit_schluessel_gesetzt_wird_ohne_kopf_abgewiesen(monkeypatch):
+def test_bezahlpfad_ohne_kopf_wird_abgewiesen(monkeypatch):
     c = _client(monkeypatch, "geheim-test")
-    r = c.post("/ai/chatgpt", json={"prompt": "x"})
+    r = c.post("/ai/deepseek", json={"prompt": "x"})
     assert r.status_code == 401
     assert r.json()["detail"]["error"] == "api_key_required"
 
 
 def test_falscher_schluessel_wird_abgewiesen(monkeypatch):
     c = _client(monkeypatch, "geheim-test")
-    r = c.post("/ai/chatgpt", json={"prompt": "x"},
+    r = c.post("/ai/deepseek", json={"prompt": "x"},
                headers={"X-API-KEY": "falsch"})
     assert r.status_code == 401
 
@@ -102,9 +137,20 @@ def test_richtiger_schluessel_kommt_durch(monkeypatch):
     (Kostenbremse, fehlender Anbieterschluessel), ist nicht Sache der
     Sperre."""
     c = _client(monkeypatch, "geheim-test")
-    r = c.post("/ai/chatgpt", json={"prompt": "x"},
+    r = c.post("/ai/deepseek", json={"prompt": "x"},
                headers={"X-API-KEY": "geheim-test"})
     assert r.status_code != 401
+
+
+def test_cli_pfad_bleibt_auch_scharf_ohne_schluessel_offen(monkeypatch):
+    """Der Fall, der das Scharfschalten bisher verhindert hat: mit
+    gesetztem Schluessel muss /ai/chatgpt ohne Kopf weiter durchkommen.
+    Nicht-401 heisst hier nicht 'erfolgreich' — der Endpunkt darf danach
+    an der Kostenbremse oder am CLI scheitern."""
+    c = _client(monkeypatch, "geheim-test")
+    r = c.post("/ai/chatgpt", json={"prompt": "x"})
+    if r.status_code == 401:
+        assert r.json().get("detail", {}).get("error") != "api_key_required"
 
 
 def test_webhook_kommt_auch_ohne_schluessel_durch(monkeypatch):

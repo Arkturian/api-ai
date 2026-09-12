@@ -113,13 +113,67 @@ _OFFENE_PFADE = (
     "/ai/realtime/token",
 )
 
+# ---------------------------------------------------------------- #1755
+# TOR NACH KOSTENKLASSE — der Schluessel wird nur dort verlangt, wo ein
+# Aufruf echtes Geld kostet.
+#
+# Warum nicht auf allen /ai/-Pfaden: Die CLI-Pfade (/ai/claude,
+# /ai/chatgpt, /ai/gemini, /ai/grok) laufen ueber Alexanders Abos und
+# kosten je Aufruf nichts. Sie tragen die Last: am 01.09. gezaehlte 758
+# anonyme Aufrufe je Woche. Ein Schluesselzwang dort haette beim
+# Scharfschalten jeden dieser Aufrufer gebrochen — „wer abweist, wird
+# zuletzt scharf". Die Bezahlpfade dagegen wurden in sieben Tagen
+# (03.-10.09., beide Hosts) 15-mal gerufen, alle aus dem Haus, keiner
+# von aussen. Dort kostet ein Zwang niemanden etwas und schuetzt drei
+# Geldtoepfe.
+#
+# `confirm_api_billing` ersetzt das NICHT: das ist eine Selbsterklaerung
+# des Aufrufers, keine Authentifizierung.
+#
+# Aufgenommen ist jeder Pfad, der einen bezahlten Anbieter erreicht —
+# auch /ai/generate_speech und /ai/dialog/*, die im Befund von #1755
+# nicht aufgezaehlt sind: sie erzeugen Sprache ueber OpenAI/ElevenLabs
+# und sind damit Bezahlpfade wie die uebrigen. Ein Bezahlpfad, der in
+# einer Liste der Bezahlpfade fehlt, ist der teurere Fehler. Folge:
+# Alexanders Dialog-Bauer (admin.arkturian.com/dialog.php) muss den
+# Kopf `X-API-KEY` mitschicken, bevor das Tor scharf geschaltet wird.
+_BEZAHLPFADE = (
+    "/ai/deepseek",
+    "/ai/m3",
+    "/ai/genimage",
+    "/ai/genvideo",
+    "/ai/gen3d",
+    "/ai/transcribe",
+    "/ai/tts",
+    "/ai/genmusic",
+    "/ai/genmusic_eleven",
+    "/ai/gensfx",
+    "/ai/music",
+    "/ai/scene",
+    "/ai/generate_speech",
+    "/ai/dialog",
+)
+
+
+def _ist_bezahlpfad(pfad: str) -> bool:
+    """Trifft der Pfad einen Anbieter, der pro Aufruf abrechnet?
+
+    Verglichen wird auf Segmentgrenze, nicht als nackter Praefix: sonst
+    faenge `/ai/m3` auch ein spaeteres `/ai/m3x`, und `/ai/music` auch
+    `/ai/musicbox`.
+    """
+    for kandidat in _BEZAHLPFADE:
+        if pfad == kandidat or pfad.startswith(kandidat + "/"):
+            return True
+    return False
+
 if not os.getenv(_API_KEY_ENV):
     # Laut, nicht still: Eine Sperre, die mangels Konfiguration nicht
     # greift, ist genau die Art Luecke, die man fuer geschlossen haelt.
     logging.getLogger("api-ai.authwatch").warning(
-        "%s ist NICHT gesetzt — die Zugangssperre (#1184) ist AUS, "
-        "alle /ai/*-Endpunkte sind offen erreichbar. Schluessel setzen, "
-        "um sie scharf zu schalten.", _API_KEY_ENV,
+        "%s ist NICHT gesetzt — die Zugangssperre (#1184/#1755) ist AUS, "
+        "die Bezahlpfade (%s) sind offen erreichbar. Schluessel setzen, "
+        "um sie scharf zu schalten.", _API_KEY_ENV, ", ".join(_BEZAHLPFADE),
     )
 
 
@@ -129,7 +183,7 @@ async def _require_api_key(request, call_next):
     if not erwartet:
         return await call_next(request)
     pfad = request.url.path
-    if not pfad.startswith("/ai/") or pfad in _OFFENE_PFADE:
+    if not _ist_bezahlpfad(pfad) or pfad in _OFFENE_PFADE:
         return await call_next(request)
     geliefert = request.headers.get(_KEY_HEADER) or ""
     # `compare_digest` statt `==`: gleiche Laufzeit unabhaengig davon,
