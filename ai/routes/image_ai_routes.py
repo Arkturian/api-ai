@@ -154,6 +154,84 @@ def is_openai_image_model(model: str) -> bool:
     return model.startswith("gpt-image-") or model == "dall-e-3"
 
 
+def _storage_hosts() -> set:
+    """Hosts, die den Storage-Schluessel sehen duerfen.
+
+    Quelle ist die konfigurierte Storage-Adresse; weitere Hosts nur
+    ausdruecklich ueber STORAGE_EXTRA_HOSTS (Komma-Liste). Eine
+    Instanz mit eigenem Storage (oneal) traegt ihren dort ein.
+    """
+    import os
+    from urllib.parse import urlparse
+
+    roh = [os.getenv("STORAGE_API_URL", "https://api-storage.arkturian.com")]
+    roh += [t for t in (os.getenv("STORAGE_EXTRA_HOSTS", "") or "").split(",") if t.strip()]
+    hosts = set()
+    for eintrag in roh:
+        eintrag = eintrag.strip()
+        if not eintrag:
+            continue
+        if "//" not in eintrag:
+            eintrag = "https://" + eintrag
+        h = (urlparse(eintrag).hostname or "").lower()
+        if h:
+            hosts.add(h)
+    return hosts
+
+
+def _darf_schluessel_sehen(url: str) -> bool:
+    """Darf DIESE Adresse den Storage-Schluessel bekommen?
+
+    Geprueft wird der HOST, nicht ein Teilstueck des Pfades. Der frühere
+    Test ``"/storage/media/" in url`` traf jede fremde Adresse, die
+    diesen Pfad nur nachbaut — `https://fremder-host/storage/media/1`
+    bekam den Schluessel (Issue #1794, beim Story-Abnahme-Review
+    isoliert nachgestellt).
+
+    Zusaetzlich Pflicht: https. Ueber http waere der Schluessel auf der
+    Leitung lesbar, und ein erzwungener Rueckfall auf http ist der
+    billigste Weg, ihn abzugreifen.
+    """
+    from urllib.parse import urlparse
+
+    p = urlparse(url or "")
+    if p.scheme != "https":
+        return False
+    host = (p.hostname or "").lower()
+    if host not in _storage_hosts():
+        return False
+    return "/storage/" in (p.path or "")
+
+
+async def _hole_referenz(client, url: str, storage_key: str, max_spruenge: int = 3):
+    """Holt eine Adresse und entscheidet JE SPRUNG neu ueber den Schluessel.
+
+    Umleitungen werden von Hand verfolgt statt ueber
+    ``follow_redirects=True``: httpx entfernt beim Hostwechsel nur
+    ``Authorization``, eigene Kopfzeilen wie ``X-API-KEY`` nimmt es mit.
+    Eine Storage-Adresse, die auf einen fremden Host umleitet, haette den
+    Schluessel also dorthin getragen (Issue #1794, zweiter Fall).
+    """
+    ziel = url
+    for _ in range(max_spruenge + 1):
+        headers = {}
+        if _darf_schluessel_sehen(ziel):
+            headers["X-API-KEY"] = storage_key
+        r = await client.get(ziel, headers=headers)
+        if r.status_code in (301, 302, 303, 307, 308):
+            ort = r.headers.get("location")
+            if not ort:
+                return r
+            from urllib.parse import urljoin
+            ziel = urljoin(ziel, ort)
+            continue
+        return r
+    raise HTTPException(
+        status_code=422,
+        detail={"error": "reference_image_too_many_redirects", "url": url},
+    )
+
+
 async def _download_reference_images(urls: List[str]) -> List[tuple]:
     """Fetch reference image bytes for OpenAI /v1/images/edits multipart upload.
 
@@ -169,13 +247,13 @@ async def _download_reference_images(urls: List[str]) -> List[tuple]:
 
     out = []
     storage_key = storage_api_key()
-    async with httpx.AsyncClient(timeout=60.0, follow_redirects=True) as client:
+    # follow_redirects bewusst AUS: die Sprünge werden in
+    # ``_hole_referenz`` von Hand verfolgt, damit der Schluessel je Sprung
+    # neu entschieden wird.
+    async with httpx.AsyncClient(timeout=60.0, follow_redirects=False) as client:
         for i, url in enumerate(urls):
-            headers = {}
-            if "/storage/media/" in url:
-                headers["X-API-KEY"] = storage_key
             try:
-                r = await client.get(url, headers=headers)
+                r = await _hole_referenz(client, url, storage_key)
                 r.raise_for_status()
             except httpx.HTTPError as e:
                 raise HTTPException(
