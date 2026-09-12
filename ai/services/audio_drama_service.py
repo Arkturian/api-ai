@@ -314,12 +314,21 @@ class AudioDramaGenerator(SpeechGenerator):
                     status_code=502,
                     detail={
                         "error": "no_dialog_cues",
+                        # Der Hinweis sagt nur noch, was messbar ist. Bis
+                        # zum 12.09. behauptete er eine Ursache ("planning-LLM
+                        # caprice, more likely with very short inputs"), die
+                        # falsch war: der Planer benannte den Cue-Typ
+                        # abweichend, weil der Prompt das erwartete Wort nie
+                        # nannte. Ein Aufrufer baute seine Wiederholungslogik
+                        # auf diese Behauptung — eine falsche Ursache im
+                        # Fehlertext richtet mehr an als gar keine.
                         "hint": (
-                            "The AI production plan parsed cleanly but contained "
-                            "no dialog cues (planning-LLM caprice, more likely "
-                            "with very short inputs). Retry the request; for "
-                            "single-narrator TTS without music prefer "
-                            "/ai/tts/narrate which has no planning step."
+                            "The production plan parsed cleanly but contained "
+                            "no spoken lines. Most likely the input has no "
+                            "recognisable dialogue — mark speakers as "
+                            "'Name: text'. For single-narrator TTS without "
+                            "music prefer /ai/tts/narrate, which has no "
+                            "planning step."
                         ),
                     },
                 )
