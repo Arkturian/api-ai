@@ -450,6 +450,21 @@ async def generate_with_openai_image(
     from ai.services.openai_cost_tracker import openai_cost_tracker
     openai_cost_tracker.track_image(model=model, num_images=1)
 
+    # Was OpenAI selbst abgerechnet hat, protokollieren — der Zaehler
+    # rechnet je Bild mit einem festen Satz und kennt weder Groesse noch
+    # Qualitaet. Solange niemand die gemeldeten Bild-Token mitschreibt,
+    # ist jede Aussage "was kostet 1024 gegenueber 2048" eine Schaetzung.
+    # Anlass: Story brauchte am 12.09. eine Kostenschaetzung je Groesse
+    # und ich konnte keine belegen.
+    _usage = body.get("usage") or {}
+    logger.info(
+        "OpenAI image abgerechnet: model=%s size=%s quality=%s "
+        "input_tokens=%s output_tokens=%s total_tokens=%s",
+        model, size, requested_quality,
+        _usage.get("input_tokens"), _usage.get("output_tokens"),
+        _usage.get("total_tokens"),
+    )
+
     logger.info(f"Saved OpenAI image to storage: ID={saved_obj.id}")
 
     return {

@@ -84,6 +84,11 @@ def test_explizites_format_wird_nicht_ueberschrieben(monkeypatch):
 def test_ffprobe_dauer_echt():
     """Echte Dauer aus ffprobe: 1,5 s Stille als WAV."""
     import subprocess
+    # 120 s statt 30 s: der Aufruf erzeugt 1,5 s Stille und braucht im
+    # Leerlauf Millisekunden. Am 12.09. lief er waehrend eines parallelen
+    # Deploys in den Zeitablauf — der Test misst dann die Auslastung der
+    # Maschine, nicht die Dauererkennung. Ein Test, der unter Last kippt,
+    # entwertet die ganze Suite als Signal.
     wav = subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "anullsrc=r=16000:cl=mono",
-                          "-t", "1.5", "-f", "wav", "-"], capture_output=True, timeout=30).stdout
+                          "-t", "1.5", "-f", "wav", "-"], capture_output=True, timeout=120).stdout
     assert wav and abs(_ORIG_DAUER(wav) - 1.5) < 0.05
