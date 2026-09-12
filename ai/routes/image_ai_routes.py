@@ -30,7 +30,9 @@ class ImageGenRequest(BaseModel):
     model: Optional[str] = Field(
         default="gpt-image-2",
         description=(
-            "Model. WORKING (OpenAI key set, pay-as-you-go -> needs "
+            "Model. SUBSCRIPTION (0 EUR, codex image_gen, no size control, "
+            "transparent ok): codex-imagegen (aliases gpt-image-2-abo, imagegen). "
+            "WORKING (OpenAI key set, pay-as-you-go -> needs "
             "confirm_api_billing=true): gpt-image-2 (default), gpt-image-1.5, "
             "gpt-image-1 (only one with background=transparent), "
             "gpt-image-1-mini, dall-e-3. "
@@ -121,6 +123,11 @@ MODEL_MAPPING = {
     "image-01": "image-01",
 
     # OpenAI GPT Image family (pay-as-you-go, gated via confirm_api_billing)
+    # Abo-Pfad: codex-CLI mit eingebautem image_gen, 0 EUR je Bild, keine
+    # Pixelgroesse vorgebbar (ai/services/codex_imagegen.py).
+    "codex-imagegen": "codex-imagegen",
+    "gpt-image-2-abo": "codex-imagegen",
+    "imagegen": "codex-imagegen",
     "gpt-image-2": "gpt-image-2",
     "gpt-image-1": "gpt-image-1",
     "gpt-image-1.5": "gpt-image-1.5",
@@ -154,6 +161,21 @@ def is_openai_image_model(model: str) -> bool:
     return model.startswith("gpt-image-") or model == "dall-e-3"
 
 
+def is_codex_image_model(model: str) -> bool:
+    return model == "codex-imagegen"
+
+
+def prompt_mit_negativ(prompt: str, negative_prompt: Optional[str]) -> str:
+    """OpenAIs Bild-API kennt keinen Negativ-Parameter. Bis 12.09. stand
+    `negative_prompt` nur im Schema und ging nirgends hin — Story schickte
+    'text labels, watermarks' und bekam ein Tor mit Gravur (#1797). Der
+    einzige Weg, den die API bietet, ist der Prompt selbst."""
+    neg = (negative_prompt or "").strip()
+    if not neg:
+        return prompt
+    return f"{prompt.rstrip()}\n\nDo not include: {neg}."
+
+
 def _ursprung(url: str):
     """(Host, effektiver Port) einer https-Adresse — oder None.
 
@@ -166,13 +188,23 @@ def _ursprung(url: str):
     from urllib.parse import urlparse
 
     p = urlparse(url or "")
-    if p.scheme != "https":
-        return None
     host = (p.hostname or "").lower()
     if not host:
         return None
+    # http nur auf der Schleife: dort verlaesst der Schluessel den Rechner
+    # nicht, das Leitungs-Argument greift nicht. oneal spricht seinen
+    # eigenen Storage als http://127.0.0.1:8001 an — mit reiner
+    # https-Pflicht haette die Instanz ihre eigenen privaten Referenzen
+    # anonym geholt und waere daran gescheitert (gelesen am 12.09.).
+    schleife = host in ("127.0.0.1", "localhost", "::1")
+    if p.scheme == "https":
+        vorgabe = 443
+    elif p.scheme == "http" and schleife:
+        vorgabe = 80
+    else:
+        return None
     try:
-        port = p.port or 443
+        port = p.port or vorgabe
     except ValueError:
         return None
     return (host, port)
@@ -212,9 +244,10 @@ def _darf_schluessel_sehen(url: str) -> bool:
     `https://fremder-host/storage/media/1` bekam den Schluessel (Issue
     #1794, beim Story-Abnahme-Review isoliert nachgestellt).
 
-    https ist Pflicht: ueber http waere der Schluessel auf der Leitung
-    lesbar, und ein erzwungener Rueckfall auf http ist der billigste Weg,
-    ihn abzugreifen.
+    https ist Pflicht — ausser auf der Schleife (127.0.0.1, localhost,
+    ::1), wo nichts auf die Leitung geht. Ueber http nach draussen waere
+    der Schluessel lesbar, und ein erzwungener Rueckfall auf http ist der
+    billigste Weg, ihn abzugreifen.
     """
     from urllib.parse import urlparse
 
@@ -1033,6 +1066,22 @@ async def generate_image_endpoint(
                 link_id=request.link_id,
             )
 
+        elif is_codex_image_model(actual_model):
+            # ChatGPT-Abo ueber das codex-CLI: kein Schluessel, kein Zaehler,
+            # keine Groessenzusage. Kein Billing-Tor — es faellt nichts an.
+            from ai.services.codex_imagegen import generate_with_codex_imagegen
+            result = await generate_with_codex_imagegen(
+                prompt=request.prompt,
+                collection_id=request.collection_id or "ai-generated-images",
+                link_id=request.link_id,
+                negative_prompt=request.negative_prompt,
+                aspect_ratio=request.aspect_ratio,
+                background=request.background,
+                image_size=request.image_size,
+                width=request.width,
+                height=request.height,
+            )
+
         elif is_openai_image_model(model_name) or is_openai_image_model(actual_model):
             # OpenAI Images API (gpt-image-2, gpt-image-1, gpt-image-1.5,
             # dall-e-3) — pay-as-you-go, billed against OPENAI_API_KEY.
@@ -1040,7 +1089,7 @@ async def generate_image_endpoint(
                 request.confirm_api_billing, endpoint=f"openai-{actual_model}"
             )
             result = await generate_with_openai_image(
-                prompt=request.prompt,
+                prompt=prompt_mit_negativ(request.prompt, request.negative_prompt),
                 model=actual_model,
                 collection_id=request.collection_id or "ai-generated-images",
                 link_id=request.link_id,
@@ -1062,11 +1111,18 @@ async def generate_image_endpoint(
         # dimensions from aspect_ratio + image_size, so request.width is just
         # a default placeholder (1024) that would lie about reality. The
         # provider handler puts real dims into `result`; preserve those.
-        return {
+        antwort = {
             **result,
             "model": model_name,
             "actual_model": actual_model,
         }
+        if request.negative_prompt and "negative_prompt_applied" not in antwort:
+            # Nur die Pfade, die es wirklich einfalten, sagen "folded"; alle
+            # anderen sagen ehrlich, dass es verworfen wurde (#1797).
+            antwort["negative_prompt_applied"] = (
+                "folded_into_prompt" if is_openai_image_model(actual_model) else "ignored_by_provider"
+            )
+        return antwort
 
     except HTTPException:
         raise
