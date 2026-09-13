@@ -88,6 +88,11 @@ class NarrationRequest(BaseModel):
     config: NarrationConfig = NarrationConfig()
     save_options: Optional[dict] = Field(default=None, description="Storage API save options")
     collection_id: Optional[str] = Field(default=None, description="Storage collection ID")
+    # Kennung des Aufrufers (8-128 Zeichen, [A-Za-z0-9_.:-]). Mit ihr gibt
+    # es dauerhaften Status (GET /ai/tts/narrate/{request_id}) und
+    # payloadgebundene Idempotenz: dieselbe Kennung mit demselben Inhalt
+    # spricht nie zweimal (Content #4976, p-b12b0d4d6062).
+    request_id: Optional[str] = Field(default=None, description="Caller-chosen id for durable status + idempotent replay")
 
 
 class NarrationResponse(BaseModel):
@@ -113,6 +118,9 @@ class NarrationResponse(BaseModel):
     # Bindbares hinterlassen (Story/Story-Codex, 13.09.). Sichtbar statt
     # aus `audio_id: null` zu erraten.
     saved: bool = False
+    request_id: Optional[str] = None
+    # true: Ergebnis aus dem Auftragsbuch, kein Anbieteraufruf, keine Zeichen.
+    replayed: bool = False
     # Eintraege, die den Konsumentenvertrag (story-api, 13.09.) verletzen
     # wuerden — 0 <= start < end, endliche Zahlen, nichtleeres Wort —
     # werden verworfen und hier gezaehlt statt still durchgereicht.
@@ -236,7 +244,12 @@ class NarrationService:
         logger.info(f"[Narration] Script ready ({len(dramatic_script)} chars, {int((time.time()-t_start)*1000)}ms)")
 
         # Step 2: Generate TTS via ElevenLabs
+        if request.request_id:
+            from ai.services import narrate_jobs
+            narrate_jobs.stufe(request.request_id, "tts")
         audio_bytes, word_timestamps = await self._generate_tts(dramatic_script, request)
+        if request.request_id:
+            narrate_jobs.stufe(request.request_id, "save")
         verworfen = 0
         if word_timestamps is not None:
             word_timestamps, verworfen = bereinige_wortzeiten(word_timestamps)

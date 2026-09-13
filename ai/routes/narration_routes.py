@@ -102,6 +102,19 @@ async def elevenlabs_cost_status():
     return status
 
 
+@router.get("/tts/narrate/{request_id}")
+async def narrate_status(request_id: str):
+    """Dauerhafter Status eines narrate-Auftrags mit request_id. 404 fuer
+    unbekannte Kennungen; `preview` ist ein Endpunkt, keine Kennung."""
+    from ai.services import narrate_jobs
+    if request_id == "preview" or not narrate_jobs.request_id_ok(request_id):
+        raise HTTPException(status_code=404, detail={"error": "unknown_request_id", "request_id": request_id})
+    d = narrate_jobs.lesen(request_id)
+    if not d:
+        raise HTTPException(status_code=404, detail={"error": "unknown_request_id", "request_id": request_id})
+    return d
+
+
 @router.post("/tts/narrate", response_model=NarrationResponse)
 async def narrate(req: NarrationRequest, api_key: str = Depends(get_api_key)):
     """
@@ -117,12 +130,51 @@ async def narrate(req: NarrationRequest, api_key: str = Depends(get_api_key)):
     Returns audio (optionally saved to Storage API) + the dramatic script used.
     """
     service = NarrationService()
+    from ai.services import narrate_jobs
+    rid = req.request_id
+    if rid:
+        if not narrate_jobs.request_id_ok(rid):
+            raise HTTPException(status_code=422, detail={"error": "invalid_request_id",
+                                "hint": "8-128 Zeichen aus [A-Za-z0-9_.:-]"})
+        h = narrate_jobs.payload_hash(req)
+        alt_eintrag = narrate_jobs.lesen(rid)
+        if alt_eintrag:
+            if alt_eintrag.get("payload_hash") != h:
+                raise HTTPException(status_code=409, detail={
+                    "error": "request_id_payload_mismatch", "request_id": rid,
+                    "stored_hash": alt_eintrag.get("payload_hash"), "given_hash": h})
+            st = alt_eintrag.get("state")
+            if st == "done":
+                r = NarrationResponse(**alt_eintrag["result"])
+                r.replayed = True
+                r.request_id = rid
+                return r
+            if st == "running" and not alt_eintrag.get("stale"):
+                raise HTTPException(status_code=409, detail={
+                    "error": "narration_in_progress", "request_id": rid, "retry_after_s": 5},
+                    headers={"Retry-After": "5"})
+            if st == "failed" and alt_eintrag.get("failed_stage") in ("tts", "save"):
+                raise HTTPException(status_code=409, detail={
+                    "error": "narration_failed_after_tts", "request_id": rid,
+                    "failed_stage": alt_eintrag.get("failed_stage"),
+                    "hint": ("Der Fehler kam nach dem Sprechen; Zeichen koennen verbraucht sein. "
+                             "Neue request_id waehlen, wenn bewusst neu gesprochen werden soll."),
+                    "error_detail": alt_eintrag.get("error")})
+            # failed/pre_tts oder verwaistes running: neu versuchen
+        narrate_jobs.anlegen(rid, h)
     try:
         result = await service.generate(req)
+        if rid:
+            result.request_id = rid
+            narrate_jobs.abschliessen(rid, result.model_dump())
         return result
-    except HTTPException:
+    except HTTPException as e:
+        if rid:
+            narrate_jobs.scheitern(rid, e.status_code, e.detail)
         raise
     except Exception as e:
+        if rid:
+            narrate_jobs.scheitern(rid, None, str(e)[:300])
         # Classify ElevenLabs failures on the exception's ATTRIBUTES
         # (.status_code / .body), not on its class.
         #
