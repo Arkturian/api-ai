@@ -613,6 +613,11 @@ class Prompt(BaseModel):
     # das Feld mit 422 abgewiesen statt still verschluckt, sonst haelt
     # der Aufrufer Prosa fuer JSON.
     response_format: Optional[Dict[str, Any]] = None
+    # request_id (nur /ai/chatgpt): dauerhafter Status + Idempotenz nach dem
+    # narrate-Muster (Story, PM-Entscheidung 13.09.): ein Timeout nach
+    # ausgefuehrtem Auftrag heisst "Ergebnis wiederfinden", nicht
+    # "Kontingent nochmal ausgeben".
+    request_id: Optional[str] = None
     # Modellwahl im Rumpf. Der Abfrageparameter `?model=` bleibt der
     # dokumentierte Weg und hat Vorrang; dieses Feld gibt es, weil
     # Aufrufer es erwartungsgemaess in den Rumpf schreiben und Pydantic
@@ -1190,6 +1195,31 @@ async def chatgpt_endpoint(
     model: Optional[str] = None,
     api_key: str = Depends(get_api_key)
 ):
+    """Idempotenz-Huelle um den eigentlichen Lauf (siehe _chatgpt_einmal).
+    Ohne request_id: unveraendert."""
+    from ai.services import narrate_jobs as nj
+    rid = prompt.request_id
+    if not rid:
+        return await _chatgpt_einmal(prompt, model, api_key)
+    nutzlast = prompt.model_dump(); nutzlast["model_param"] = model
+    replay = nj.vorab(rid, "chatgpt", nutzlast)
+    if replay:
+        return AIResponse(**{k: v for k, v in replay.items() if k in AIResponse.model_fields})
+    try:
+        out = await _chatgpt_einmal(prompt, model, api_key)
+        nj.abschliessen(rid, out.model_dump())
+        return out
+    except HTTPException as e:
+        nj.nachtrag_fehler(rid, e.status_code, e.detail); raise
+    except Exception as e:
+        nj.nachtrag_fehler(rid, None, str(e)[:300]); raise
+
+
+async def _chatgpt_einmal(
+    prompt: Prompt,
+    model: Optional[str] = None,
+    api_key: str = "placeholder",
+):
     """
     ChatGPT endpoint via OpenAI Codex CLI
 
@@ -1516,6 +1546,17 @@ async def chatgpt_cost_status(_: str = Depends(require_operator_key)):
     """
     from ..services.codex_cost_tracker import codex_cost_tracker
     return codex_cost_tracker.get_status()
+
+
+@router.get("/chatgpt/{request_id}")
+async def chatgpt_status(request_id: str):
+    """Status eines /ai/chatgpt-Auftrags mit request_id. `cost-status`
+    ist ein eigener Endpunkt, keine Kennung."""
+    from ai.services import narrate_jobs as nj
+    d = nj.status_lesen(request_id, "chatgpt", ausgeschlossen=("cost-status",))
+    d["stage_semantics"] = {"pre_tts": "vor dem CLI-Aufruf; Neuanlauf kostet nichts",
+                            "tts": "CLI-Aufruf lief; Abo-Kontingent kann verbraucht sein -> kein automatischer Neuanlauf"}
+    return d
 
 
 @router.post("/grok", response_model=AIResponse)

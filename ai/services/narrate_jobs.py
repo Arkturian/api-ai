@@ -239,6 +239,79 @@ def scheitern(request_id: str, status_code: Optional[int], detail: Any) -> str:
     return failed_stage
 
 
+_VOR_AUFRUF_STATUS = {402, 403, 422, 429}
+
+
+def vorab(rid: Optional[str], kind: str, nutzlast: dict):
+    """Idempotenz-Vorspann fuer Endpunkte ohne Stufenmarken (chatgpt,
+    genimage): (replay_result | None). Wirft 409/410/422. Ein
+    gescheiterter Aufruf darf nur neu, wenn der Fehler VOR dem Aufruf lag
+    (Sperren, 4xx-Validierung); alles andere kann Kontingent oder Geld
+    verbraucht haben -> 409, ein Mensch entscheidet mit neuer Kennung."""
+    from fastapi import HTTPException
+    if not rid:
+        return None
+    if not request_id_ok(rid):
+        raise HTTPException(status_code=422, detail={"error": "invalid_request_id"})
+    h = dict_hash(nutzlast)
+    try:
+        gewonnen = reservieren(rid, h, kind=kind)
+    except ClaimConflict:
+        gewonnen = None
+    if gewonnen:
+        return None
+    alt = lesen(rid)
+    if not alt:
+        raise HTTPException(status_code=409, detail={"error": f"{kind}_in_progress", "request_id": rid, "claim": "conflict"},
+                            headers={"Retry-After": "5"})
+    if alt.get("kind") != kind:
+        raise HTTPException(status_code=409, detail={"error": "request_id_belongs_to_other_endpoint", "request_id": rid, "kind": alt.get("kind")})
+    if alt.get("tombstone"):
+        raise HTTPException(status_code=410, detail={"error": "request_id_tombstoned", "request_id": rid})
+    if alt.get("payload_hash") != h:
+        raise HTTPException(status_code=409, detail={"error": "request_id_payload_mismatch", "request_id": rid})
+    st = alt.get("state")
+    if st == "done":
+        out = dict(alt["result"]); out["replayed"] = True
+        return out
+    if st == "running":
+        raise HTTPException(status_code=409, detail={"error": f"{kind}_in_progress", "request_id": rid, "stale": bool(alt.get("stale"))},
+                            headers={"Retry-After": "5"})
+    if st == "failed" and alt.get("failed_stage") != "pre_tts":
+        raise HTTPException(status_code=409, detail={"error": f"{kind}_failed_after_call", "request_id": rid,
+                            "failed_stage": alt.get("failed_stage"), "error_detail": alt.get("error"),
+                            "hint": "Der Fehler kam nach dem Aufruf; Kontingent oder Geld koennen verbraucht sein. Neue request_id waehlen, wenn bewusst neu gerechnet werden soll."})
+    try:
+        neu = uebernehmen(rid, h, kind, lambda a: a.get("state") == "failed" and a.get("failed_stage") == "pre_tts")
+    except ClaimConflict:
+        neu = None
+    if not neu:
+        raise HTTPException(status_code=409, detail={"error": f"{kind}_in_progress", "request_id": rid, "claim": "conflict"},
+                            headers={"Retry-After": "5"})
+    return None
+
+
+def nachtrag_fehler(rid: Optional[str], status_code, detail) -> None:
+    """Fehler ohne Stufenmarken: Sperren/Validierung (402/403/422/429)
+    gelten als vor dem Aufruf, alles andere als danach."""
+    if not rid:
+        return
+    d = lesen(rid) or {"request_id": rid}
+    d["stage"] = "pre_tts" if status_code in _VOR_AUFRUF_STATUS else "tts"
+    schreiben(d)
+    scheitern(rid, status_code, detail)
+
+
+def status_lesen(request_id: str, kind: str, ausgeschlossen=()) -> dict:
+    from fastapi import HTTPException
+    if request_id in ausgeschlossen or not request_id_ok(request_id):
+        raise HTTPException(status_code=404, detail={"error": "unknown_request_id", "request_id": request_id})
+    d = lesen(request_id)
+    if not d or d.get("kind") != kind:
+        raise HTTPException(status_code=404, detail={"error": "unknown_request_id", "request_id": request_id})
+    return d
+
+
 def aufraeumen() -> int:
     """Nach TTL_DAYS wird das ERGEBNIS entfernt, die Kennung bleibt als
     Grabstein (`tombstone: true`). Eine freigegebene Kennung koennte eine

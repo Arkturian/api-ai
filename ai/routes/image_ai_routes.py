@@ -21,6 +21,12 @@ router = APIRouter()
 
 # Request/Response Models
 class ImageGenRequest(BaseModel):
+    # request_id: dauerhafter Status + Idempotenz nach dem narrate-Muster
+    # (Story, Issue #1817): ein Bild aus dem Stil-Editor war nur
+    # browserlokal gegen Doppelaufrufe geschuetzt — zweiter Browser oder
+    # Reload nach Absturz konnte dieselbe Einstellung zweimal bezahlen.
+    # Replay liefert Storage-ID und URL ohne Anbieteraufruf.
+    request_id: Optional[str] = None
     prompt: str
     negative_prompt: Optional[str] = None
     width: Optional[int] = 1024
@@ -978,6 +984,38 @@ async def generate_with_gemini(
 async def generate_image_endpoint(
     request: ImageGenRequest,
     api_key: str = Depends(get_api_key)
+):
+    """Idempotenz-Huelle (Issue #1817); ohne request_id unveraendert."""
+    from ai.services import narrate_jobs as nj
+    rid = request.request_id
+    if not rid:
+        return await _generate_image_einmal(request, api_key)
+    replay = nj.vorab(rid, "image", request.model_dump())
+    if replay:
+        return replay
+    try:
+        out = await _generate_image_einmal(request, api_key)
+        out = dict(out); out["request_id"] = rid; out["replayed"] = False
+        nj.abschliessen(rid, out)
+        return out
+    except HTTPException as e:
+        nj.nachtrag_fehler(rid, e.status_code, e.detail); raise
+    except Exception as e:
+        nj.nachtrag_fehler(rid, None, str(e)[:300]); raise
+
+
+@router.get("/genimage/{request_id}")
+async def genimage_status(request_id: str):
+    from ai.services import narrate_jobs as nj
+    d = nj.status_lesen(request_id, "image")
+    d["stage_semantics"] = {"pre_tts": "vor dem Anbieteraufruf (Sperre/Validierung); Neuanlauf kostet nichts",
+                            "tts": "Anbieteraufruf lief; Geld kann verbraucht sein -> kein automatischer Neuanlauf"}
+    return d
+
+
+async def _generate_image_einmal(
+    request: ImageGenRequest,
+    api_key: str = "placeholder",
 ):
     """
     Generate an image from text prompt using various AI models.

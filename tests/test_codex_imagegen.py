@@ -133,7 +133,7 @@ def test_negativ_wird_in_den_prompt_gefaltet():
 def test_openai_zweig_ruft_die_faltung():
     """Haelt die Verdrahtung: ohne diesen Aufruf steht negative_prompt
     wieder nur im Schema."""
-    quelle = inspect.getsource(g.generate_image_endpoint)
+    quelle = inspect.getsource(g._generate_image_einmal)
     assert "prompt=prompt_mit_negativ(request.prompt, request.negative_prompt)" in quelle
     assert "generate_with_codex_imagegen(" in quelle
 

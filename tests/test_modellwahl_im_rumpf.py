@@ -25,7 +25,7 @@ def test_prompt_kennt_das_feld():
 
 
 @pytest.mark.parametrize("funktion", [
-    t.claude_endpoint, t.chatgpt_endpoint, t.grok_endpoint,
+    t.claude_endpoint, t._chatgpt_einmal, t.grok_endpoint,
     t.gemini_endpoint, t.gemini_vision_endpoint, t.m3_endpoint,
     t.deepseek_endpoint,
 ])
@@ -37,7 +37,7 @@ def test_jeder_endpunkt_loest_die_modellwahl_auf(funktion):
 
 
 @pytest.mark.parametrize("funktion", [
-    t.claude_endpoint, t.chatgpt_endpoint, t.grok_endpoint,
+    t.claude_endpoint, t._chatgpt_einmal, t.grok_endpoint,
     t.gemini_endpoint, t.gemini_vision_endpoint, t.m3_endpoint,
     t.deepseek_endpoint,
 ])
