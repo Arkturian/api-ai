@@ -74,7 +74,9 @@ def test_filtergraph_platziert_und_schneidet():
     assert "adelay=1500|1500" in graph
     assert "atrim=start=0.500:end=1.500" in graph
     assert "volume=-6.00dB" in graph
-    assert "amix=inputs=2:normalize=0" in graph
+    assert "amix=inputs=2:dropout_transition=0,volume=2" in graph   # kein normalize= (ffmpeg < 4.4 auf arkturian)
+    assert "normalize=" not in graph.split("amix")[1].split(",")[0]
+    assert graph.count("apad=whole_dur=2.500") == 2
     assert gesamt == 2.5                       # Spur 2: 1.5 + 1.0
     graph2, gesamt2 = m.filtergraph(tracks, [2.0, 3.0], 44100, 10.0, False)
     assert gesamt2 == 10.0 and "atrim=end=10.000[out]" in graph2

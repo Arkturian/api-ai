@@ -90,16 +90,27 @@ def filtergraph(tracks: List[MixTrack], quellen_dauer: List[float], sample_rate:
     """(filter_complex, gesamtdauer). Deterministisch aus den Eingaben.
 
     Je Spur: atrim (Ausschnitt) -> asetpts -> volume -> afade -> adelay
-    (Platz auf der Zeitleiste). Dann amix normalize=0 (keine automatische
-    Absenkung: sonst haengt die Lautstaerke von der Spurzahl ab) und
-    atrim auf die Gesamtlaenge.
+    (Platz auf der Zeitleiste) -> apad auf die Gesamtlaenge. Dann amix
+    und volume=N.
+
+    Warum apad + volume=N statt `amix=normalize=0`: `normalize` gibt es
+    erst ab ffmpeg 4.4. arkturian laeuft aelter (gemessen 13.09., der
+    erste Live-Mix scheiterte dort mit "Option 'normalize' not found").
+    Das alte amix teilt die Summe durch die Zahl der gerade AKTIVEN
+    Eingaenge — endet eine Spur, springt der Pegel. Sind alle Spuren per
+    apad gleich lang, ist der Teiler konstant N, und volume=N hebt ihn
+    wieder auf: exakte Summe, auf jeder ffmpeg-Version gleich.
     """
-    teile, labels = [], []
     enden = []
-    for i, (t, qd) in enumerate(zip(tracks, quellen_dauer)):
+    laengen = []
+    for t, qd in zip(tracks, quellen_dauer):
         ende_quelle = min(qd, t.source_offset_s + t.duration_s) if t.duration_s else qd
         laenge = max(0.0, ende_quelle - t.source_offset_s)
+        laengen.append((ende_quelle, laenge))
         enden.append(t.start_s + laenge)
+    gesamt = duration_s if duration_s else (max(enden) if enden else 0.0)
+    teile, labels = [], []
+    for i, (t, (ende_quelle, laenge)) in enumerate(zip(tracks, laengen)):
         kette = [
             f"[{i}:a]aresample={sample_rate}",
             f"atrim=start={t.source_offset_s:.3f}:end={ende_quelle:.3f}",
@@ -113,10 +124,11 @@ def filtergraph(tracks: List[MixTrack], quellen_dauer: List[float], sample_rate:
             kette.append(f"afade=t=out:st={laenge - t.fade_out_s:.3f}:d={t.fade_out_s:.3f}")
         ms = int(round(t.start_s * 1000))
         kette.append(f"adelay={ms}|{ms}")
+        kette.append(f"apad=whole_dur={gesamt:.3f}")
         teile.append(",".join(kette) + f"[t{i}]")
         labels.append(f"[t{i}]")
-    gesamt = duration_s if duration_s else (max(enden) if enden else 0.0)
-    mix = f"{''.join(labels)}amix=inputs={len(tracks)}:normalize=0:dropout_transition=0"
+    n = len(tracks)
+    mix = f"{''.join(labels)}amix=inputs={n}:dropout_transition=0,volume={n}"
     if normalize:
         mix += ",loudnorm=I=-16:TP=-1.5:LRA=11"
     mix += f",atrim=end={gesamt:.3f}[out]"
