@@ -167,3 +167,12 @@ def test_mix_status_route_und_trennung(monkeypatch, tmp_path):
     assert e.value.status_code == 404
     from main import app
     assert any(getattr(r, "path", "") == "/ai/audio/mix/{request_id}" for r in app.routes)
+
+
+def test_frames_werden_dekodiert_gezaehlt(tmp_path):
+    a = tmp_path / "a.wav"; _stille(a, 1.0, ton_hz=440)
+    z = tmp_path / "z.wav"
+    m.mischen([a], [m.MixTrack(audio_id=1, start_s=0.25)], 44100, "wav", None, False, z)
+    frames, sr, ch = m._frames(z)
+    assert sr == 44100 and ch == 2
+    assert abs(frames - round(1.25 * 44100)) <= 1          # Ein-Sample-Regel

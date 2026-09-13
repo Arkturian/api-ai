@@ -72,9 +72,16 @@ def _job_vorab(rid: Optional[str], kind: str, nutzlast: dict):
     if not nj.request_id_ok(rid):
         raise HTTPException(status_code=422, detail={"error": "invalid_request_id"})
     h = nj.dict_hash(nutzlast)
-    alt = None if nj.reservieren(rid, h, kind=kind) else nj.lesen(rid)
-    if not alt:
+    try:
+        gewonnen = nj.reservieren(rid, h, kind=kind)
+    except nj.ClaimConflict:
+        gewonnen = None
+    if gewonnen:
         return None
+    alt = nj.lesen(rid)
+    if not alt:
+        raise HTTPException(status_code=409, detail={"error": f"{kind}_in_progress", "request_id": rid, "claim": "conflict"},
+                            headers={"Retry-After": "5"})
     if alt.get("kind") != kind:
         raise HTTPException(status_code=409, detail={"error": "request_id_belongs_to_other_endpoint", "request_id": rid, "kind": alt.get("kind")})
     if alt.get("tombstone"):
@@ -91,7 +98,13 @@ def _job_vorab(rid: Optional[str], kind: str, nutzlast: dict):
     if st == "failed" and alt.get("failed_stage") in ("tts", "save"):
         raise HTTPException(status_code=409, detail={"error": f"{kind}_failed_after_generation", "request_id": rid,
                             "failed_stage": alt.get("failed_stage"), "error_detail": alt.get("error")})
-    nj.anlegen(rid, h, kind=kind)
+    try:
+        neu = nj.uebernehmen(rid, h, kind, lambda a: a.get("state") == "failed")
+    except nj.ClaimConflict:
+        neu = None
+    if not neu:
+        raise HTTPException(status_code=409, detail={"error": f"{kind}_in_progress", "request_id": rid, "claim": "conflict"},
+                            headers={"Retry-After": "5"})
     return None
 
 

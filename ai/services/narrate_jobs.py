@@ -21,6 +21,7 @@ Regeln, die hier gelten:
 """
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
@@ -75,6 +76,60 @@ def _pfad(request_id: str) -> Path:
     return jobs_dir() / f"{request_id}.json"
 
 
+class ClaimConflict(Exception):
+    """Ein anderer Prozess haelt gerade die Sperre auf diese Kennung."""
+
+
+@contextlib.contextmanager
+def sperre(request_id: str, wartezeit_s: float = 2.0):
+    """Kurze, prozessuebergreifende Sperre je Kennung (Datei per os.link —
+    atomar auf POSIX, auch ueber Prozesse). Nur fuer Pruefung + Uebergang
+    gehalten, Millisekunden. Wer sie nicht bekommt, bekommt ClaimConflict
+    -> 409, nie einen zweiten Anbieteraufruf (Story-Codex, Restpunkt 1)."""
+    jobs_dir().mkdir(parents=True, exist_ok=True)
+    lock = jobs_dir() / f"{request_id}.lock"
+    tmp = jobs_dir() / f".{request_id}.{os.getpid()}.{time.time_ns()}.locktmp"
+    tmp.write_text(str(os.getpid()))
+    frist = time.time() + wartezeit_s
+    try:
+        while True:
+            try:
+                os.link(tmp, lock)
+                break
+            except FileExistsError:
+                try:
+                    if time.time() - lock.stat().st_mtime > 30:
+                        lock.unlink(missing_ok=True)   # verwaiste Sperre (Prozess starb)
+                        continue
+                except FileNotFoundError:
+                    continue
+                if time.time() > frist:
+                    raise ClaimConflict(request_id)
+                time.sleep(0.02)
+        try:
+            yield
+        finally:
+            lock.unlink(missing_ok=True)
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+def _atomar_neu(request_id: str, d: dict) -> bool:
+    """Datei mit INHALT atomar anlegen: tmp schreiben, dann os.link auf den
+    Zielnamen (scheitert mit EEXIST, wenn es ihn gibt). Ein Leser sieht
+    nie eine leere Datei — das war die Luecke von O_EXCL + spaeterem
+    write (Story-Codex, Restpunkt 1)."""
+    tmp = jobs_dir() / f".{request_id}.{os.getpid()}.{time.time_ns()}.tmp"
+    tmp.write_text(json.dumps(d, ensure_ascii=False), encoding="utf-8")
+    try:
+        os.link(tmp, _pfad(request_id))
+        return True
+    except FileExistsError:
+        return False
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
 def lesen(request_id: str) -> Optional[dict]:
     p = _pfad(request_id)
     if not p.exists():
@@ -110,25 +165,47 @@ def reservieren(request_id: str, hash_: str, kind: str = "narrate", extra: Optio
          "updated_at": datetime.now().isoformat()}
     if extra:
         d.update(extra)
-    try:
-        fd = os.open(_pfad(request_id), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
-    except FileExistsError:
-        return None
-    with os.fdopen(fd, "w", encoding="utf-8") as f:
-        f.write(json.dumps(d, ensure_ascii=False))
-    return d
+    with sperre(request_id):
+        return d if _atomar_neu(request_id, d) else None
+
+
+def uebernehmen(request_id: str, hash_: str, kind: str, erlaubt) -> Optional[dict]:
+    """Wiederanspruch (nach failed/pre_tts, failed/prepare oder ausdruecklich
+    nach stale) — atomar unter der Sperre: nur wenn der Eintrag noch im
+    erwarteten Zustand ist, wird er auf running gesetzt. Zwei gleichzeitige
+    Wiederansprueche: genau einer gewinnt, der andere bekommt None."""
+    with sperre(request_id):
+        alt = lesen(request_id) or {}
+        if not erlaubt(alt):
+            return None
+        d = {"request_id": request_id, "kind": kind, "state": "running", "payload_hash": hash_,
+             "stage": "pre_tts", "created_at": alt.get("created_at") or datetime.now().isoformat(),
+             "attempts": int(alt.get("attempts", 0)) + 1}
+        schreiben(d)
+        return d
 
 
 def anlegen(request_id: str, hash_: str, kind: str = "narrate") -> dict:
-    """Ueberschreibt bewusst (fuer ausdrueckliches Neusprechen nach stale
-    oder Neuanlauf nach failed/pre_tts). Fuer den ERSTEN Anspruch auf eine
-    Kennung `reservieren` nehmen."""
+    """Nur fuer Tests und Werkzeuge: ueberschreibt ohne Zustandspruefung.
+    Im Antwortpfad `reservieren` (erster Anspruch) oder `uebernehmen`
+    (Wiederanspruch) nehmen — beide sind atomar."""
     alt = lesen(request_id) or {}
     d = {"request_id": request_id, "kind": kind, "state": "running", "payload_hash": hash_,
          "stage": "pre_tts", "created_at": alt.get("created_at") or datetime.now().isoformat(),
          "attempts": int(alt.get("attempts", 0)) + 1}
     schreiben(d)
     return d
+
+
+# Was die Stufen kosten koennen — damit "vor dem Sprechen" nicht als
+# "kostenlos" gelesen wird (Story-Codex, Restpunkt 2).
+STAGE_SEMANTICS = {
+    "pre_tts": "vor jedem Modell- und Anbieteraufruf; Neuanlauf kostet nichts",
+    "prepare": "dramaturgische Aufbereitung = Modellaufruf ueber das Abo (0 EUR je Aufruf, Kontingent); Neuanlauf wiederholt diesen Aufruf, keine Zeichen",
+    "tts": "Anbieteraufruf laeuft; Zeichen koennen verbraucht sein -> kein automatischer Neuanlauf",
+    "save": "Anbieteraufruf abgeschlossen, Speicherung lief; Zeichen verbraucht -> kein automatischer Neuanlauf",
+    "done": "Ergebnis gespeichert",
+}
 
 
 def stufe(request_id: str, stage: str) -> None:

@@ -280,3 +280,61 @@ async def test_ohne_kennung_wie_bisher(monkeypatch):
     await r.narrate(a, api_key="x")
     await r.narrate(a, api_key="x")
     assert z["aufrufe"] == 2 and not list(nj.jobs_dir().glob("*.json")) if nj.jobs_dir().exists() else True
+
+
+# ---------------------------------------------------- Restpunkte q-d98ba93140f0
+
+def test_reservierung_schreibt_inhalt_atomar():
+    """Restpunkt 1: nie eine leere Datei sichtbar. Der Verlierer liest
+    sofort einen vollstaendigen Eintrag."""
+    h = nj.payload_hash(_req())
+    assert nj.reservieren("story-szene-1:cue-3", h) is not None
+    assert nj.reservieren("story-szene-1:cue-3", h) is None
+    d = nj.lesen("story-szene-1:cue-3")
+    assert d and d["state"] == "running" and d["payload_hash"] == h
+
+
+def test_gleichzeitige_erstansprueche_genau_einer_gewinnt():
+    import threading
+    h = nj.payload_hash(_req()); gewinner = []
+    def lauf():
+        if nj.reservieren("story-szene-1:cue-3", h) is not None:
+            gewinner.append(1)
+    ts = [threading.Thread(target=lauf) for _ in range(8)]
+    [t.start() for t in ts]; [t.join() for t in ts]
+    assert len(gewinner) == 1
+
+
+def test_gleichzeitige_wiederansprueche_genau_einer_gewinnt():
+    h = nj.payload_hash(_req())
+    nj.reservieren("story-szene-1:cue-3", h)
+    nj.scheitern("story-szene-1:cue-3", 429, {"error": "cap"})
+    import threading
+    gewinner = []
+    def lauf():
+        if nj.uebernehmen("story-szene-1:cue-3", h, "narrate", lambda a: a.get("state") == "failed"):
+            gewinner.append(1)
+    ts = [threading.Thread(target=lauf) for _ in range(8)]
+    [t.start() for t in ts]; [t.join() for t in ts]
+    assert len(gewinner) == 1
+
+
+@pytest.mark.asyncio
+async def test_verlorener_anspruch_ohne_eintrag_ist_409(monkeypatch):
+    """Restpunkt 1, der Kern: Anspruch verloren und (noch) nichts lesbar
+    -> nie sprechen."""
+    monkeypatch.setattr(nj, "reservieren", lambda *a, **k: None)
+    monkeypatch.setattr(nj, "lesen", lambda rid: None)
+    async def darf_nicht(req):
+        raise AssertionError("gesprochen")
+    _service_mit(monkeypatch, darf_nicht)
+    with pytest.raises(HTTPException) as exc:
+        await r.narrate(_req(), api_key="x")
+    assert exc.value.status_code == 409 and exc.value.detail.get("claim") == "conflict"
+
+
+@pytest.mark.asyncio
+async def test_status_traegt_stufen_semantik():
+    nj.reservieren("story-szene-1:cue-3", "h")
+    st = await r.narrate_status("story-szene-1:cue-3")
+    assert "prepare" in st["stage_semantics"] and "Abo" in st["stage_semantics"]["prepare"]

@@ -162,6 +162,24 @@ def _dauer(pfad: Path) -> float:
     return float(json.loads(r.stdout)["format"]["duration"])
 
 
+def _frames(pfad: Path) -> tuple:
+    """(Samples je Kanal, Abtastrate, Kanaele) — DEKODIERT gezaehlt, nicht
+    aus Metadaten: ffmpeg gibt s16le aus, die Bytes werden gezaehlt. Das
+    laeuft auf ffmpeg 4.3 (arkturian) wie 5.1 (arkserver) gleich;
+    ffprobe -count_samples tat es nicht. Damit ist die Ein-Sample-Regel
+    aus der Antwort pruefbar (Story-Codex, Restpunkt 3)."""
+    r = subprocess.run(["ffprobe", "-v", "quiet", "-select_streams", "a:0",
+                        "-show_entries", "stream=sample_rate,channels", "-print_format", "json", str(pfad)],
+                       capture_output=True, text=True, check=True)
+    st = (json.loads(r.stdout).get("streams") or [{}])[0]
+    sr, ch = int(st.get("sample_rate") or 0), int(st.get("channels") or 0)
+    if not sr or not ch:
+        return 0, sr, ch
+    d = subprocess.run(["ffmpeg", "-v", "error", "-i", str(pfad), "-f", "s16le", "-ac", str(ch), "-ar", str(sr), "-"],
+                       capture_output=True, check=True)
+    return len(d.stdout) // (2 * ch), sr, ch
+
+
 def mischen(pfade: List[Path], tracks: List[MixTrack], sample_rate: int, output_format: str,
             duration_s: Optional[float], normalize: bool, ziel: Path) -> tuple:
     dauern = [_dauer(p) for p in pfade]
@@ -205,6 +223,7 @@ async def audio_mix_status(request_id: str):
     d = nj.lesen(request_id)
     if not d or d.get("kind") != "mix":
         raise HTTPException(status_code=404, detail={"error": "unknown_request_id", "request_id": request_id})
+    d["stage_semantics"] = {"pre_tts": "vor der Rechnung; Neuanlauf kostet nichts (kein Anbieter)", "done": "Ergebnis gespeichert"}
     return d
 
 
@@ -233,12 +252,17 @@ async def audio_mix(req: MixRequest):
                 return out
             if alt.get("state") == "running" and not alt.get("stale"):
                 raise HTTPException(status_code=409, detail={"error": "mix_in_progress", "request_id": rid}, headers={"Retry-After": "5"})
-        if not nj.reservieren(rid, h, kind="mix"):
-            alt2 = nj.lesen(rid) or {}
-            if alt2.get("state") == "failed":
-                nj.anlegen(rid, h, kind="mix")     # Rechnen ist kostenlos: neu erlaubt
-            else:
-                raise HTTPException(status_code=409, detail={"error": "mix_in_progress", "request_id": rid},
+        try:
+            gewonnen = nj.reservieren(rid, h, kind="mix")
+        except nj.ClaimConflict:
+            gewonnen = None
+        if not gewonnen:
+            try:
+                neu = nj.uebernehmen(rid, h, "mix", lambda a: a.get("state") == "failed")   # Rechnen ist kostenlos
+            except nj.ClaimConflict:
+                neu = None
+            if not neu:
+                raise HTTPException(status_code=409, detail={"error": "mix_in_progress", "request_id": rid, "claim": "conflict"},
                                     headers={"Retry-After": "5"})
 
     try:
@@ -254,6 +278,7 @@ async def audio_mix(req: MixRequest):
                 mischen, pfade, req.tracks, req.sample_rate, req.output_format, req.duration_s, req.normalize, ziel)
             daten = ziel.read_bytes()
             echte_dauer = await asyncio.to_thread(_dauer, ziel)
+            frames, sr_gemessen, kanaele = await asyncio.to_thread(_frames, ziel)
 
         saved = None
         if req.save_options is not None:
@@ -266,17 +291,29 @@ async def audio_mix(req: MixRequest):
             "audio_url": saved.file_url if saved else None,
             "file_url": saved.file_url if saved else None,
             "saved": saved is not None,
-            "duration_seconds": round(echte_dauer, 3),
+            # Feldnamen nach Story-Codex (q-d98ba93140f0): frame_count,
+            # sample_rate (gemessen), duration_seconds = frame_count/sample_rate
+            # ungerundet — die Ein-Sample-Regel ist aus der Antwort pruefbar.
+            "duration_seconds": (frames / sr_gemessen) if (frames and sr_gemessen) else echte_dauer,
+            "duration_seconds_container": round(echte_dauer, 3),
+            "frame_count": frames,
+            "sample_rate": sr_gemessen or req.sample_rate,
+            "sample_rate_requested": req.sample_rate,
+            "channels": kanaele,
             "planned_duration_seconds": round(gesamt, 3),
+            "planned_frames": int(round(round(gesamt, 3) * req.sample_rate)),
             # Zeitwerte gehen als Millisekunden in adelay/atrim; hier stehen
             # die angewandten Werte, nicht nur die bestellten.
             "time_resolution_s": 0.001,
+            # angewandte (quantisierte) Werte je Spur, wie sie im Filtergraph
+            # stehen: adelay in ms, atrim mit 3 Nachkommastellen.
             "tracks_used": [{"audio_id": t.audio_id, "start_s": t.start_s,
-                             "start_s_applied": round(round(t.start_s * 1000) / 1000.0, 3),
-                             "placed_end_s": round(t.start_s + l, 3)}
-                            for t, (_, l) in zip(req.tracks, laengen_out)],
+                             "start_s_applied": round(t.start_s * 1000) / 1000.0,
+                             "source_offset_s_applied": float(f"{t.source_offset_s:.3f}"),
+                             "source_end_s_applied": float(f"{e:.3f}"),
+                             "placed_end_s": round(round(t.start_s * 1000) / 1000.0 + (float(f"{e:.3f}") - float(f"{t.source_offset_s:.3f}")), 3)}
+                            for t, (e, l) in zip(req.tracks, laengen_out)],
             "ffmpeg_filter": graph,
-            "sample_rate": req.sample_rate,
             "output_format": req.output_format,
             "request_id": rid,
             "replayed": False,

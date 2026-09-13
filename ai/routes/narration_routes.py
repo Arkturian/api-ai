@@ -112,6 +112,7 @@ async def narrate_status(request_id: str):
     d = narrate_jobs.lesen(request_id)
     if not d or d.get("kind", "narrate") != "narrate":
         raise HTTPException(status_code=404, detail={"error": "unknown_request_id", "request_id": request_id})
+    d["stage_semantics"] = narrate_jobs.STAGE_SEMANTICS
     return d
 
 
@@ -139,7 +140,15 @@ async def narrate(req: NarrationRequest, api_key: str = Depends(get_api_key)):
         h = narrate_jobs.payload_hash(req)
         # Erster Anspruch atomar (O_EXCL); verliert er, gilt der Eintrag
         # des Gewinners — zwei gleichzeitige Aufrufe sprechen nie beide.
-        alt_eintrag = None if narrate_jobs.reservieren(rid, h, kind="narrate") else narrate_jobs.lesen(rid)
+        try:
+            gewonnen = narrate_jobs.reservieren(rid, h, kind="narrate")
+        except narrate_jobs.ClaimConflict:
+            gewonnen = None
+        alt_eintrag = None if gewonnen else narrate_jobs.lesen(rid)
+        if not gewonnen and not alt_eintrag:
+            # Anspruch verloren, Eintrag (noch) nicht lesbar: nie sprechen.
+            raise HTTPException(status_code=409, detail={"error": "narration_in_progress", "request_id": rid,
+                                "retry_after_s": 5, "claim": "conflict"}, headers={"Retry-After": "5"})
         if alt_eintrag:
             if alt_eintrag.get("kind", "narrate") != "narrate":
                 raise HTTPException(status_code=409, detail={"error": "request_id_belongs_to_other_endpoint",
@@ -166,9 +175,15 @@ async def narrate(req: NarrationRequest, api_key: str = Depends(get_api_key)):
                         "hint": ("Verwaist heisst nicht abgeschlossen und nicht unbezahlt. Neusprechen nur "
                                  "ausdruecklich mit respeak_stale=true." if alt_eintrag.get("stale") else "laeuft")},
                         headers={"Retry-After": "5"})
-                # stale + ausdrueckliche Zustimmung: neu, und es steht im Eintrag
-                narrate_jobs.anlegen(rid, h, kind="narrate")
-                narrate_jobs.stufe(rid, "pre_tts")
+                # stale + ausdrueckliche Zustimmung: atomarer Wiederanspruch
+                try:
+                    neu = narrate_jobs.uebernehmen(rid, h, "narrate",
+                                                   lambda a: a.get("state") == "running" and a.get("stale"))
+                except narrate_jobs.ClaimConflict:
+                    neu = None
+                if not neu:
+                    raise HTTPException(status_code=409, detail={"error": "narration_in_progress", "request_id": rid,
+                                        "retry_after_s": 5, "claim": "conflict"}, headers={"Retry-After": "5"})
                 d = narrate_jobs.lesen(rid); d["respoken_from_stale"] = True; narrate_jobs.schreiben(d)
             elif st == "failed":
                 if alt_eintrag.get("failed_stage") in ("tts", "save"):
@@ -178,8 +193,15 @@ async def narrate(req: NarrationRequest, api_key: str = Depends(get_api_key)):
                         "hint": ("Der Fehler kam nach dem Sprechen; Zeichen koennen verbraucht sein. "
                                  "Neue request_id waehlen, wenn bewusst neu gesprochen werden soll."),
                         "error_detail": alt_eintrag.get("error")})
-                # failed vor dem Sprechen (pre_tts/prepare): neu erlaubt
-                narrate_jobs.anlegen(rid, h, kind="narrate")
+                # failed vor dem Sprechen (pre_tts/prepare): neu erlaubt, atomar
+                try:
+                    neu = narrate_jobs.uebernehmen(rid, h, "narrate",
+                                                   lambda a: a.get("state") == "failed" and a.get("failed_stage") in ("pre_tts", "prepare"))
+                except narrate_jobs.ClaimConflict:
+                    neu = None
+                if not neu:
+                    raise HTTPException(status_code=409, detail={"error": "narration_in_progress", "request_id": rid,
+                                        "retry_after_s": 5, "claim": "conflict"}, headers={"Retry-After": "5"})
     try:
         result = await service.generate(req)
         if rid:
