@@ -52,7 +52,7 @@ def _chatgpt(monkeypatch, status=200, body=None):
 
 
 def _tts(monkeypatch, gezaehlt):
-    async def fake_tts(self, text, request):
+    async def fake_tts(self, text, request, *a, **kw):
         gezaehlt["tts"] = gezaehlt.get("tts", 0) + 1
         gezaehlt["text"] = text
         return b"MP3", None

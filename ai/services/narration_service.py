@@ -138,6 +138,44 @@ class NarrationResponse(BaseModel):
     # wuerden — 0 <= start < end, endliche Zahlen, nichtleeres Wort —
     # werden verworfen und hier gezaehlt statt still durchgereicht.
     word_timestamps_dropped: Optional[int] = None
+    # Dauer als Abtastwerte, ungerundet — `duration_seconds` ist
+    # frame_count / sample_rate (wie bei /ai/audio/mix). Bis 13.09. war
+    # die Dauer auf Millisekunden abgeschnitten, das Alignment nicht:
+    # letztes Wort 136.534 bei Dauer 136.533 (Aufnahme 125030).
+    frame_count: Optional[int] = None
+    sample_rate: Optional[int] = None
+    # Wortenden, die ueber die gemessene Dauer hinausragten, werden auf
+    # die Dauer gesetzt und hier benannt: Anzahl und groesster Ueberhang.
+    word_timestamps_clamped: Optional[int] = None
+    alignment_clamped_ms: Optional[float] = None
+    # true: das rohe Zeichen-Alignment liegt neben dem Auftrag
+    # (GET /ai/tts/narrate/{id}/alignment) — Stoff fuer eine Korrektur
+    # ohne Neusprechen (POST /ai/tts/narrate/{id}/correct).
+    alignment_stored: bool = False
+    # Gesetzt, wenn dieses Ergebnis eine Korrektur aus gespeicherten
+    # Daten ist: Nummer, Zeitpunkt, Hash des Vorgaengers, Aenderungen.
+    corrected_from: Optional[dict] = None
+
+
+def klemme_wortzeiten(woerter, dauer) -> tuple:
+    """Kein Wort endet nach der Datei. `end > dauer` wird auf `dauer`
+    gesetzt (benannt, nicht still); ein Eintrag, dessen `start` dadurch
+    nicht mehr vor `end` laege, wird verworfen — erfinden waere schlimmer.
+    Liefert (woerter, geklemmt, ueberhang_ms, verworfen)."""
+    if not dauer or not woerter:
+        return list(woerter or []), 0, 0.0, 0
+    raus, geklemmt, verworfen, ueberhang = [], 0, 0, 0.0
+    for w in woerter:
+        w = dict(w)
+        if w["end"] > dauer:
+            ueberhang = max(ueberhang, w["end"] - dauer)
+            geklemmt += 1
+            w["end"] = dauer
+            if not w["start"] < w["end"]:
+                verworfen += 1
+                continue
+        raus.append(w)
+    return raus, geklemmt, round(ueberhang * 1000, 3), verworfen
 
 
 # ── Dramatic Script Agent ────────────────────────────────────────
@@ -264,16 +302,30 @@ class NarrationService:
         if request.request_id:
             from ai.services import narrate_jobs
             narrate_jobs.stufe(request.request_id, "tts")
-        audio_bytes, word_timestamps = await self._generate_tts(dramatic_script, request)
+        alignment_roh: list = []
+        audio_bytes, word_timestamps = await self._generate_tts(dramatic_script, request, alignment_roh)
         if request.request_id:
             narrate_jobs.stufe(request.request_id, "save")
         verworfen = 0
         if word_timestamps is not None:
             word_timestamps, verworfen = bereinige_wortzeiten(word_timestamps)
-        duration_seconds = self._measure_audio_duration(
-            audio_bytes,
-            request.config.output_format,
-        )
+        frame_count, sample_rate = self._measure_audio_frames(audio_bytes, request.config.output_format)
+        if frame_count and sample_rate:
+            duration_seconds = frame_count / sample_rate
+        else:
+            duration_seconds = self._measure_audio_duration(audio_bytes, request.config.output_format)
+        geklemmt = ueberhang_ms = None
+        if word_timestamps is not None and duration_seconds:
+            word_timestamps, geklemmt, ueberhang_ms, zu_kurz = klemme_wortzeiten(word_timestamps, duration_seconds)
+            verworfen += zu_kurz
+        alignment_stored = False
+        if request.request_id and alignment_roh:
+            from ai.services import narrate_jobs
+            narrate_jobs.nebendatei_schreiben(request.request_id, "alignment", {
+                "request_id": request.request_id, "text": dramatic_script,
+                "duration_seconds": duration_seconds, "frame_count": frame_count, "sample_rate": sample_rate,
+                "chunks": alignment_roh})
+            alignment_stored = True
         if duration_seconds:
             from ai.services.elevenlabs_cost_tracker import elevenlabs_cost_tracker
             elevenlabs_cost_tracker.track_audio_seconds(duration_seconds, caller="narrate")
@@ -300,7 +352,22 @@ class NarrationService:
             timestamp_granularity="word" if word_timestamps is not None else None,
             saved=audio_id is not None,
             word_timestamps_dropped=verworfen if word_timestamps is not None else None,
+            frame_count=frame_count,
+            sample_rate=sample_rate,
+            word_timestamps_clamped=geklemmt,
+            alignment_clamped_ms=ueberhang_ms,
+            alignment_stored=alignment_stored,
         )
+
+    @staticmethod
+    def _measure_audio_frames(audio_bytes: bytes, output_format: str) -> tuple:
+        """(frame_count, sample_rate) der dekodierten Datei — die Dauer
+        als Bruch, nicht als abgeschnittene Millisekunde."""
+        try:
+            audio = AudioSegment.from_file(BytesIO(audio_bytes), format=output_format)
+            return int(audio.frame_count()), int(audio.frame_rate)
+        except Exception:
+            return None, None
 
     @staticmethod
     def _measure_audio_duration(audio_bytes: bytes, output_format: str) -> Optional[float]:
@@ -389,7 +456,7 @@ class NarrationService:
         logger.warning(f"[Narration] Preprocessing failed, using original text (legacy fallback): {fehler}")
         return request.text, "legacy_fallback_original_text", None
 
-    async def _generate_tts(self, text: str, request: NarrationRequest) -> tuple:
+    async def _generate_tts(self, text: str, request: NarrationRequest, alignment_out: Optional[list] = None) -> tuple:
         """Generate audio via ElevenLabs. Returns (audio_bytes, word_timestamps|None)."""
         if request.config.with_timestamps:
             # Der Alignment-Pfad lebt in tts_service (with-timestamps-REST,
@@ -404,7 +471,7 @@ class NarrationService:
                 clarity=request.config.clarity,
             )
             audio_bytes, words = await tts_service.generate_elevenlabs_tts(
-                text, cfg, with_timestamps=True
+                text, cfg, with_timestamps=True, alignment_out=alignment_out
             )
             return audio_bytes, list(words or [])
         try:

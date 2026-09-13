@@ -522,7 +522,41 @@ async def generate_openai_tts(text: str, config: OpenAITTSConfig) -> bytes:
         raise e
 
 
-async def generate_elevenlabs_tts(text: str, config: ElevenLabsTTSConfig, with_timestamps: bool = False):
+def gruppiere_woerter(chars, starts, ends, time_offset: float = 0.0) -> list:
+    """Zeichen-Alignment (ElevenLabs) -> Wortintervalle. Jeder Weissraum
+    ist Wortgrenze — Leerzeichen, Tabulator, Zeilen- und Absatzumbruch;
+    erstes Zeichen = start, letztes Zeichen = end, Sekunden ab Audiobeginn.
+
+    Bis 13.09.2026 trennte nur das Leerzeichen: Aufnahme 125030 (Reel
+    #1818) trug sechs Tokens wie 'gehen?\n\nUnd' ueber Absatzgrenzen, und
+    der Konsument (story-api, Schnitt an word_start) fand das zweite Wort
+    nicht. Der Absatz gehoert zur Pause, nicht zum Wort.
+    """
+    woerter = []
+    word = ""
+    word_start = 0.0
+    word_end = 0.0
+    for ci, c in enumerate(chars):
+        if c.isspace():
+            if word:
+                woerter.append({"word": word,
+                                "start": round(time_offset + word_start, 3),
+                                "end": round(time_offset + word_end, 3)})
+                word = ""
+            continue
+        if not word:
+            word_start = starts[ci]
+        word += c
+        word_end = ends[ci]
+    if word:
+        woerter.append({"word": word,
+                        "start": round(time_offset + word_start, 3),
+                        "end": round(time_offset + word_end, 3)})
+    return woerter
+
+
+async def generate_elevenlabs_tts(text: str, config: ElevenLabsTTSConfig, with_timestamps: bool = False,
+                                  alignment_out: Optional[list] = None):
     """
     Generates audio from text using ElevenLabs Text-to-Speech API.
     Handles long texts by chunking and concatenating the audio.
@@ -583,26 +617,12 @@ async def generate_elevenlabs_tts(text: str, config: ElevenLabsTTSConfig, with_t
                 starts = alignment.get("character_start_times_seconds", [])
                 ends = alignment.get("character_end_times_seconds", [])
 
-                word = ""
-                word_start = 0.0
-                for ci, c in enumerate(chars):
-                    if c == " " or ci == len(chars) - 1:
-                        if ci == len(chars) - 1 and c != " ":
-                            word += c
-                        if word:
-                            word_end = ends[ci - 1] if c == " " else ends[ci]
-                            all_words.append({
-                                "word": word,
-                                "start": round(time_offset + word_start, 3),
-                                "end": round(time_offset + word_end, 3)
-                            })
-                        word = ""
-                        if ci + 1 < len(starts):
-                            word_start = starts[ci + 1]
-                    else:
-                        if not word:
-                            word_start = starts[ci]
-                        word += c
+                all_words.extend(gruppiere_woerter(chars, starts, ends, time_offset))
+                if alignment_out is not None:
+                    alignment_out.append({"chunk": i, "time_offset": round(time_offset, 6),
+                                          "characters": list(chars),
+                                          "character_start_times_seconds": list(starts),
+                                          "character_end_times_seconds": list(ends)})
 
                 # Calculate chunk duration for offset of next chunk
                 if chunk_audio:

@@ -47,7 +47,7 @@ def _keine_dauer(monkeypatch):
 async def test_mit_schalter_kommen_woerter_aus_der_alignment_quelle(monkeypatch):
     gesehen = {}
 
-    async def fake(text, cfg, with_timestamps=False):
+    async def fake(text, cfg, with_timestamps=False, **kw):
         gesehen["text"] = text
         gesehen["cfg"] = cfg
         gesehen["with_timestamps"] = with_timestamps
@@ -137,7 +137,7 @@ def test_bereinigung_haelt_den_vertrag():
 
 @pytest.mark.asyncio
 async def test_kaputte_eintraege_werden_gezaehlt_nicht_durchgereicht(monkeypatch):
-    async def fake(text, cfg, with_timestamps=False):
+    async def fake(text, cfg, with_timestamps=False, **kw):
         return b"MP3", [{"word": "Mira", "start": 0.0, "end": 0.3},
                         {"word": "x", "start": 0.4, "end": 0.4}]
 
@@ -170,7 +170,7 @@ async def test_zeitstempel_ohne_speichern_werden_vor_dem_sprechen_abgewiesen(mon
 
 @pytest.mark.asyncio
 async def test_leeres_save_options_heisst_speichern(monkeypatch):
-    async def fake(text, cfg, with_timestamps=False):
+    async def fake(text, cfg, with_timestamps=False, **kw):
         return b"MP3", [{"word": "Mira", "start": 0.0, "end": 0.3}]
 
     gespeichert = {}

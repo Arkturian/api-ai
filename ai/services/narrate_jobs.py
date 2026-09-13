@@ -312,6 +312,76 @@ def status_lesen(request_id: str, kind: str, ausgeschlossen=()) -> dict:
     return d
 
 
+NEBENDATEIEN = ("alignment",)
+
+
+def _nebendatei_pfad(request_id: str, name: str) -> Path:
+    return jobs_dir() / f"{request_id}.{name}.json"
+
+
+def nebendatei_schreiben(request_id: str, name: str, data: Any) -> None:
+    """Grosse Rohdaten (Zeichen-Alignment) neben dem Auftrag, nicht in der
+    Antwort. Sie sind der Stoff, aus dem eine Korrektur OHNE Neusprechen
+    gemacht wird — Aufnahme 125030 (13.09.) hatte sie nicht mehr."""
+    jobs_dir().mkdir(parents=True, exist_ok=True)
+    ziel = _nebendatei_pfad(request_id, name)
+    tmp = ziel.with_suffix(".tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    tmp.replace(ziel)
+
+
+def nebendatei_lesen(request_id: str, name: str) -> Optional[Any]:
+    p = _nebendatei_pfad(request_id, name)
+    if not p.exists():
+        return None
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+
+
+class KorrekturAbgelehnt(Exception):
+    def __init__(self, status_code: int, detail: dict):
+        super().__init__(detail.get("error"))
+        self.status_code = status_code
+        self.detail = detail
+
+
+def korrigieren(request_id: str, result_neu: dict, aenderungen: list, quelle: str) -> dict:
+    """Ersetzt das Ergebnis eines abgeschlossenen Auftrags durch eine
+    Korrektur aus gespeicherten Daten — kein Anbieteraufruf. Das erste
+    Original bleibt unter `result_original`; jede Korrektur traegt
+    `corrected_from` (Nummer, Zeitpunkt, Hash des Vorgaengers, benannte
+    Aenderungen, Quelle). Replay unter derselben Kennung liefert danach
+    die Korrektur."""
+    with sperre(request_id):
+        d = lesen(request_id)
+        if not d:
+            raise KorrekturAbgelehnt(404, {"error": "unknown_request_id", "request_id": request_id})
+        if d.get("tombstone"):
+            raise KorrekturAbgelehnt(410, {"error": "request_id_tombstoned", "request_id": request_id})
+        if d.get("state") != "done" or not isinstance(d.get("result"), dict):
+            raise KorrekturAbgelehnt(409, {"error": "not_done", "request_id": request_id, "state": d.get("state")})
+        alt = d["result"]
+        vorher = (alt.get("corrected_from") or {}).get("correction_no", 0)
+        herkunft = {
+            "correction_no": vorher + 1,
+            "at": datetime.now().isoformat(),
+            "previous_result_sha256": dict_hash(alt, ohne=()),
+            "changes": list(aenderungen),
+            "source": quelle,
+        }
+        if "result_original" not in d:
+            d["result_original"] = alt
+        neu = dict(result_neu)
+        neu["corrected_from"] = herkunft
+        d["result"] = neu
+        d["corrected_at"] = herkunft["at"]
+        d.pop("stale", None)
+        schreiben(d)
+        return d
+
+
 def aufraeumen() -> int:
     """Nach TTL_DAYS wird das ERGEBNIS entfernt, die Kennung bleibt als
     Grabstein (`tombstone: true`). Eine freigegebene Kennung koennte eine
@@ -328,6 +398,9 @@ def aufraeumen() -> int:
                 if d.get("tombstone"):
                     continue
                 d.pop("result", None)
+                d.pop("result_original", None)
+                for name in NEBENDATEIEN:
+                    _nebendatei_pfad(d.get("request_id", p.stem), name).unlink(missing_ok=True)
                 d["tombstone"] = True
                 d["tombstoned_at"] = datetime.now().isoformat()
                 p.write_text(json.dumps(d, ensure_ascii=False), encoding="utf-8")

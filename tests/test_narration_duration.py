@@ -13,7 +13,7 @@ from ai.services.narration_service import (
 def test_generate_returns_measured_audio_duration(monkeypatch):
     service = NarrationService()
 
-    async def fake_generate_tts(_text, _request):
+    async def fake_generate_tts(_text, _request, *_a, **_kw):
         # seit with_timestamps (13.09.): (audio_bytes, word_timestamps|None)
         return b"generated-audio", None
 

@@ -116,6 +116,75 @@ async def narrate_status(request_id: str):
     return d
 
 
+def _narrate_auftrag(request_id: str) -> dict:
+    from ai.services import narrate_jobs
+    if request_id == "preview" or not narrate_jobs.request_id_ok(request_id):
+        raise HTTPException(status_code=404, detail={"error": "unknown_request_id", "request_id": request_id})
+    d = narrate_jobs.lesen(request_id)
+    if not d or d.get("kind", "narrate") != "narrate":
+        raise HTTPException(status_code=404, detail={"error": "unknown_request_id", "request_id": request_id})
+    return d
+
+
+@router.get("/tts/narrate/{request_id}/alignment")
+async def narrate_alignment(request_id: str):
+    """Rohes Zeichen-Alignment (ElevenLabs) des Auftrags, je Textstueck mit
+    Zeitversatz. 404 `alignment_not_stored`, wenn der Auftrag vor dem
+    13.09.2026 lief oder ohne with_timestamps."""
+    from ai.services import narrate_jobs
+    _narrate_auftrag(request_id)
+    a = narrate_jobs.nebendatei_lesen(request_id, "alignment")
+    if a is None:
+        raise HTTPException(status_code=404, detail={"error": "alignment_not_stored", "request_id": request_id})
+    return a
+
+
+@router.post("/tts/narrate/{request_id}/correct")
+async def narrate_correct(request_id: str):
+    """Korrektur OHNE Neusprechen aus dem gespeicherten Zeichen-Alignment:
+    Woerter neu gruppiert (jeder Weissraum trennt), Vertrag bereinigt,
+    Enden auf die gemessene Dauer geklemmt (benannt). Ergebnis ersetzt
+    das gespeicherte, traegt `corrected_from`, Replay liefert es. Kein
+    Anbieteraufruf, keine Zeichen. 409 `alignment_not_stored`, wenn der
+    Stoff fehlt — dann gibt es aus Daten nichts zu korrigieren."""
+    from ai.services import narrate_jobs, tts_service
+    from ai.services.narration_service import bereinige_wortzeiten, klemme_wortzeiten
+    d = _narrate_auftrag(request_id)
+    if d.get("state") != "done":
+        raise HTTPException(status_code=409, detail={"error": "not_done", "request_id": request_id, "state": d.get("state")})
+    a = narrate_jobs.nebendatei_lesen(request_id, "alignment")
+    if a is None:
+        raise HTTPException(status_code=409, detail={
+            "error": "alignment_not_stored", "request_id": request_id,
+            "hint": "Ohne gespeichertes Zeichen-Alignment gibt es aus Daten nichts neu zu gruppieren; neu sprechen ist eine eigene Entscheidung."})
+    alt = d["result"]
+    woerter = []
+    for chunk in a.get("chunks", []):
+        woerter.extend(tts_service.gruppiere_woerter(
+            chunk.get("characters", []), chunk.get("character_start_times_seconds", []),
+            chunk.get("character_end_times_seconds", []), float(chunk.get("time_offset", 0.0))))
+    woerter, verworfen = bereinige_wortzeiten(woerter)
+    fc, sr = alt.get("frame_count"), alt.get("sample_rate")
+    dauer = (fc / sr) if fc and sr else alt.get("duration_seconds")
+    woerter, geklemmt, ueberhang_ms, zu_kurz = klemme_wortzeiten(woerter, dauer)
+    neu = dict(alt)
+    neu.update({
+        "word_timestamps": woerter, "word_timestamps_dropped": verworfen + zu_kurz,
+        "word_timestamps_clamped": geklemmt, "alignment_clamped_ms": ueberhang_ms,
+        "duration_seconds": dauer, "timestamps_source": "elevenlabs_alignment",
+        "timestamp_granularity": "word", "alignment_stored": True,
+    })
+    aenderungen = [
+        {"field": "word_timestamps", "what": "regrouped_from_character_alignment",
+         "words_before": len(alt.get("word_timestamps") or []), "words_after": len(woerter)},
+        {"field": "word_timestamps[].end", "what": "clamped_to_duration", "count": geklemmt, "max_overrun_ms": ueberhang_ms},
+    ]
+    try:
+        return narrate_jobs.korrigieren(request_id, neu, aenderungen, "stored_character_alignment")
+    except narrate_jobs.KorrekturAbgelehnt as e:
+        raise HTTPException(status_code=e.status_code, detail=e.detail)
+
+
 @router.post("/tts/narrate", response_model=NarrationResponse)
 async def narrate(req: NarrationRequest, api_key: str = Depends(get_api_key)):
     """
