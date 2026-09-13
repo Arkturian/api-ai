@@ -326,6 +326,14 @@ class ElevenLabsCostTracker:
             return {
                 "provider": "elevenlabs",
                 "unit": "characters",
+                # Gemessen 12./13.09.: unsere Zeichen (Laenge des gesendeten
+                # Texts) und ElevenLabs' `character_count` laufen nicht 1:1 —
+                # 177 -> +48, 276 -> +76, beide Male ~0,27. Was der Anbieter
+                # zaehlt, ist nicht belegt; unser Deckel ist damit konservativ.
+                "note": ("chars_used zaehlt die Laenge des gesendeten Texts; ElevenLabs' "
+                         "subscription.character_count stieg bei denselben Aufrufen um ~0,27 davon "
+                         "(gemessen 12./13.09.). Beide Zahlen sind nicht dieselbe Einheit; der "
+                         "Deckel in chars_used sperrt frueher als das Anbieterkontingent."),
                 "month": d.get("month"),
                 "chars_used": used,
                 "monthly_char_cap": cap,
