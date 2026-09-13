@@ -156,3 +156,16 @@ async def test_genimage_billing_tor_403_darf_neu(monkeypatch):
         await g.generate_image_endpoint(r, "x")
     assert (await g.genimage_status("shot-40-v1-bild"))["failed_stage"] == "pre_tts"
     assert (await g.generate_image_endpoint(r, "x"))["id"] == 2
+
+
+def test_genimage_models_bleibt_erreichbar():
+    """Die Statusroute /genimage/{request_id} darf /genimage/models nicht
+    verdecken. Am Ziel gemessen 13.09.: /ai/genimage/models -> 404
+    unknown_request_id, weil die Kennungsroute davor stand."""
+    from main import app
+    pfade = [getattr(r, "path", "") for r in app.routes]
+    assert pfade.index("/ai/genimage/models") < pfade.index("/ai/genimage/{request_id}")
+    import asyncio
+    with pytest.raises(HTTPException) as e:
+        asyncio.run(g.genimage_status("models"))
+    assert e.value.status_code == 404

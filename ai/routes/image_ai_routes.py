@@ -1004,15 +1004,6 @@ async def generate_image_endpoint(
         nj.nachtrag_fehler(rid, None, str(e)[:300]); raise
 
 
-@router.get("/genimage/{request_id}")
-async def genimage_status(request_id: str):
-    from ai.services import narrate_jobs as nj
-    d = nj.status_lesen(request_id, "image")
-    d["stage_semantics"] = {"pre_tts": "vor dem Anbieteraufruf (Sperre/Validierung); Neuanlauf kostet nichts",
-                            "tts": "Anbieteraufruf lief; Geld kann verbraucht sein -> kein automatischer Neuanlauf"}
-    return d
-
-
 async def _generate_image_einmal(
     request: ImageGenRequest,
     api_key: str = "placeholder",
@@ -1249,6 +1240,15 @@ async def list_image_models():
             }
         ]
     }
+
+
+@router.get("/genimage/{request_id}")
+async def genimage_status(request_id: str):
+    from ai.services import narrate_jobs as nj
+    d = nj.status_lesen(request_id, "image")
+    d["stage_semantics"] = {"pre_tts": "vor dem Anbieteraufruf (Sperre/Validierung); Neuanlauf kostet nichts",
+                            "tts": "Anbieteraufruf lief; Geld kann verbraucht sein -> kein automatischer Neuanlauf"}
+    return d
 
 
 @router.post("/upscale", response_model=ImageResponse)
