@@ -65,6 +65,33 @@ def _get_cli_semaphore(provider: str) -> asyncio.Semaphore:
     return sem
 
 
+def codex_als_benutzer(cmd, env):
+    """Laesst `codex` als anderer Benutzer laufen, wenn CODEX_RUN_AS_USER
+    gesetzt ist (arkserver: alex).
+
+    Anlass (Automation, 13.09. 03:0x): der Dienst laeuft als root mit
+    CODEX_HOME=/home/alex/.codex. Jeder Schreibzugriff von codex machte
+    Dateien in Alex' Home root-eigen — zuletzt 12 425 Pfade, darunter
+    config.toml mit 0600: `codex debug models` scheiterte fuer alex,
+    Automations Waechter brach ab. Ein chown ist ein Pflaster, beim
+    naechsten Lauf kippt es zurueck. Laeuft codex als alex, entsteht der
+    Zustand nicht: eine auth.json, ein Eigentuemer. Getestet 03:1x als
+    root ueber sudo -n -u alex: Antwort in 6 s, keine neuen root-Dateien.
+
+    Nur codex; alle anderen CLIs unveraendert. Fehlt die Variable, ist
+    das Verhalten wie bisher.
+    """
+    import shutil
+    user = (os.getenv("CODEX_RUN_AS_USER") or "").strip()
+    if not user or not cmd or os.path.basename(str(cmd[0])) != "codex":
+        return list(cmd)
+    binaer = shutil.which("codex", path=env.get("PATH")) or cmd[0]
+    umgebung = [f"{k}={env[k]}" for k in ("CODEX_HOME", "PATH", "NO_COLOR", "HOME") if env.get(k)]
+    if not env.get("HOME") or env.get("HOME") == "/root":
+        umgebung = [u for u in umgebung if not u.startswith("HOME=")]
+    return ["sudo", "-n", "-u", user, "-H", "env"] + umgebung + [binaer] + list(cmd[1:])
+
+
 def _run_cli_with_pgid(cmd, env, timeout=300, cwd="/", input=None):
     """Run a CLI subprocess as its own process-group leader.
 
@@ -89,6 +116,7 @@ def _run_cli_with_pgid(cmd, env, timeout=300, cwd="/", input=None):
     """
     import signal as _signal
     import subprocess
+    cmd = codex_als_benutzer(cmd, env)
     proc = subprocess.Popen(
         cmd,
         # `input` (Prompt ueber stdin statt argv): argv ist auf ~128 KB
@@ -1040,7 +1068,7 @@ def _codex_katalog() -> Optional[dict]:
     try:
         env = os.environ.copy()
         env["NO_COLOR"] = "1"
-        r = subprocess.run(["codex", "debug", "models"], capture_output=True, text=True,
+        r = subprocess.run(codex_als_benutzer(["codex", "debug", "models"], env), capture_output=True, text=True,
                            timeout=15, env=env)
         import json as _json
         katalog = _codex_katalog_parsen(_json.loads(r.stdout)) if r.returncode == 0 and r.stdout else None
