@@ -132,3 +132,24 @@ def test_status_route_existiert():
     from ai.routes import narration_routes as r
     pfade = [getattr(x, "path", "") for x in r.router.routes]
     assert "/tts/elevenlabs/cost-status" in pfade
+
+
+def test_client_status_zeigt_den_master(monkeypatch, tmp_path):
+    """Story-Codex, 13.09.: am oeffentlichen Ziel (Client) stand
+    chars_used=0 nach vier echten Aufrufen — der Master hatte 276."""
+    monkeypatch.setenv("ELEVENLABS_COST_TRACKER_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("ELEVENLABS_COST_TRACKER_MASTER_URL", "https://master.example")
+    monkeypatch.setenv("COST_TRACKER_SHARED_SECRET", "s")
+    monkeypatch.setenv("ELEVENLABS_BLOCK_BEYOND_INCLUDED", "false")
+    ez.ElevenLabsCostTracker._instance = None
+    t = ez.ElevenLabsCostTracker()
+    monkeypatch.setattr(t, "_fetch_master_status", lambda: {"chars_used": 276, "tts_calls": 4, "monthly_char_cap": 10000})
+    st = t.get_status()
+    assert st["chars_used"] == 276 and st["tts_calls"] == 4 and st["view"] == "master"
+    # Master nicht erreichbar -> lokale Sicht, ehrlich markiert
+    def kaputt():
+        raise RuntimeError("down")
+    monkeypatch.setattr(t, "_fetch_master_status", kaputt)
+    st2 = t.get_status()
+    assert st2["view"] == "local" and st2["chars_used"] == 0
+    ez.ElevenLabsCostTracker._instance = None

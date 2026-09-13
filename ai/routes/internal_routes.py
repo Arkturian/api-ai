@@ -409,7 +409,7 @@ async def elevenlabs_cost_shared_state_get(
     jedem Aufruf). Gleicher Vertrag wie die Geschwister."""
     _verify_shared_counter_auth(x_internal_auth)
     from ..services.elevenlabs_cost_tracker import elevenlabs_cost_tracker
-    return elevenlabs_cost_tracker.get_status()
+    return elevenlabs_cost_tracker._local_status()   # der Master IST die Wahrheit
 
 
 @router.post("/elevenlabs-cost-shared-state")
@@ -422,7 +422,7 @@ async def elevenlabs_cost_shared_state_track(
     units = payload.units or {}
     # _track_local: der Master IST die Wahrheit, kein Weiterposten.
     elevenlabs_cost_tracker._track_local(payload.modality, payload.caller, **units)
-    return elevenlabs_cost_tracker.get_status()
+    return elevenlabs_cost_tracker._local_status()
 
 
 @router.get("/openai-cost-shared-state")

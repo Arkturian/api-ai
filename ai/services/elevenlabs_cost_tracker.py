@@ -300,6 +300,24 @@ class ElevenLabsCostTracker:
     # ── Status / Kill-Switch / Alarme ────────────────────────────────
 
     def get_status(self) -> dict:
+        """Im Client-Modus (arkturian) die Sicht des Masters — die lokale
+        Datei bleibt dort bei null, weil jeder Aufruf an den Master
+        gemeldet wird. Story-Codex las am 13.09. am oeffentlichen Ziel
+        chars_used=0 nach vier echten Aufrufen; der Master hatte 276.
+        Ein Status, der den falschen Zaehler zeigt, ist schlimmer als keiner."""
+        if self.master_url and self.shared_secret:
+            try:
+                st = dict(self._fetch_master_status())
+                st["view"] = "master"
+                st["master_url"] = self.master_url
+                return st
+            except Exception as e:
+                logger.warning("elevenlabs_cost_tracker: Master-Status nicht lesbar (%s); lokale Sicht", e)
+        st = self._local_status()
+        st["view"] = "local"
+        return st
+
+    def _local_status(self) -> dict:
         self._maybe_reload_from_file()
         with self._data_lock:
             d = self._usage_data
