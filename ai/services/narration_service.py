@@ -93,6 +93,10 @@ class NarrationRequest(BaseModel):
     # payloadgebundene Idempotenz: dieselbe Kennung mit demselben Inhalt
     # spricht nie zweimal (Content #4976, p-b12b0d4d6062).
     request_id: Optional[str] = Field(default=None, description="Caller-chosen id for durable status + idempotent replay")
+    # Neusprechen nach verwaistem `running` ist eine AUSDRUECKLICHE
+    # Handlung, nie ein nackter POST: 10 Minuten beweisen weder Abschluss
+    # noch Nichtabrechnung (Review q-d98ba93140f0, Punkt 1).
+    respeak_stale: bool = Field(default=False, description="Explicit consent to speak again when the request_id is stuck in stale running")
 
 
 class NarrationResponse(BaseModel):
@@ -235,7 +239,11 @@ class NarrationService:
                 },
             )
 
-        # Step 1: Dramatic preprocessing (optional)
+        # Step 1: Dramatic preprocessing (optional). Eigene Stufe: die
+        # Aufbereitung ist ein Modellaufruf — `pre_tts` gilt nur DAVOR.
+        if request.request_id:
+            from ai.services import narrate_jobs
+            narrate_jobs.stufe(request.request_id, "prepare")
         if request.config.preprocessing:
             dramatic_script = await self._preprocess_text(request)
         else:

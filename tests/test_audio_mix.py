@@ -63,14 +63,17 @@ def test_hash_unabhaengig_von_spurreihenfolge():
     c = _req(); c.tracks[1].start_s = 2.0
     assert m.mix_hash(a) != m.mix_hash(c)
     d = _req(save_options={"is_public": False}, request_id="abc-12345")
-    assert m.mix_hash(a) == m.mix_hash(d)
+    assert m.mix_hash(a) != m.mix_hash(d)           # Sichtbarkeit ist Teil des Ergebnisses
+    e = _req(request_id="abc-12345")
+    assert m.mix_hash(a) == m.mix_hash(e)           # die Kennung selbst nicht
 
 
 # ---------------------------------------------------- Filtergraph
 
 def test_filtergraph_platziert_und_schneidet():
     tracks = [m.MixTrack(audio_id=1, start_s=0.0), m.MixTrack(audio_id=2, start_s=1.5, source_offset_s=0.5, duration_s=1.0, gain_db=-6)]
-    graph, gesamt = m.filtergraph(tracks, [2.0, 3.0], 44100, None, False)
+    graph, gesamt, laengen = m.filtergraph(tracks, [2.0, 3.0], 44100, None, False)
+    assert laengen[1] == (1.5, 1.0)
     assert "adelay=1500|1500" in graph
     assert "atrim=start=0.500:end=1.500" in graph
     assert "volume=-6.00dB" in graph
@@ -78,7 +81,7 @@ def test_filtergraph_platziert_und_schneidet():
     assert "normalize=" not in graph.split("amix")[1].split(",")[0]
     assert graph.count("apad=whole_dur=2.500") == 2
     assert gesamt == 2.5                       # Spur 2: 1.5 + 1.0
-    graph2, gesamt2 = m.filtergraph(tracks, [2.0, 3.0], 44100, 10.0, False)
+    graph2, gesamt2, _ = m.filtergraph(tracks, [2.0, 3.0], 44100, 10.0, False)
     assert gesamt2 == 10.0 and "atrim=end=10.000[out]" in graph2
 
 
@@ -89,7 +92,7 @@ def test_mischen_liefert_geplante_laenge_und_gleiche_bytes(tmp_path):
     _stille(a, 1.0, ton_hz=440); _stille(b, 1.0, ton_hz=880)
     tracks = [m.MixTrack(audio_id=1, start_s=0.0), m.MixTrack(audio_id=2, start_s=1.5)]
     z1, z2 = tmp_path / "m1.wav", tmp_path / "m2.wav"
-    g1, gesamt = m.mischen([a, b], tracks, 44100, "wav", None, False, z1)
+    g1, gesamt, _ = m.mischen([a, b], tracks, 44100, "wav", None, False, z1)
     m.mischen([a, b], tracks, 44100, "wav", None, False, z2)
     assert gesamt == 2.5
     assert abs(m._dauer(z1) - 2.5) < 0.05
@@ -121,3 +124,46 @@ def test_kein_anbieter_kein_zaehler():
 def test_route_registriert():
     from main import app
     assert any(getattr(r, "path", "") == "/ai/audio/mix" for r in app.routes)
+
+
+# ---------------------------------------------------- Review q-d98ba93140f0
+
+def test_quelleueberlauf_wird_genannt_nicht_gekappt():
+    tr = [m.MixTrack(audio_id=7, start_s=0.0, source_offset_s=0.5, duration_s=2.0)]
+    with pytest.raises(HTTPException) as e:
+        m.filtergraph(tr, [2.0], 44100, None, False)        # 0.5 + 2.0 > 2.0
+    assert e.value.detail["error"] == "source_overrun" and e.value.detail["audio_id"] == 7
+    with pytest.raises(HTTPException) as e2:
+        m.filtergraph([m.MixTrack(audio_id=7, source_offset_s=3.0)], [2.0], 44100, None, False)
+    assert e2.value.detail["field"] == "source_offset_s"
+    m.filtergraph([m.MixTrack(audio_id=7, source_offset_s=0.5, duration_s=1.5)], [2.0], 44100, None, False)  # exakt bis Ende: ok
+
+
+def test_feste_gesamtdauer_wird_respektiert():
+    tr = [m.MixTrack(audio_id=1, start_s=1.0)]
+    with pytest.raises(HTTPException) as e:
+        m.filtergraph(tr, [2.0], 44100, 2.5, False)         # endet bei 3.0 > 2.5
+    assert e.value.detail["error"] == "track_exceeds_duration"
+    _, gesamt, _ = m.filtergraph(tr, [2.0], 44100, 5.0, False)
+    assert gesamt == 5.0
+
+
+def test_nicht_endliche_zahlen_422():
+    with pytest.raises(HTTPException) as e:
+        m.pruefe_grenzen(m.MixRequest(tracks=[m.MixTrack(audio_id=1, start_s=float("inf"))]))
+    assert e.value.detail["error"] == "non_finite_value"
+
+
+def test_mix_status_route_und_trennung(monkeypatch, tmp_path):
+    from ai.services import narrate_jobs as nj
+    monkeypatch.setenv("NARRATE_JOBS_DIR", str(tmp_path))
+    import asyncio
+    nj.reservieren("mix-probe-0001", "h", kind="mix")
+    d = asyncio.run(m.audio_mix_status("mix-probe-0001"))
+    assert d["kind"] == "mix" and d["state"] == "running"
+    nj.reservieren("sprech-probe-01", "h", kind="narrate")
+    with pytest.raises(HTTPException) as e:
+        asyncio.run(m.audio_mix_status("sprech-probe-01"))
+    assert e.value.status_code == 404
+    from main import app
+    assert any(getattr(r, "path", "") == "/ai/audio/mix/{request_id}" for r in app.routes)

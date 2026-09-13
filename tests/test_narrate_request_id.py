@@ -56,12 +56,16 @@ def _service_mit(monkeypatch, verhalten):
 
 # ---------------------------------------------------- Hash
 
-def test_hash_bindet_inhalt_nicht_speicheroption():
+def test_hash_bindet_inhalt_UND_speicheroption():
+    """Review q-d98ba93140f0, Punkt 2: dieselbe Kennung mit anderer
+    Sichtbarkeit bekaeme sonst beim Replay die falsche Datei."""
     a, b = _req(), _req()
     b.save_options = {"is_public": False}
-    assert nj.payload_hash(a) == nj.payload_hash(b)
+    assert nj.payload_hash(a) != nj.payload_hash(b)
     c = _req(text="Anderer Text.")
     assert nj.payload_hash(a) != nj.payload_hash(c)
+    d = _req(); d.respeak_stale = True
+    assert nj.payload_hash(a) == nj.payload_hash(d)      # Steuerung, kein Inhalt
 
 
 def test_kennung_form():
@@ -69,6 +73,11 @@ def test_kennung_form():
     assert not nj.request_id_ok("kurz")
     assert not nj.request_id_ok("mit leerzeichen und mehr")
     assert not nj.request_id_ok("x" * 129)
+    # Pfadschutz (Review Punkt 3): kein fuehrender Punkt, kein "..", kein Trenner
+    assert not nj.request_id_ok("..abcdefgh")
+    assert not nj.request_id_ok(".versteckt1")
+    assert not nj.request_id_ok("a/b/cdefghij")
+    assert not nj.request_id_ok("ab..cdefghij")
 
 
 # ---------------------------------------------------- Ziel: Replay
@@ -152,19 +161,99 @@ async def test_fehler_vor_dem_sprechen_darf_neu(monkeypatch):
     assert zweite.replayed is False and laeufe["n"] == 2
 
 
-@pytest.mark.asyncio
-async def test_verwaistes_running_sagt_es_und_darf_neu(monkeypatch):
-    nj.anlegen("story-szene-1:cue-3", nj.payload_hash(_req()))
-    d = nj.lesen("story-szene-1:cue-3")
+def _verwaist(rid="story-szene-1:cue-3"):
+    nj.anlegen(rid, nj.payload_hash(_req()))
+    d = nj.lesen(rid)
     d["updated_at"] = (datetime.now() - timedelta(minutes=11)).isoformat()
-    (nj.jobs_dir() / "story-szene-1:cue-3.json").write_text(json.dumps(d))
+    (nj.jobs_dir() / f"{rid}.json").write_text(json.dumps(d))
+
+
+@pytest.mark.asyncio
+async def test_verwaistes_running_spricht_NIE_von_selbst_neu(monkeypatch):
+    """Review Punkt 1: 10 Minuten beweisen weder Abschluss noch
+    Nichtabrechnung. Ein nackter POST bleibt 409 — mit `stale: true`."""
+    _verwaist()
     st = await r.narrate_status("story-szene-1:cue-3")
     assert st["state"] == "running" and st["stale"] is True
+    async def darf_nicht(req):
+        raise AssertionError("automatisch neu gesprochen")
+    _service_mit(monkeypatch, darf_nicht)
+    with pytest.raises(HTTPException) as exc:
+        await r.narrate(_req(), api_key="x")
+    assert exc.value.status_code == 409
+    assert exc.value.detail["error"] == "narration_in_progress" and exc.value.detail["stale"] is True
+
+
+@pytest.mark.asyncio
+async def test_neusprechen_nach_stale_nur_ausdruecklich(monkeypatch):
+    _verwaist()
+    async def ok(req):
+        return _antwort()
+    z = _service_mit(monkeypatch, ok)
+    req = _req(); req.respeak_stale = True
+    a = await r.narrate(req, api_key="x")
+    assert z["aufrufe"] == 1 and a.replayed is False
+    st = await r.narrate_status("story-szene-1:cue-3")
+    assert st["state"] == "done" and st.get("respoken_from_stale") is True
+
+
+def test_reservierung_ist_atomar():
+    """Review Punkt 3: O_EXCL — genau einer gewinnt."""
+    h = nj.payload_hash(_req())
+    assert nj.reservieren("story-szene-1:cue-3", h) is not None
+    assert nj.reservieren("story-szene-1:cue-3", h) is None
+
+
+def test_aufraeumen_laesst_grabstein(monkeypatch):
+    """Review Punkt 1: nach 30 Tagen faellt das Ergebnis, nicht die Kennung."""
+    import os, time
+    nj.reservieren("story-szene-1:cue-3", "h")
+    nj.abschliessen("story-szene-1:cue-3", {"audio_id": 1})
+    p = nj.jobs_dir() / "story-szene-1:cue-3.json"
+    alt = time.time() - 31 * 86400
+    os.utime(p, (alt, alt))
+    assert nj.aufraeumen() == 1
+    d = nj.lesen("story-szene-1:cue-3")
+    assert d["tombstone"] is True and "result" not in d
+
+
+@pytest.mark.asyncio
+async def test_grabstein_gibt_410(monkeypatch):
+    nj.reservieren("story-szene-1:cue-3", nj.payload_hash(_req()))
+    d = nj.lesen("story-szene-1:cue-3"); d.update({"state": "done", "tombstone": True}); nj.schreiben(d)
+    with pytest.raises(HTTPException) as exc:
+        await r.narrate(_req(), api_key="x")
+    assert exc.value.status_code == 410
+
+
+@pytest.mark.asyncio
+async def test_fehler_in_der_aufbereitung_ist_stufe_prepare(monkeypatch):
+    """Review Punkt 4: pre_tts liegt VOR der dramaturgischen Aufbereitung."""
+    async def bricht_in_prepare(req):
+        nj.stufe(req.request_id, "prepare")
+        raise RuntimeError("LLM down")
+    _service_mit(monkeypatch, bricht_in_prepare)
+    with pytest.raises(HTTPException):
+        await r.narrate(_req(), api_key="x")
+    st = await r.narrate_status("story-szene-1:cue-3")
+    assert st["failed_stage"] == "prepare"
+    # prepare gilt als vor dem Sprechen: neu erlaubt
     async def ok(req):
         return _antwort()
     z = _service_mit(monkeypatch, ok)
     await r.narrate(_req(), api_key="x")
     assert z["aufrufe"] == 1
+
+
+@pytest.mark.asyncio
+async def test_mix_kennung_ist_im_sprech_status_unbekannt():
+    nj.reservieren("story-szene-1:cue-3", "h", kind="mix")
+    with pytest.raises(HTTPException) as exc:
+        await r.narrate_status("story-szene-1:cue-3")
+    assert exc.value.status_code == 404
+    with pytest.raises(HTTPException) as exc2:
+        await r.narrate(_req(), api_key="x")
+    assert exc2.value.detail["error"] == "request_id_belongs_to_other_endpoint"
 
 
 @pytest.mark.asyncio

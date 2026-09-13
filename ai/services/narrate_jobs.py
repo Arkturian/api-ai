@@ -30,7 +30,11 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Optional
 
-REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9_.:-]{8,128}$")
+# Kein fuehrender Punkt: die Kennung ist ein Dateiname in jobs_dir, und
+# ".." oder ".versteckt" haben dort nichts verloren. Kein Trennzeichen
+# ist erlaubt, also keine Pfadtraversierung — der Name-Vergleich unten
+# haelt das zusaetzlich fest.
+REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9_:-][A-Za-z0-9_.:-]{7,127}$")
 STALE_AFTER_S = 600
 TTL_DAYS = 30
 _PRE_TTS_STATUS = {402, 422, 429}
@@ -41,15 +45,20 @@ def jobs_dir() -> Path:
 
 
 def request_id_ok(request_id: str) -> bool:
-    return bool(REQUEST_ID_RE.match(request_id or ""))
+    if not REQUEST_ID_RE.match(request_id or ""):
+        return False
+    return Path(request_id).name == request_id and ".." not in request_id
 
 
 def payload_hash(req: Any) -> str:
-    """Kanonische Form dessen, was das Ergebnis bestimmt. `save_options`
-    und `request_id` selbst bleiben draussen: sie aendern nicht, was
-    gesprochen wird."""
+    """Kanonische Form dessen, was das ERGEBNIS bestimmt — einschliesslich
+    `save_options` (Speicherung, Sichtbarkeit): dieselbe Kennung mit
+    `is_public: false` bekaeme sonst beim Replay die oeffentliche Datei
+    des ersten Aufrufs, ein falsches Ergebnis, das richtig aussieht
+    (Story-Codex/Story, Review q-d98ba93140f0). Nur `request_id` und
+    `respeak_stale` bleiben draussen: sie sind Steuerung, nicht Inhalt."""
     d = req.model_dump() if hasattr(req, "model_dump") else dict(req)
-    kern = {k: d.get(k) for k in ("text", "character", "context", "config", "collection_id", "link_id")}
+    kern = {k: d.get(k) for k in ("text", "character", "context", "config", "collection_id", "link_id", "save_options")}
     roh = json.dumps(kern, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
     return hashlib.sha256(roh.encode("utf-8")).hexdigest()
 
@@ -83,9 +92,33 @@ def schreiben(d: dict) -> None:
     tmp.replace(_pfad(d["request_id"]))
 
 
-def anlegen(request_id: str, hash_: str) -> dict:
-    d = {"request_id": request_id, "state": "running", "payload_hash": hash_,
-         "stage": "pre_tts", "created_at": datetime.now().isoformat()}
+def reservieren(request_id: str, hash_: str, kind: str = "narrate", extra: Optional[dict] = None) -> Optional[dict]:
+    """Atomar: O_EXCL. Zwei gleichzeitige Aufrufe mit derselben Kennung —
+    genau einer bekommt die Reservierung, der andere None und liest den
+    Eintrag des Gewinners. `exists()+write()` liesse beide sprechen."""
+    jobs_dir().mkdir(parents=True, exist_ok=True)
+    d = {"request_id": request_id, "kind": kind, "state": "running", "payload_hash": hash_,
+         "stage": "pre_tts", "created_at": datetime.now().isoformat(),
+         "updated_at": datetime.now().isoformat()}
+    if extra:
+        d.update(extra)
+    try:
+        fd = os.open(_pfad(request_id), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+    except FileExistsError:
+        return None
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write(json.dumps(d, ensure_ascii=False))
+    return d
+
+
+def anlegen(request_id: str, hash_: str, kind: str = "narrate") -> dict:
+    """Ueberschreibt bewusst (fuer ausdrueckliches Neusprechen nach stale
+    oder Neuanlauf nach failed/pre_tts). Fuer den ERSTEN Anspruch auf eine
+    Kennung `reservieren` nehmen."""
+    alt = lesen(request_id) or {}
+    d = {"request_id": request_id, "kind": kind, "state": "running", "payload_hash": hash_,
+         "stage": "pre_tts", "created_at": alt.get("created_at") or datetime.now().isoformat(),
+         "attempts": int(alt.get("attempts", 0)) + 1}
     schreiben(d)
     return d
 
@@ -110,6 +143,7 @@ def scheitern(request_id: str, status_code: Optional[int], detail: Any) -> str:
     d = lesen(request_id) or {"request_id": request_id}
     stage = d.get("stage", "pre_tts")
     if stage == "tts" and status_code in _PRE_TTS_STATUS:
+        # Sperren (402/429) und 422 kommen VOR dem Anbieteraufruf
         failed_stage = "pre_tts"
     else:
         failed_stage = stage if stage != "done" else "save"
@@ -121,14 +155,24 @@ def scheitern(request_id: str, status_code: Optional[int], detail: Any) -> str:
 
 
 def aufraeumen() -> int:
-    """Eintraege aelter als TTL_DAYS entfernen. Aufgerufen gelegentlich
-    beim Anlegen, nie im Antwortpfad wichtig."""
+    """Nach TTL_DAYS wird das ERGEBNIS entfernt, die Kennung bleibt als
+    Grabstein (`tombstone: true`). Eine freigegebene Kennung koennte eine
+    alte Wiederholung neu bezahlen lassen (Review q-d98ba93140f0, Punkt 1)."""
     grenze = time.time() - TTL_DAYS * 86400
     n = 0
     try:
         for p in jobs_dir().glob("*.json"):
             if p.stat().st_mtime < grenze:
-                p.unlink(missing_ok=True)
+                try:
+                    d = json.loads(p.read_text(encoding="utf-8"))
+                except (OSError, ValueError):
+                    continue
+                if d.get("tombstone"):
+                    continue
+                d.pop("result", None)
+                d["tombstone"] = True
+                d["tombstoned_at"] = datetime.now().isoformat()
+                p.write_text(json.dumps(d, ensure_ascii=False), encoding="utf-8")
                 n += 1
     except OSError:
         pass

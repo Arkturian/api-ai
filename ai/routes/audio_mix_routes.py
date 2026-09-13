@@ -20,6 +20,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import math
 import os
 import subprocess
 import tempfile
@@ -65,8 +66,7 @@ class MixRequest(BaseModel):
 def mix_hash(req: MixRequest) -> str:
     """Reihenfolge der Spuren ist egal: gleiche Spuren, gleiche Bytes."""
     d = req.model_dump()
-    d.pop("request_id", None)
-    d.pop("save_options", None)
+    d.pop("request_id", None)   # save_options bleibt DRIN: Sichtbarkeit ist Teil des Ergebnisses (Review q-d98ba93140f0)
     d["tracks"] = sorted(d["tracks"], key=lambda t: (t["audio_id"], t["start_s"], t["source_offset_s"]))
     return hashlib.sha256(json.dumps(d, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
@@ -74,6 +74,13 @@ def mix_hash(req: MixRequest) -> str:
 def pruefe_grenzen(req: MixRequest) -> None:
     if not req.tracks:
         raise HTTPException(status_code=422, detail={"error": "no_tracks"})
+    for t in req.tracks:
+        for feld in ("start_s", "source_offset_s", "duration_s", "gain_db", "fade_in_s", "fade_out_s"):
+            w = getattr(t, feld)
+            if w is not None and not math.isfinite(float(w)):
+                raise HTTPException(status_code=422, detail={"error": "non_finite_value", "audio_id": t.audio_id, "field": feld})
+    if req.duration_s is not None and not math.isfinite(float(req.duration_s)):
+        raise HTTPException(status_code=422, detail={"error": "non_finite_value", "field": "duration_s"})
     if len(req.tracks) > MAX_TRACKS:
         raise HTTPException(status_code=422, detail={"error": "too_many_tracks", "max": MAX_TRACKS, "given": len(req.tracks)})
     if req.output_format not in _FORMATE:
@@ -104,11 +111,25 @@ def filtergraph(tracks: List[MixTrack], quellen_dauer: List[float], sample_rate:
     enden = []
     laengen = []
     for t, qd in zip(tracks, quellen_dauer):
-        ende_quelle = min(qd, t.source_offset_s + t.duration_s) if t.duration_s else qd
-        laenge = max(0.0, ende_quelle - t.source_offset_s)
+        # Kein stilles Kappen: was ueber die Quelle hinaus bestellt ist,
+        # wird genannt und abgewiesen (Review q-d98ba93140f0, Punkt 5).
+        if t.source_offset_s >= qd:
+            raise HTTPException(status_code=422, detail={
+                "error": "source_overrun", "audio_id": t.audio_id, "field": "source_offset_s",
+                "source_offset_s": t.source_offset_s, "source_duration_s": round(qd, 3)})
+        if t.duration_s and t.source_offset_s + t.duration_s > qd + 0.0005:
+            raise HTTPException(status_code=422, detail={
+                "error": "source_overrun", "audio_id": t.audio_id, "field": "duration_s",
+                "requested_end_s": round(t.source_offset_s + t.duration_s, 3), "source_duration_s": round(qd, 3)})
+        ende_quelle = (t.source_offset_s + t.duration_s) if t.duration_s else qd
+        laenge = ende_quelle - t.source_offset_s
         laengen.append((ende_quelle, laenge))
         enden.append(t.start_s + laenge)
     gesamt = duration_s if duration_s else (max(enden) if enden else 0.0)
+    if duration_s and max(enden) > duration_s + 0.0005:
+        raise HTTPException(status_code=422, detail={
+            "error": "track_exceeds_duration", "duration_s": duration_s,
+            "latest_track_end_s": round(max(enden), 3)})
     teile, labels = [], []
     for i, (t, (ende_quelle, laenge)) in enumerate(zip(tracks, laengen)):
         kette = [
@@ -132,7 +153,7 @@ def filtergraph(tracks: List[MixTrack], quellen_dauer: List[float], sample_rate:
     if normalize:
         mix += ",loudnorm=I=-16:TP=-1.5:LRA=11"
     mix += f",atrim=end={gesamt:.3f}[out]"
-    return ";".join(teile + [mix]), gesamt
+    return ";".join(teile + [mix]), gesamt, laengen
 
 
 def _dauer(pfad: Path) -> float:
@@ -144,7 +165,7 @@ def _dauer(pfad: Path) -> float:
 def mischen(pfade: List[Path], tracks: List[MixTrack], sample_rate: int, output_format: str,
             duration_s: Optional[float], normalize: bool, ziel: Path) -> tuple:
     dauern = [_dauer(p) for p in pfade]
-    graph, gesamt = filtergraph(tracks, dauern, sample_rate, duration_s, normalize)
+    graph, gesamt, laengen = filtergraph(tracks, dauern, sample_rate, duration_s, normalize)
     codec, fmt = _FORMATE[output_format]
     cmd = ["ffmpeg", "-y", "-v", "error", "-fflags", "+bitexact", "-flags:a", "+bitexact"]
     for p in pfade:
@@ -154,7 +175,7 @@ def mischen(pfade: List[Path], tracks: List[MixTrack], sample_rate: int, output_
     r = subprocess.run(cmd, capture_output=True, text=True)
     if r.returncode != 0:
         raise HTTPException(status_code=500, detail={"error": "ffmpeg_failed", "stderr": (r.stderr or "")[-600:]})
-    return graph, gesamt
+    return graph, gesamt, laengen
 
 
 async def _hole_quelle(audio_id: int, ziel: Path) -> int:
@@ -174,6 +195,19 @@ async def _hole_quelle(audio_id: int, ziel: Path) -> int:
     return len(r.content)
 
 
+@router.get("/audio/mix/{request_id}")
+async def audio_mix_status(request_id: str):
+    """Status eines Mix-Auftrags — eigene Route mit eigenen Feldern; ein
+    Mix-Ergebnis ueber den Sprech-Status zu lesen waere missverstaendlich."""
+    from ai.services import narrate_jobs as nj
+    if not nj.request_id_ok(request_id):
+        raise HTTPException(status_code=404, detail={"error": "unknown_request_id", "request_id": request_id})
+    d = nj.lesen(request_id)
+    if not d or d.get("kind") != "mix":
+        raise HTTPException(status_code=404, detail={"error": "unknown_request_id", "request_id": request_id})
+    return d
+
+
 @router.post("/audio/mix")
 async def audio_mix(req: MixRequest):
     from ai.clients.storage_client import save_file_and_record
@@ -187,6 +221,11 @@ async def audio_mix(req: MixRequest):
             raise HTTPException(status_code=422, detail={"error": "invalid_request_id"})
         alt = nj.lesen(rid)
         if alt:
+            if alt.get("kind") != "mix":
+                raise HTTPException(status_code=409, detail={"error": "request_id_belongs_to_other_endpoint",
+                                    "request_id": rid, "kind": alt.get("kind", "narrate")})
+            if alt.get("tombstone"):
+                raise HTTPException(status_code=410, detail={"error": "request_id_tombstoned", "request_id": rid})
             if alt.get("payload_hash") != h:
                 raise HTTPException(status_code=409, detail={"error": "request_id_payload_mismatch", "request_id": rid})
             if alt.get("state") == "done":
@@ -194,7 +233,13 @@ async def audio_mix(req: MixRequest):
                 return out
             if alt.get("state") == "running" and not alt.get("stale"):
                 raise HTTPException(status_code=409, detail={"error": "mix_in_progress", "request_id": rid}, headers={"Retry-After": "5"})
-        nj.anlegen(rid, h)
+        if not nj.reservieren(rid, h, kind="mix"):
+            alt2 = nj.lesen(rid) or {}
+            if alt2.get("state") == "failed":
+                nj.anlegen(rid, h, kind="mix")     # Rechnen ist kostenlos: neu erlaubt
+            else:
+                raise HTTPException(status_code=409, detail={"error": "mix_in_progress", "request_id": rid},
+                                    headers={"Retry-After": "5"})
 
     try:
         with tempfile.TemporaryDirectory(prefix="audio-mix-") as d:
@@ -205,7 +250,7 @@ async def audio_mix(req: MixRequest):
                 await _hole_quelle(t.audio_id, p)
                 pfade.append(p)
             ziel = d / f"mix.{req.output_format}"
-            graph, gesamt = await asyncio.to_thread(
+            graph, gesamt, laengen_out = await asyncio.to_thread(
                 mischen, pfade, req.tracks, req.sample_rate, req.output_format, req.duration_s, req.normalize, ziel)
             daten = ziel.read_bytes()
             echte_dauer = await asyncio.to_thread(_dauer, ziel)
@@ -223,7 +268,13 @@ async def audio_mix(req: MixRequest):
             "saved": saved is not None,
             "duration_seconds": round(echte_dauer, 3),
             "planned_duration_seconds": round(gesamt, 3),
-            "tracks_used": [{"audio_id": t.audio_id, "start_s": t.start_s} for t in req.tracks],
+            # Zeitwerte gehen als Millisekunden in adelay/atrim; hier stehen
+            # die angewandten Werte, nicht nur die bestellten.
+            "time_resolution_s": 0.001,
+            "tracks_used": [{"audio_id": t.audio_id, "start_s": t.start_s,
+                             "start_s_applied": round(round(t.start_s * 1000) / 1000.0, 3),
+                             "placed_end_s": round(t.start_s + l, 3)}
+                            for t, (_, l) in zip(req.tracks, laengen_out)],
             "ffmpeg_filter": graph,
             "sample_rate": req.sample_rate,
             "output_format": req.output_format,
