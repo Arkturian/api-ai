@@ -308,7 +308,13 @@ def _cli_status(name: str = "codex") -> dict:
     env = os.environ.copy()
     env["NO_COLOR"] = "1"
     try:
-        r = subprocess.run([name, "--version"], capture_output=True, text=True,
+        cmd = [name, "--version"]
+        if name == "codex":
+            # Als alex, wenn so konfiguriert — sonst legt schon der
+            # Gesundheitscheck root-eigene tmp/arg0-Pfade in Alex' Home an.
+            from ai.routes.text_ai_routes import codex_als_benutzer
+            cmd = codex_als_benutzer(cmd, env)
+        r = subprocess.run(cmd, capture_output=True, text=True,
                            timeout=10, env=env)
         out = (r.stdout or "").strip()
         err = (r.stderr or "").strip()

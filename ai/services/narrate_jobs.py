@@ -201,7 +201,7 @@ def anlegen(request_id: str, hash_: str, kind: str = "narrate") -> dict:
 # "kostenlos" gelesen wird (Story-Codex, Restpunkt 2).
 STAGE_SEMANTICS = {
     "pre_tts": "vor jedem Modell- und Anbieteraufruf; Neuanlauf kostet nichts",
-    "prepare": "dramaturgische Aufbereitung = Modellaufruf ueber das Abo (0 EUR je Aufruf, Kontingent); Neuanlauf wiederholt diesen Aufruf, keine Zeichen",
+    "prepare": "dramaturgische Aufbereitung ueber /ai/chatgpt (codex-CLI, ChatGPT-Abo: keine gezaehlten Einheiten, Kontingent des Abos); Neuanlauf wiederholt diesen Aufruf, verbraucht keine ElevenLabs-Zeichen",
     "tts": "Anbieteraufruf laeuft; Zeichen koennen verbraucht sein -> kein automatischer Neuanlauf",
     "save": "Anbieteraufruf abgeschlossen, Speicherung lief; Zeichen verbraucht -> kein automatischer Neuanlauf",
     "done": "Ergebnis gespeichert",

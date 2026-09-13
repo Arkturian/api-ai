@@ -78,6 +78,11 @@ class NarrationConfig(BaseModel):
     # das, was gesprochen wurde. Standard aus: bestehende Aufrufer
     # bekommen weiter den Streaming-Pfad.
     with_timestamps: bool = Field(default=False, description="Return word-level timestamps from ElevenLabs alignment (with-timestamps endpoint)")
+    # Striktes Verhalten (Story-Codex/Story, q-d98ba93140f0): scheitert
+    # die angeforderte Aufbereitung, kommt ein Fehler VOR dem Sprechen —
+    # kein stilles Weitersprechen des Rohtexts. Vorgabe aus: bestehende
+    # Aufrufer behalten den markierten Rueckfall.
+    preparation_strict: bool = Field(default=False, description="If preprocessing fails: raise before TTS instead of falling back to the raw text")
 
 
 class NarrationRequest(BaseModel):
@@ -106,7 +111,11 @@ class NarrationResponse(BaseModel):
     duration_seconds: Optional[float] = None
     dramatic_script: str = Field(description="The enriched script that was spoken")
     original_text: str = Field(description="Original input text")
+    # Herkunft der Aufbereitung, wahr: bis 13.09. stand hier "gemini",
+    # obwohl der Pfad jeden Fehler fing und den Rohtext zurueckgab.
     preprocessing_model: Optional[str] = None
+    prepared: bool = False
+    preparation_source: Optional[str] = None
     # Nur bei config.with_timestamps: [{"word", "start", "end"}], Sekunden
     # ab Audiobeginn, ueber Textstuecke hinweg fortlaufend.
     word_timestamps: Optional[List[dict]] = None
@@ -245,9 +254,9 @@ class NarrationService:
             from ai.services import narrate_jobs
             narrate_jobs.stufe(request.request_id, "prepare")
         if request.config.preprocessing:
-            dramatic_script = await self._preprocess_text(request)
+            dramatic_script, prep_source, prep_model = await self._preprocess_text_mit_herkunft(request)
         else:
-            dramatic_script = request.text
+            dramatic_script, prep_source, prep_model = request.text, "none", None
 
         logger.info(f"[Narration] Script ready ({len(dramatic_script)} chars, {int((time.time()-t_start)*1000)}ms)")
 
@@ -280,7 +289,9 @@ class NarrationService:
             duration_seconds=duration_seconds,
             dramatic_script=dramatic_script,
             original_text=request.text,
-            preprocessing_model="gemini" if request.config.preprocessing else None,
+            preprocessing_model=prep_model,
+            prepared=prep_source.startswith("chatgpt:"),
+            preparation_source=prep_source,
             word_timestamps=word_timestamps,
             timestamps_source="elevenlabs_alignment" if word_timestamps is not None else None,
             timestamp_granularity="word" if word_timestamps is not None else None,
@@ -306,7 +317,26 @@ class NarrationService:
         return await self._preprocess_text(request)
 
     async def _preprocess_text(self, request: NarrationRequest) -> str:
-        """AI agent enriches text with dramatic markup for TTS."""
+        """Vertraeglichkeit fuer den Hoerspielpfad (erwartet nur den Text).
+        Verhaelt sich wie nicht-strikt: markierter Rueckfall statt Fehler."""
+        text, _, _ = await self._preprocess_text_mit_herkunft(request, strikt=False)
+        return text
+
+    async def _preprocess_text_mit_herkunft(self, request: NarrationRequest, strikt: Optional[bool] = None) -> tuple:
+        """Dramaturgische Aufbereitung ueber den Abo-Textpfad (/ai/chatgpt,
+        codex-CLI) — Vorgabe der Projektleitung (Story, q-d98ba93140f0),
+        bis Alex etwas anderes sagt. Kein Google-Schluessel: bis 13.09.
+        rief dieser Pfad `genai.GenerativeModel('gemini-2.5-flash')` direkt,
+        fing jeden Fehler und gab den Rohtext zurueck — `preprocessing_model`
+        behauptete trotzdem Gemini.
+
+        Rueckgabe (text, quelle, modell):
+          quelle = "chatgpt:<modell>"                  — aufbereitet
+                 | "legacy_fallback_original_text"     — Rueckfall, markiert
+        strikt: Fehler VOR dem Sprechen (502 preparation_failed) statt Rueckfall.
+        """
+        if strikt is None:
+            strikt = bool(getattr(request.config, "preparation_strict", False))
         prompt = DRAMATIC_AGENT_PROMPT.format(
             character_name=request.character.name,
             personality=request.character.personality or "natürlich, freundlich",
@@ -321,19 +351,40 @@ class NarrationService:
             text=request.text,
         )
 
+        modell = os.getenv("NARRATE_PREP_MODEL", "gpt-5.6-sol")
+        effort = os.getenv("NARRATE_PREP_EFFORT", "medium")
+        fehler = None
         try:
-            model = genai.GenerativeModel('gemini-2.5-flash')
-            response = await asyncio.to_thread(model.generate_content, prompt)
-            result = response.text.strip()
-            # Clean any markdown wrapping
+            import httpx
+            async with httpx.AsyncClient(timeout=float(os.getenv("NARRATE_PREP_TIMEOUT_S", "180"))) as client:
+                resp = await client.post(
+                    "http://localhost:8000/ai/chatgpt",
+                    json={"prompt": prompt, "max_tokens": 4000, "model": modell, "effort": effort,
+                          # Fremder Text in einer werkzeugfaehigen CLI: nur lesen.
+                          "sandbox": "read-only"},
+                    headers={"X-API-Key": os.getenv("API_KEY", "")},
+                )
+            if resp.status_code != 200:
+                raise RuntimeError(f"/ai/chatgpt {resp.status_code}: {resp.text[:200]}")
+            data = resp.json()
+            result = (data.get("response") or data.get("message") or "").strip()
             if result.startswith("```"):
                 result = result.split("\n", 1)[1] if "\n" in result else result[3:]
             if result.endswith("```"):
                 result = result[:-3].strip()
-            return result
+            if not result:
+                raise RuntimeError("leere Antwort der Aufbereitung")
+            echtes_modell = data.get("model") or modell
+            return result, f"chatgpt:{echtes_modell}", echtes_modell
         except Exception as e:
-            logger.warning(f"[Narration] Preprocessing failed, using original text: {e}")
-            return request.text  # Fallback: use original text
+            fehler = e
+        if strikt:
+            raise HTTPException(status_code=502, detail={
+                "error": "preparation_failed",
+                "hint": "Aufbereitung angefordert und gescheitert; nicht gesprochen, keine Zeichen verbraucht.",
+                "source": f"chatgpt:{modell}", "exc": str(fehler)[:300]})
+        logger.warning(f"[Narration] Preprocessing failed, using original text (legacy fallback): {fehler}")
+        return request.text, "legacy_fallback_original_text", None
 
     async def _generate_tts(self, text: str, request: NarrationRequest) -> tuple:
         """Generate audio via ElevenLabs. Returns (audio_bytes, word_timestamps|None)."""
