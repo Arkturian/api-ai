@@ -164,15 +164,21 @@ async def generate_music_elevenlabs(prompt: str, duration_ms: Optional[int] = 30
                 dl_.raise_for_status()
                 return dl_.content
 
-            # If bad_prompt, return marker to allow retry with suggestion
+            # bad_prompt: KEIN automatischer zweiter Aufruf mit dem Vorschlag
+            # des Anbieters. Das war bis 13.09. so (Story/Story-Codex, Review
+            # q-d98ba93140f0): ein zweiter bezahlter Aufruf ohne Entscheidung,
+            # und der Inhalt war nicht mehr der bestellte — der Snapshot sagte
+            # Prompt A, die Datei kam aus Prompt B, den niemand gesehen hatte.
+            # Jetzt 422 mit dem Vorschlag im Detail; der Aufrufer entscheidet.
             detail = body.get("detail") or {}
             if isinstance(detail, dict) and detail.get("status") == "bad_prompt":
                 suggestion = ((detail.get("data") or {}).get("prompt_suggestion"))
-                if suggestion:
-                    print("--- Music Gen (ElevenLabs): Bad prompt flagged. Retrying with suggested prompt.")
-                    p_retry = dict(p)
-                    p_retry["prompt"] = suggestion
-                    return await _attempt_request(p_retry)
+                raise HTTPException(status_code=422, detail={
+                    "error": "music_prompt_rejected",
+                    "prompt": p.get("prompt"),
+                    "prompt_suggestion": suggestion,
+                    "hint": "Anbieter lehnt den Prompt ab. Den Vorschlag bewusst uebernehmen und neu aufrufen — es wird nicht automatisch neu erzeugt.",
+                })
 
             # No usable audio
             raise HTTPException(status_code=r.status_code, detail=f"ElevenLabs music API returned no audio data: {body}")
@@ -197,10 +203,13 @@ async def generate_music_elevenlabs(prompt: str, duration_ms: Optional[int] = 30
     )
 
     print(f"--- Music Gen (ElevenLabs): Saved music to storage object ID {saved_obj.id}")
+    from ai.services.tts_service import probe_audio_duration
+    gemessen = probe_audio_duration(music_bytes)
     return {
         "id": saved_obj.id,
         "file_url": saved_obj.file_url,
         "audio_url": saved_obj.file_url,
         "storage_object_id": saved_obj.id,
-        "format": "mp3"
+        "format": "mp3",
+        "duration_seconds": round(float(gemessen), 3) if gemessen else None,
     }

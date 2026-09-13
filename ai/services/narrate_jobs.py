@@ -63,6 +63,14 @@ def payload_hash(req: Any) -> str:
     return hashlib.sha256(roh.encode("utf-8")).hexdigest()
 
 
+def dict_hash(d: dict, ohne=("request_id",)) -> str:
+    """Hash einer beliebigen Nutzlast (gensfx, genmusic_eleven) — alles
+    zaehlt, was das Ergebnis bestimmt; nur die Steuerfelder bleiben draussen."""
+    k = {a: b for a, b in dict(d).items() if a not in set(ohne)}
+    roh = json.dumps(k, sort_keys=True, ensure_ascii=False, separators=(",", ":"), default=str)
+    return hashlib.sha256(roh.encode("utf-8")).hexdigest()
+
+
 def _pfad(request_id: str) -> Path:
     return jobs_dir() / f"{request_id}.json"
 

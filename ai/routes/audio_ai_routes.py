@@ -48,14 +48,51 @@ class AudioResponse(BaseModel):
 
 class SFXRequest(BaseModel):
     prompt: str
+    # Wird seit 13.09. an ElevenLabs durchgereicht (duration_seconds);
+    # vorher stand das Feld im Schema und ging nirgends hin (Story-Codex,
+    # Review q-d98ba93140f0): der Aufrufer bekam ein Geraeusch unbekannter
+    # Laenge fuer eine Dauer, die er bestellt hatte.
     duration: Optional[float] = 5.0
     model: Optional[str] = "audio-ldm"
+    request_id: Optional[str] = None
 
 
 class MusicRequest(BaseModel):
     prompt: str
     duration: Optional[int] = 30
     model: Optional[str] = "suno"  # suno or eleven
+    request_id: Optional[str] = None
+
+
+def _job_vorab(rid: Optional[str], kind: str, nutzlast: dict):
+    """Idempotenz wie bei narrate/mix: (replay_result | None). Wirft 409/410/422."""
+    from ai.services import narrate_jobs as nj
+    if not rid:
+        return None
+    if not nj.request_id_ok(rid):
+        raise HTTPException(status_code=422, detail={"error": "invalid_request_id"})
+    h = nj.dict_hash(nutzlast)
+    alt = None if nj.reservieren(rid, h, kind=kind) else nj.lesen(rid)
+    if not alt:
+        return None
+    if alt.get("kind") != kind:
+        raise HTTPException(status_code=409, detail={"error": "request_id_belongs_to_other_endpoint", "request_id": rid, "kind": alt.get("kind")})
+    if alt.get("tombstone"):
+        raise HTTPException(status_code=410, detail={"error": "request_id_tombstoned", "request_id": rid})
+    if alt.get("payload_hash") != h:
+        raise HTTPException(status_code=409, detail={"error": "request_id_payload_mismatch", "request_id": rid})
+    st = alt.get("state")
+    if st == "done":
+        out = dict(alt["result"]); out["replayed"] = True
+        return out
+    if st == "running":
+        raise HTTPException(status_code=409, detail={"error": f"{kind}_in_progress", "request_id": rid, "stale": bool(alt.get("stale"))},
+                            headers={"Retry-After": "5"})
+    if st == "failed" and alt.get("failed_stage") in ("tts", "save"):
+        raise HTTPException(status_code=409, detail={"error": f"{kind}_failed_after_generation", "request_id": rid,
+                            "failed_stage": alt.get("failed_stage"), "error_detail": alt.get("error")})
+    nj.anlegen(rid, h, kind=kind)
+    return None
 
 
 class AudioGenRequest(BaseModel):
@@ -209,20 +246,34 @@ async def generate_sfx_endpoint(
     from ai.services import tts_service
     from ai.clients.storage_client import save_file_and_record
 
+    from ai.services import narrate_jobs as nj
+    rid = request.request_id
+    replay = _job_vorab(rid, "sfx", {"prompt": request.prompt, "duration": request.duration, "model": request.model})
+    if replay:
+        return replay
     try:
         from elevenlabs.client import AsyncElevenLabs
 
         print(f"--- SFX Gen: Generating SFX for prompt: '{request.prompt[:80]}...'")
         from ai.services.elevenlabs_cost_tracker import elevenlabs_cost_tracker
         elevenlabs_cost_tracker.pre_check(0, endpoint="gensfx")
+        if rid:
+            nj.stufe(rid, "tts")
         client = AsyncElevenLabs(api_key=os.getenv("ELEVENLABS_API_KEY"))
 
-        audio_stream = client.text_to_sound_effects.convert(text=request.prompt)
+        # duration_seconds: die bestellte Dauer geht an den Anbieter (SDK
+        # 2.41: 0,5-22 s). Bestellt ist nicht geliefert — gemessen wird unten.
+        _args = {"text": request.prompt}
+        if request.duration:
+            _args["duration_seconds"] = float(request.duration)
+        audio_stream = client.text_to_sound_effects.convert(**_args)
 
         audio_bytes = b""
         async for chunk in audio_stream:
             audio_bytes += chunk
-        elevenlabs_cost_tracker.track_sfx(caller="gensfx")
+        elevenlabs_cost_tracker.track_sfx(caller="gensfx", seconds_requested=request.duration)
+        if rid:
+            nj.stufe(rid, "save")
 
         if not audio_bytes:
             raise HTTPException(status_code=500, detail="ElevenLabs SFX generation returned no data.")
@@ -253,22 +304,58 @@ async def generate_sfx_endpoint(
             collection_id="ai-generated-sfx"
         )
 
+        # Dekodiert gemessen, nicht bestellt: die Datei ist die Zeitbasis.
+        gemessen = tts_service.probe_audio_duration(audio_bytes)
         temp_path.unlink()
         print(f"--- SFX Gen: Saved SFX to storage object ID {saved_obj.id}")
 
-        return {
+        result = {
             "id": saved_obj.id,
             "file_url": saved_obj.file_url,
             "audio_url": saved_obj.file_url,
             "storage_object_id": saved_obj.id,
-            "format": "mp3"
+            "format": "mp3",
+            "saved": True,
+            "duration_seconds": round(float(gemessen), 3) if gemessen else None,
+            "duration_requested_s": request.duration,
+            "request_id": rid,
+            "replayed": False,
         }
+        if rid:
+            nj.abschliessen(rid, result)
+        return result
 
+    except HTTPException as e:
+        # Sperren (429/402), 422 usw. unveraendert durchlassen — der
+        # generische Zweig unten machte daraus bis 13.09. eine 500.
+        if rid:
+            nj.scheitern(rid, e.status_code, e.detail)
+        raise
     except Exception as e:
+        if rid:
+            nj.scheitern(rid, None, str(e)[:300])
         logger.error(f"SFX generation error: {e}")
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/gensfx/{request_id}")
+async def gensfx_status(request_id: str):
+    from ai.services import narrate_jobs as nj
+    d = nj.lesen(request_id) if nj.request_id_ok(request_id) else None
+    if not d or d.get("kind") != "sfx":
+        raise HTTPException(status_code=404, detail={"error": "unknown_request_id", "request_id": request_id})
+    return d
+
+
+@router.get("/genmusic_eleven/{request_id}")
+async def genmusic_eleven_status(request_id: str):
+    from ai.services import narrate_jobs as nj
+    d = nj.lesen(request_id) if nj.request_id_ok(request_id) else None
+    if not d or d.get("kind") != "music":
+        raise HTTPException(status_code=404, detail={"error": "unknown_request_id", "request_id": request_id})
+    return d
 
 
 async def _fetch_audio_from_url(url: str) -> UploadFile:
@@ -848,7 +935,7 @@ async def generate_music_endpoint(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/genmusic_eleven", response_model=AudioResponse)
+@router.post("/genmusic_eleven")
 async def generate_music_eleven_endpoint(
     request: MusicRequest,
     api_key: str = Depends(get_api_key)
@@ -860,20 +947,42 @@ async def generate_music_eleven_endpoint(
     - High quality music generation
     - Style control
     - Instrumental and vocal options
-    - Auto-retry with suggested prompt if flagged
+    - No automatic retry: a rejected prompt returns 422 with the provider suggestion
     """
+    from ai.services import narrate_jobs as nj
+    rid = request.request_id
+    replay = _job_vorab(rid, "music", {"prompt": request.prompt, "duration": request.duration, "model": "eleven"})
+    if replay:
+        return replay
     try:
         duration_ms = request.duration * 1000  # Convert seconds to milliseconds
+        if rid:
+            nj.stufe(rid, "tts")
         result = await generate_music_elevenlabs(request.prompt, duration_ms)
-
-        return AudioResponse(
-            audio_url=result["audio_url"],
-            file_url=result["audio_url"],  # For frontend compatibility
-            storage_object_id=result["storage_object_id"],
-            duration_seconds=float(request.duration),
-            format=result["format"]
-        )
+        # Gemessen, nicht bestellt: `duration_seconds` war bis 13.09. die
+        # Bestellung, nicht die Datei.
+        out = {
+            "audio_url": result["audio_url"],
+            "file_url": result["audio_url"],
+            "storage_object_id": result["storage_object_id"],
+            "id": result.get("id"),
+            "saved": True,
+            "duration_seconds": result.get("duration_seconds"),
+            "duration_requested_s": float(request.duration),
+            "format": result["format"],
+            "request_id": rid,
+            "replayed": False,
+        }
+        if rid:
+            nj.abschliessen(rid, out)
+        return out
+    except HTTPException as e:
+        if rid:
+            nj.scheitern(rid, e.status_code, e.detail)
+        raise
     except Exception as e:
+        if rid:
+            nj.scheitern(rid, None, str(e)[:300])
         logger.error(f"ElevenLabs music error: {e}")
         import traceback
         traceback.print_exc()
