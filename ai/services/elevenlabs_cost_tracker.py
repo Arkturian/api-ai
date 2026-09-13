@@ -330,10 +330,15 @@ class ElevenLabsCostTracker:
                 # Texts) und ElevenLabs' `character_count` laufen nicht 1:1 —
                 # 177 -> +48, 276 -> +76, beide Male ~0,27. Was der Anbieter
                 # zaehlt, ist nicht belegt; unser Deckel ist damit konservativ.
-                "note": ("chars_used zaehlt die Laenge des gesendeten Texts; ElevenLabs' "
-                         "subscription.character_count stieg bei denselben Aufrufen um ~0,27 davon "
-                         "(gemessen 12./13.09.). Beide Zahlen sind nicht dieselbe Einheit; der "
-                         "Deckel in chars_used sperrt frueher als das Anbieterkontingent."),
+                # Nur Messwerte, keine Verallgemeinerung (Story-Codex, 13.09.):
+                # aus zwei Serien folgt keine Garantie, dass der interne
+                # Deckel stets frueher sperrt.
+                "note": ("chars_used = intern gezaehlte Textzeichen (Laenge des gesendeten Texts). "
+                         "ElevenLabs' subscription.character_count ist eine andere Zaehlweise: gemessen "
+                         "12./13.09. 177 intern -> +48 beim Anbieter, 276 intern -> +76. Beide Zahlen "
+                         "getrennt lesen; die Anbieterzaehlweise ist nicht geklaert."),
+                "audio_seconds_note": ("0 = keine Messbuchung: die Dauer wird erst nach der Buchung in narrate "
+                                       "gemessen und steht je Aufruf in duration_seconds."),
                 "month": d.get("month"),
                 "chars_used": used,
                 "monthly_char_cap": cap,
