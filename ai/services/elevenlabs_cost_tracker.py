@@ -171,6 +171,15 @@ class ElevenLabsCostTracker:
     def track_tts(self, chars: int, caller: str = "tts", audio_seconds: Optional[float] = None) -> None:
         self._track("tts", caller, chars=int(chars), audio_seconds=float(audio_seconds or 0))
 
+    def track_audio_seconds(self, seconds: float, caller: str = "narrate") -> None:
+        """Nachbuchung der GEMESSENEN Dauer: die Zeichen werden in tts_service
+        beim Empfang der Bytes gebucht, die Dauer kennt erst narrate nach der
+        Messung. Story (13.09.): eine Null nach 18,5 s echter Sprache ist eine
+        Null, die nicht stimmt. Zaehlt keinen Aufruf, nur Sekunden."""
+        if not seconds or seconds <= 0:
+            return
+        self._track("seconds", caller, audio_seconds=float(seconds))
+
     def track_sfx(self, caller: str = "gensfx", seconds_requested: Optional[float] = None) -> None:
         self._track("sfx", caller, seconds_requested=float(seconds_requested or 0))
 
@@ -200,6 +209,8 @@ class ElevenLabsCostTracker:
                     usd = self.price_per_1k_chars_usd * chars / 1000.0
                     d["total_cost_usd"] = float(d.get("total_cost_usd", 0)) + usd
                     d["total_cost_eur"] = float(d.get("total_cost_eur", 0)) + usd / EUR_USD_RATE
+            elif modality == "seconds":
+                d["audio_seconds_total"] = float(d.get("audio_seconds_total", 0)) + float(units.get("audio_seconds", 0))
             elif modality == "sfx":
                 d["sfx_calls"] = int(d.get("sfx_calls", 0)) + 1
                 d["sfx_seconds_requested"] = float(d.get("sfx_seconds_requested", 0)) + float(units.get("seconds_requested", 0))
@@ -207,8 +218,10 @@ class ElevenLabsCostTracker:
                 d["music_calls"] = int(d.get("music_calls", 0)) + 1
                 d["music_seconds_requested"] = float(d.get("music_seconds_requested", 0)) + float(units.get("seconds_requested", 0))
             bc = d.setdefault("by_caller", {}).setdefault(caller, {"calls": 0, "chars": 0})
-            bc["calls"] += 1
-            bc["chars"] += int(units.get("chars", 0))
+            if modality != "seconds":
+                bc["calls"] += 1
+                bc["chars"] += int(units.get("chars", 0))
+            bc["audio_seconds"] = round(float(bc.get("audio_seconds", 0)) + float(units.get("audio_seconds", 0)), 3)
             self._save_data()
             self._check_thresholds()
         logger.info("ElevenLabs gezaehlt: %s/%s %s (Monat: %d Zeichen)", modality, caller, units, self._usage_data.get("chars_total", 0))
@@ -337,15 +350,15 @@ class ElevenLabsCostTracker:
                          "ElevenLabs' subscription.character_count ist eine andere Zaehlweise: gemessen "
                          "12./13.09. 177 intern -> +48 beim Anbieter, 276 intern -> +76. Beide Zahlen "
                          "getrennt lesen; die Anbieterzaehlweise ist nicht geklaert."),
-                "audio_seconds_note": ("0 = keine Messbuchung: die Dauer wird erst nach der Buchung in narrate "
-                                       "gemessen und steht je Aufruf in duration_seconds."),
+                "audio_seconds_note": ("Summe der in narrate GEMESSENEN Dauern (Nachbuchung nach der Messung); "
+                                       "Pfade ohne Messung (Hoerspiel, gensfx) tragen hier nichts bei."),
                 "month": d.get("month"),
                 "chars_used": used,
                 "monthly_char_cap": cap,
                 "usage_percentage": round(used / cap * 100, 2) if cap > 0 else 0.0,
                 "chars_remaining": max(0, cap - used) if cap > 0 else None,
                 "tts_calls": d.get("tts_calls", 0),
-                "audio_seconds_total": round(float(d.get("audio_seconds_total", 0)), 2),
+                "audio_seconds_total": round(float(d.get("audio_seconds_total", 0)), 3),
                 "sfx_calls": d.get("sfx_calls", 0),
                 "sfx_seconds_requested": round(float(d.get("sfx_seconds_requested", 0)), 1),
                 "music_calls": d.get("music_calls", 0),

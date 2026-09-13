@@ -274,6 +274,9 @@ class NarrationService:
             audio_bytes,
             request.config.output_format,
         )
+        if duration_seconds:
+            from ai.services.elevenlabs_cost_tracker import elevenlabs_cost_tracker
+            elevenlabs_cost_tracker.track_audio_seconds(duration_seconds, caller="narrate")
         logger.info(f"[Narration] TTS done ({len(audio_bytes)} bytes, {int((time.time()-t_start)*1000)}ms)")
 
         # Step 3: Optional save to Storage API

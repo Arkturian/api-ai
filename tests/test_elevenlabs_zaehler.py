@@ -153,3 +153,21 @@ def test_client_status_zeigt_den_master(monkeypatch, tmp_path):
     st2 = t.get_status()
     assert st2["view"] == "local" and st2["chars_used"] == 0
     ez.ElevenLabsCostTracker._instance = None
+
+
+def test_sekunden_nachbuchung_zaehlt_keinen_aufruf(frisch):
+    frisch.track_tts(276, caller="tts_service_timestamps")
+    frisch.track_audio_seconds(18.529, caller="narrate")
+    st = frisch.get_status()
+    assert st["tts_calls"] == 1 and st["chars_used"] == 276
+    assert st["audio_seconds_total"] == 18.529
+    assert st["by_caller"]["narrate"]["audio_seconds"] == 18.529 and st["by_caller"]["narrate"]["calls"] == 0
+    frisch.track_audio_seconds(0, caller="narrate")          # nichts gemessen -> nichts gebucht
+    assert frisch.get_status()["audio_seconds_total"] == 18.529
+
+
+def test_narrate_bucht_die_gemessene_dauer_nach():
+    import inspect
+    from ai.services import narration_service as n
+    q = inspect.getsource(n.NarrationService.generate)
+    assert "track_audio_seconds(duration_seconds" in q
