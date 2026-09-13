@@ -41,13 +41,14 @@ def _rest(monkeypatch):
     monkeypatch.delenv("NARRATE_PREP_MODEL", raising=False)
 
 
+_ECHTER_CLIENT = httpx.AsyncClient   # einmal gefangen: ein zweiter Stub darf nicht den ersten kapseln
+
+
 def _chatgpt(monkeypatch, status=200, body=None):
     def handler(request):
         assert request.url.path == "/ai/chatgpt"
-        assert request.read() and b'"sandbox": "read-only"' in request.read() or True
         return httpx.Response(status, json=body if body is not None else {"response": "Mira ... trat durch das Tor.", "model": "gpt-5.6-sol"})
-    orig = httpx.AsyncClient
-    monkeypatch.setattr(httpx, "AsyncClient", lambda *a, **k: orig(transport=httpx.MockTransport(handler), **{x: y for x, y in k.items() if x != "transport"}))
+    monkeypatch.setattr(httpx, "AsyncClient", lambda *a, **k: _ECHTER_CLIENT(transport=httpx.MockTransport(handler), **{x: y for x, y in k.items() if x != "transport"}))
 
 
 def _tts(monkeypatch, gezaehlt):
@@ -97,3 +98,21 @@ def test_kein_gemini_sdk_mehr_im_pfad():
     import inspect
     q = inspect.getsource(n.NarrationService._preprocess_text_mit_herkunft)
     assert "generate_content" not in q and "/ai/chatgpt" in q   # der Docstring nennt das alte SDK als Geschichte
+
+
+# ---------------------------------------------------- Vorschau (Story-Codex, 13.09.)
+
+@pytest.mark.asyncio
+async def test_vorschau_zeigt_herkunft_und_achtet_strikt(monkeypatch):
+    from ai.routes import narration_routes as r
+    _chatgpt(monkeypatch)
+    out = await r.narrate_preview(_req(), api_key="x")
+    import json
+    d = json.loads(out.body)
+    assert d["prepared"] is True and d["preparation_source"] == "chatgpt:gpt-5.6-sol"
+    _chatgpt(monkeypatch, status=502, body={"detail": "down"})
+    d2 = json.loads((await r.narrate_preview(_req(strikt=False), api_key="x")).body)
+    assert d2["prepared"] is False and d2["preparation_source"] == "legacy_fallback_original_text"
+    with pytest.raises(HTTPException) as exc:
+        await r.narrate_preview(_req(strikt=True), api_key="x")
+    assert exc.value.status_code == 502 and exc.value.detail["error"] == "preparation_failed"

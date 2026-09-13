@@ -320,13 +320,23 @@ async def narrate_preview(req: NarrationRequest, api_key: str = Depends(get_api_
     """
     service = NarrationService()
     try:
-        script = await service.preprocess_only(req)
+        # Dieselbe Herkunft wie im Sprechpfad (Story-Codex, q-d98ba93140f0):
+        # bis 13.09. lief die Vorschau immer nicht-strikt und zeigte weder
+        # `prepared` noch Quelle — eine Vorabpruefung konnte ein
+        # aufbereitetes Ergebnis vortaeuschen, das der Rueckfall war.
+        script, quelle, modell = await service._preprocess_text_mit_herkunft(req)
         return JSONResponse(content={
             "dramatic_script": script,
             "original_text": req.text,
             "character": req.character.name,
             "mood": req.context.mood,
+            "prepared": quelle.startswith("chatgpt:"),
+            "preparation_source": quelle,
+            "preprocessing_model": modell,
+            "preparation_strict": bool(req.config.preparation_strict),
         })
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Preview failed: {str(e)}")
 
