@@ -55,6 +55,12 @@ class ImageGenRequest(BaseModel):
     # Subscription / free-tier providers (Higgsfield, Gemini-CLI) ignore
     # this flag.
     confirm_api_billing: Optional[bool] = Field(default=False, description="Required true for MiniMax models (pay-as-you-go)")
+    # Weiche zwischen Abo (codex image_gen, keine Rechnung) und bezahltem
+    # Pfad. auto (Vorgabe): kleine Groessen (<= 1536 Kante, <= 1024x1536
+    # Pixel, keine Referenzbilder) laufen ueber das Abo und werden auf die
+    # verlangte Groesse eingepasst; Antwort traegt routed_via, model,
+    # model_requested. subscription: Abo erzwingen. api: bezahlt erzwingen.
+    route: Optional[str] = Field(default="auto", description="auto | subscription | api")
     # OpenAI gpt-image-* quality knob. Default null → server picks "auto"
     # (which itself auto-scales by resolution). Set to "low" / "medium" /
     # "high" if you explicitly want OpenAI's quality tier (high consistently
@@ -169,6 +175,33 @@ def is_openai_image_model(model: str) -> bool:
 
 def is_codex_image_model(model: str) -> bool:
     return model == "codex-imagegen"
+
+
+_ROUTEN = ("auto", "subscription", "api")
+# Bis hierhin liefert das Abo (gemessen 13.09.: ~1,57 MP, 16:9 bis
+# 2048x1152) genug Pixel, um die verlangte Groesse durch Einpassen exakt
+# zu treffen. Darueber (2K, 4K) bleibt der bezahlte Pfad.
+_ABO_MAX_KANTE = 1536
+_ABO_MAX_PIXEL = 1024 * 1536
+
+
+def _abo_geeignet(request: "ImageGenRequest") -> tuple:
+    """-> (ok, grund). Darf ein bezahlter gpt-image-*-Auftrag unter
+    route=auto ueber das Abo laufen? Nur wenn das Ergebnis dasselbe
+    Versprechen halten kann: exakte Groesse, keine Referenzbilder."""
+    if (request.route or "auto") != "auto":
+        return False, "route"
+    modell = MODEL_MAPPING.get(request.model or "gpt-image-2", request.model or "")
+    if not is_openai_image_model(modell):
+        return False, "model"
+    if request.reference_image_urls:
+        return False, "reference_images_need_api"
+    if (request.image_size or "").strip().upper() in ("2K", "4K"):
+        return False, "image_size"
+    w, h = request.width or 1024, request.height or 1024
+    if w > _ABO_MAX_KANTE or h > _ABO_MAX_KANTE or w * h > _ABO_MAX_PIXEL:
+        return False, "too_large_for_subscription"
+    return True, "ok"
 
 
 def prompt_mit_negativ(prompt: str, negative_prompt: Optional[str]) -> str:
@@ -1060,6 +1093,18 @@ async def _generate_image_einmal(
                     },
                 )
 
+        # Weiche Abo/bezahlt (Alex, 15.09.): unbekannte Route ist ein Fehler,
+        # kein stilles auto.
+        route = (request.route or "auto").strip().lower()
+        if route not in _ROUTEN:
+            raise HTTPException(status_code=422, detail={"error": "unknown_route", "route": request.route,
+                                                         "allowed": list(_ROUTEN)})
+        abo_auto = _abo_geeignet(request)[0]
+        result = None
+        routed_via = None
+        model_requested = None
+        subscription_attempt = None
+
         # Route to appropriate provider
         if is_higgsfield_model(actual_model):
             result = await generate_with_higgsfield(
@@ -1095,25 +1140,49 @@ async def _generate_image_einmal(
                 link_id=request.link_id,
             )
 
-        elif is_codex_image_model(actual_model):
+        elif is_codex_image_model(actual_model) or route == "subscription" or abo_auto:
             # ChatGPT-Abo ueber das codex-CLI: kein Schluessel, kein Zaehler,
-            # keine Groessenzusage. Kein Billing-Tor — es faellt nichts an.
-            from ai.services.codex_imagegen import generate_with_codex_imagegen
-            result = await generate_with_codex_imagegen(
-                prompt=request.prompt,
-                collection_id=request.collection_id or "ai-generated-images",
-                link_id=request.link_id,
-                negative_prompt=request.negative_prompt,
-                aspect_ratio=request.aspect_ratio,
-                background=request.background,
-                image_size=request.image_size,
-                width=request.width,
-                height=request.height,
-            )
+            # kein Billing-Tor — es faellt nichts an. Groesse wird eingepasst.
+            # route=auto schickt kleine gpt-image-*-Auftraege hierher (Alex,
+            # 15.09.): Antwort sagt es (routed_via, model, model_requested).
+            from ai.services import codex_imagegen as _ci
+            try:
+                result = await _ci.generate_with_codex_imagegen(
+                    prompt=request.prompt,
+                    collection_id=request.collection_id or "ai-generated-images",
+                    link_id=request.link_id,
+                    negative_prompt=request.negative_prompt,
+                    aspect_ratio=_ci.seitenverhaeltnis_aus(request.width, request.height, request.aspect_ratio),
+                    background=request.background,
+                    image_size=request.image_size,
+                    width=request.width,
+                    height=request.height,
+                )
+                if not is_codex_image_model(actual_model):
+                    model_requested, routed_via = model_name, "subscription"
+                    model_name = actual_model = "codex-imagegen"
+                else:
+                    routed_via = "subscription"
+            except HTTPException as e:
+                if not abo_auto or is_codex_image_model(actual_model) or route == "subscription":
+                    raise
+                # Abo unter auto gescheitert: bezahlt nur, wenn der Aufrufer
+                # der Rechnung schon zugestimmt hat — sonst Fehler, nie still.
+                if not request.confirm_api_billing:
+                    detail = e.detail if isinstance(e.detail, dict) else {"error": str(e.detail)}
+                    raise HTTPException(status_code=e.status_code, detail={
+                        **detail, "routed_via": "subscription",
+                        "hint": "Abo-Pfad gescheitert; bezahlter Pfad nur mit confirm_api_billing=true "
+                                "(oder route=api)."})
+                subscription_attempt = e.detail if isinstance(e.detail, dict) else {"error": str(e.detail)}
+                logger.warning("genimage: Abo-Pfad gescheitert (%s), bezahlt mit Zustimmung", subscription_attempt)
+                abo_auto = False
+                result = None
 
-        elif is_openai_image_model(model_name) or is_openai_image_model(actual_model):
+        if result is None and (is_openai_image_model(model_name) or is_openai_image_model(actual_model)):
             # OpenAI Images API (gpt-image-2, gpt-image-1, gpt-image-1.5,
             # dall-e-3) — pay-as-you-go, billed against OPENAI_API_KEY.
+            routed_via = "api"
             _check_openai_billing_gate(
                 request.confirm_api_billing, endpoint=f"openai-{actual_model}"
             )
@@ -1130,10 +1199,10 @@ async def _generate_image_einmal(
                 background=request.background,
             )
 
-        elif model_name == "dall-e-3":
+        elif result is None and model_name == "dall-e-3":
             raise HTTPException(status_code=501, detail="DALL-E 3 support coming soon")
 
-        else:
+        elif result is None:
             raise HTTPException(status_code=400, detail=f"Unsupported model: {model_name}")
 
         # Don't echo request.width/height — the actual model picks output
@@ -1144,7 +1213,12 @@ async def _generate_image_einmal(
             **result,
             "model": model_name,
             "actual_model": actual_model,
+            "routed_via": routed_via,
         }
+        if model_requested:
+            antwort["model_requested"] = model_requested
+        if subscription_attempt:
+            antwort["subscription_attempt"] = subscription_attempt
         if request.negative_prompt and "negative_prompt_applied" not in antwort:
             # Nur die Pfade, die es wirklich einfalten, sagen "folded"; alle
             # anderen sagen ehrlich, dass es verworfen wurde (#1797).

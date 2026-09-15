@@ -77,6 +77,57 @@ def pruefe_groessenwunsch(image_size: Optional[str], width: Optional[int], heigh
             )
 
 
+class QuelleZuKlein(ValueError):
+    """Das gelieferte Bild ist kleiner als die verlangte Groesse (mehr als
+    MAX_HOCHSKALIERUNG noetig) — Hochrechnen waere ein erfundenes Bild."""
+    def __init__(self, source, target, scale):
+        super().__init__(f"quelle {source} zu klein fuer {target} (x{scale:.3f})")
+        self.source, self.target, self.scale = source, target, scale
+
+
+# Bis 10 % Hochskalierung ist im Bild nicht zu sehen; darueber wird es
+# weich. Gemessen (13.09.): das Abo liefert ~1,57 MP (1254², 940x1672,
+# 1370x1148), 16:9 auch 2048x1152 — 1024x1536 braucht also bis zu 9 %.
+MAX_HOCHSKALIERUNG = 1.10
+
+
+def passe_ein(data: bytes, width: int, height: int, max_hoch: float = MAX_HOCHSKALIERUNG) -> tuple:
+    """Bild auf GENAU width x height bringen: seitentreu skalieren, bis beide
+    Kanten gedeckt sind, dann mittig beschneiden. Alpha bleibt. Liefert
+    (png_bytes, info). Zu kleine Quelle -> QuelleZuKlein, kein Erfinden."""
+    import io
+    from PIL import Image
+
+    im = Image.open(io.BytesIO(data))
+    sw, sh = im.size
+    scale = max(width / sw, height / sh)
+    if scale > max_hoch:
+        raise QuelleZuKlein([sw, sh], [width, height], scale)
+    if abs(scale - 1.0) > 1e-9:
+        nw, nh = max(width, round(sw * scale)), max(height, round(sh * scale))
+        im = im.resize((nw, nh), Image.LANCZOS)
+    else:
+        nw, nh = sw, sh
+    dx, dy = (nw - width) // 2, (nh - height) // 2
+    im = im.crop((dx, dy, dx + width, dy + height))
+    out = io.BytesIO()
+    im.save(out, format="PNG", optimize=True)
+    return out.getvalue(), {"source": [sw, sh], "scale": round(scale, 4), "upscaled": scale > 1.0 + 1e-9,
+                            "cropped": [nw - width, nh - height]}
+
+
+def seitenverhaeltnis_aus(width: Optional[int], height: Optional[int], aspect_ratio: Optional[str]) -> str:
+    """Das erlaubte Seitenverhaeltnis, das width x height am naechsten
+    kommt; ohne Masse das angegebene (oder 1:1)."""
+    if width and height and width > 0 and height > 0:
+        ziel = width / height
+        def _wert(ar):
+            a, b = ar.split(":"); return int(a) / int(b)
+        return min(sorted(_ERLAUBTE_SEITENVERHAELTNISSE), key=lambda ar: abs(_wert(ar) - ziel))
+    ar = (aspect_ratio or "1:1").strip()
+    return ar if ar in _ERLAUBTE_SEITENVERHAELTNISSE else "1:1"
+
+
 def baue_anweisung(prompt: str, negative_prompt: Optional[str], aspect_ratio: Optional[str],
                    background: Optional[str]) -> str:
     """Die Anweisung an codex. Kein Schreiben, keine Shell, nur das
@@ -180,7 +231,7 @@ async def generate_with_codex_imagegen(
     from ai.routes.text_ai_routes import _run_cli_with_pgid
 
     pruefe_groessenwunsch(image_size, width, height)
-    anweisung = baue_anweisung(prompt, negative_prompt, aspect_ratio, background)
+    anweisung = baue_anweisung(prompt, negative_prompt, seitenverhaeltnis_aus(width, height, aspect_ratio), background)
 
     env = os.environ.copy()
     env["NO_COLOR"] = "1"
@@ -223,6 +274,24 @@ async def generate_with_codex_imagegen(
     except (OSError, ValueError) as e:
         raise HTTPException(status_code=502, detail={"error": "codex_imagegen_unreadable", "exc": str(e)[:200]})
 
+    # Genaue Groesse durch Einpassen (seit 15.09.): das Modell waehlt die
+    # Pixelzahl, wir bringen das Bild auf die verlangte — nie durch
+    # Erfinden, nur durch Verkleinern/Beschneiden und <= 10 % Hochrechnen.
+    size_fit = None
+    if width and height:
+        try:
+            data, size_fit = await asyncio.to_thread(passe_ein, data, int(width), int(height))
+            w, h = int(width), int(height)
+        except QuelleZuKlein as e:
+            try:
+                Path(pfad).unlink()
+            except OSError:
+                pass
+            raise HTTPException(status_code=502, detail={
+                "error": "codex_imagegen_too_small", "source": e.source, "requested": e.target,
+                "scale_needed": round(e.scale, 3),
+                "hint": "Das Abo lieferte weniger Pixel als verlangt; fuer diese Groesse bezahlter Pfad (route=api)."})
+
     request_id = f"codex_{uuid.uuid4().hex[:8]}"
     saved = await save_file_and_record(
         data=data,
@@ -250,6 +319,7 @@ async def generate_with_codex_imagegen(
         "height": h,
         "provider": "codex-imagegen",
         "billing": "subscription",
-        "size_guaranteed": False,
+        "size_guaranteed": size_fit is not None,
+        "size_fit": size_fit,
         "negative_prompt_applied": "folded_into_prompt" if (negative_prompt or "").strip() else None,
     }
