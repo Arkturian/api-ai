@@ -100,6 +100,8 @@
     <div class="row">
       <label for="instructions">System-Prompt Override (optional)</label>
       <textarea id="instructions" placeholder="Leer lassen für Default — sonst hier deine eigene Persona-Beschreibung."></textarea>
+      <label for="jwt">Nutzer-JWT (Cloud-Login) — /ai/realtime/token, /live/sdp, /usage und /tool verlangen es (401 ohne)</label>
+      <input id="jwt" type="password" placeholder="eyJ… (bleibt nur in diesem Browser, localStorage)" style="width:100%" />
     </div>
 
     <hr>
@@ -214,6 +216,16 @@ els.provider.addEventListener('change', () => {
   els.openaiOpts.style.display = isOpenAI ? '' : 'none';
 });
 
+const jwtEl = document.getElementById('jwt');
+try { jwtEl.value = localStorage.getItem('realtime-test-jwt') || ''; } catch {}
+jwtEl.addEventListener('change', () => { try { localStorage.setItem('realtime-test-jwt', jwtEl.value.trim()); } catch {} });
+function authHeaders(extra) {
+  const h = Object.assign({ 'Content-Type': 'application/json' }, extra || {});
+  const t = (jwtEl.value || '').trim();
+  if (t) h['Authorization'] = 'Bearer ' + t;
+  return h;
+}
+
 async function mintToken() {
   const body = {
     provider: els.provider.value,
@@ -230,7 +242,7 @@ async function mintToken() {
   log('POST /ai/realtime/token  ' + JSON.stringify(body), 'info');
   const r = await fetch('/ai/realtime/token', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: authHeaders(),
     body: JSON.stringify(body),
   });
   if (!r.ok) {
@@ -346,7 +358,7 @@ async function handleToolCall(name, args, callId) {
     if (READ.includes(name)) {
       const r = await fetch('/ai/realtime/tool/' + name, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-Session-ID': session.session_id || '' },
+        headers: authHeaders({ 'X-Session-ID': session.session_id || '' }),
         body: JSON.stringify({ arguments: args, call_id: callId }),
       });
       const data = await r.json();
@@ -402,7 +414,7 @@ async function startOpenAILive() {
                  session_id: 'realtime-test-' + Math.random().toString(36).slice(2, 9), voice_session_id: live.voice_session_id };
   if (els.instructions.value.trim()) body.instructions = els.instructions.value.trim();
   log('POST /ai/realtime/live/sdp (offer ' + offer.sdp.length + ' bytes)', 'info');
-  const r = await fetch('/ai/realtime/live/sdp', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  const r = await fetch('/ai/realtime/live/sdp', { method: 'POST', headers: authHeaders(), body: JSON.stringify(body) });
   if (!r.ok) { let err; try { err = await r.json(); } catch { err = { raw: await r.text() }; } throw new Error('live/sdp ' + r.status + ': ' + JSON.stringify(err).slice(0, 400)); }
   session = await r.json();
   log('live session ' + session.live_session_id + ' — backend ' + session.backend_model + ', tools: ' + (session.tools || []).join(', '), 'ok');
@@ -465,7 +477,7 @@ async function handleLiveToolCall(name, args, callId) {
   try {
     if (READ.includes(name)) {
       const r = await fetch('/ai/realtime/tool/' + name, {
-        method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Session-ID': session.session_id || '' },
+        method: 'POST', headers: authHeaders({ 'X-Session-ID': session.session_id || '' }),
         body: JSON.stringify({ arguments: args, call_id: callId }),
       });
       const data = await r.json(); result = data.result || data;
@@ -488,7 +500,7 @@ async function reportLiveUsage() {
   if (dc && dc.readyState === 'open') { try { dc.send(JSON.stringify({ type: 'session.close' })); } catch {} }
   if (!(live.seconds > 0 || live.backend.input > 0)) return;
   try {
-    const r = await fetch('/ai/realtime/usage', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    const r = await fetch('/ai/realtime/usage', { method: 'POST', headers: authHeaders(), body: JSON.stringify(body) });
     log('usage reported (' + live.seconds + ' s, backend ' + live.backend.input + '/' + live.backend.output + ') → ' + r.status, 'info');
   } catch (e) { log('usage report failed: ' + e.message, 'warn'); }
 }
