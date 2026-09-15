@@ -62,6 +62,20 @@ logger = logging.getLogger(__name__)
 #     ersten Antwort zwischengespeichert und kostet dann ein Zehntel.
 #     Ohne diese Zeilen wird genau der Anteil voll berechnet, der in
 #     Wahrheit fast nichts kostet.
+# GPT-Live-1 (10.09.2026): Stimmschicht je Minute, sekundengenau; das
+# Backend-Modell der Delegation wird nach Responses-Textpreisen gerechnet.
+# Abgerufen 15.09.2026, developers.openai.com/api/docs/pricing (#1884).
+OPENAI_LIVE_PRICING = {
+    "gpt-live-1": {"per_minute_usd": 0.05},
+}
+OPENAI_BACKEND_TEXT_PRICING = {
+    "gpt-5.6-luna":  {"input_per_1m": 0.20, "cached_input_per_1m": 0.02, "output_per_1m": 1.20},
+    "gpt-5.6-terra": {"input_per_1m": 2.00, "cached_input_per_1m": 0.20, "output_per_1m": 12.0},
+    "gpt-5.6-sol":   {"input_per_1m": 4.00, "cached_input_per_1m": 0.40, "output_per_1m": 20.0},
+    "gpt-6-astra":   {"input_per_1m": 10.0, "cached_input_per_1m": 1.00, "output_per_1m": 50.0},
+}
+OPENAI_BACKEND_TEXT_PRICING["default"] = OPENAI_BACKEND_TEXT_PRICING["gpt-6-astra"]   # teuerster Rueckfall
+
 OPENAI_REALTIME_PRICING = {
     # Abgerufen 2026-09-15, developers.openai.com/api/docs/pricing (#1881).
     # 2.1: Textausgabe 24 statt 16, sonst wie gpt-realtime.
@@ -786,6 +800,100 @@ class OpenAIRealtimeCostTracker:
                 self._master_status_cache_ts = time.time()
             except Exception:
                 pass
+
+    def _post_json_to_master(self, payload: dict) -> None:
+        url = f"{self.master_url}/internal/openai-realtime-cost-shared-state"
+        payload = dict(payload)
+        payload.setdefault("source_host", os.environ.get("API_AI_HOST_KEY") or os.uname().nodename.split(".")[0])
+        with httpx.Client(timeout=5.0) as client:
+            r = client.post(url, json=payload, headers={"X-Internal-Auth": self.shared_secret})
+            r.raise_for_status()
+            try:
+                self._master_status_cache = r.json()
+                self._master_status_cache_ts = time.time()
+            except Exception:
+                pass
+
+    # ── GPT-Live (#1884) ──────────────────────────────────────────────
+    def _cost_for_live(self, live_seconds: float, backend_model: Optional[str], backend_input_tokens: int,
+                       backend_cached_input_tokens: int, backend_output_tokens: int) -> tuple:
+        """Stimmschicht in Sekunden (0,05 USD/min) plus Backend-Token nach
+        Responses-Textpreisen; zwischengespeicherte Eingabe ist Teilmenge."""
+        minute = OPENAI_LIVE_PRICING["gpt-live-1"]["per_minute_usd"]
+        bp = OPENAI_BACKEND_TEXT_PRICING.get(backend_model or "", OPENAI_BACKEND_TEXT_PRICING["default"])
+        bi, bo = int(backend_input_tokens or 0), int(backend_output_tokens or 0)
+        bc = max(0, min(int(backend_cached_input_tokens or 0), bi))
+        usd = (max(0.0, float(live_seconds or 0.0)) / 60.0 * minute
+               + ((bi - bc) * bp["input_per_1m"] + bc * bp["cached_input_per_1m"] + bo * bp["output_per_1m"]) / 1_000_000.0)
+        return usd, usd / EUR_USD_RATE
+
+    def _schon_gesehen(self, voice_session_id: Optional[str], usage_event_id: Optional[str]) -> bool:
+        if not (voice_session_id and usage_event_id):
+            return False
+        dedup_key = f"{voice_session_id}::{usage_event_id}"
+        with self._cross_process_lock():
+            self._maybe_reload_from_file()
+            with self._data_lock:
+                seen = set(self._usage_data.get("seen_event_ids", []))
+                if dedup_key in seen:
+                    return True
+                seen.add(dedup_key)
+                self._usage_data["seen_event_ids"] = list(seen)[-5000:]
+                self._save_data()
+        return False
+
+    def track_live(self, model: str = "gpt-live-1", live_seconds: float = 0.0, backend_model: Optional[str] = None,
+                   backend_input_tokens: int = 0, backend_cached_input_tokens: int = 0, backend_output_tokens: int = 0,
+                   voice_session_id: Optional[str] = None, usage_event_id: Optional[str] = None) -> dict:
+        """Eine Live-Nutzungsmeldung: Sekunden der Stimmschicht (aus
+        session.usage.updated / session.closed) und Backend-Token je
+        Delegation (response.event: response.completed.usage). Dedup wie
+        bei track_session ueber (voice_session_id, usage_event_id)."""
+        if (live_seconds or 0) <= 0 and (backend_input_tokens or 0) <= 0 and (backend_output_tokens or 0) <= 0:
+            return {"deduped": False, "accepted": False}
+        if self._schon_gesehen(voice_session_id, usage_event_id):
+            return {"deduped": True, "accepted": False}
+        if self.master_url and self.shared_secret:
+            try:
+                self._post_json_to_master({
+                    "model": model or "gpt-live-1", "live_seconds": float(live_seconds or 0.0),
+                    "backend_model": backend_model, "backend_input_tokens": int(backend_input_tokens or 0),
+                    "backend_cached_input_tokens": int(backend_cached_input_tokens or 0),
+                    "backend_output_tokens": int(backend_output_tokens or 0),
+                    "voice_session_id": voice_session_id, "usage_event_id": usage_event_id})
+                return {"deduped": False, "accepted": True}
+            except Exception as e:
+                logger.error("openai_realtime_cost_tracker: master post (live) failed (%s); local fallback", e)
+        self._track_live_local(model or "gpt-live-1", live_seconds, backend_model, backend_input_tokens,
+                               backend_cached_input_tokens, backend_output_tokens)
+        return {"deduped": False, "accepted": True}
+
+    def _track_live_local(self, model, live_seconds, backend_model, backend_input_tokens,
+                          backend_cached_input_tokens, backend_output_tokens) -> None:
+        cost_usd, cost_eur = self._cost_for_live(live_seconds, backend_model, backend_input_tokens,
+                                                 backend_cached_input_tokens, backend_output_tokens)
+        with self._data_lock:
+            current_month = datetime.now().strftime("%Y-%m")
+            if self._usage_data.get("month") != current_month:
+                self._reset_monthly_data()
+            self._usage_data["total_cost_usd"] += cost_usd
+            self._usage_data["total_cost_eur"] += cost_eur
+            self._usage_data["request_count"] += 1
+            by_model = self._usage_data.setdefault("by_model", {})
+            st = by_model.setdefault(model, {"modality": "live", "request_count": 0, "live_seconds": 0.0,
+                                             "backend": {}, "cost_usd": 0.0, "cost_eur": 0.0})
+            st["request_count"] += 1
+            st["live_seconds"] = round(st.get("live_seconds", 0.0) + float(live_seconds or 0.0), 3)
+            if backend_model and ((backend_input_tokens or 0) or (backend_output_tokens or 0)):
+                b = st.setdefault("backend", {}).setdefault(backend_model, {"input_tokens": 0, "cached_input_tokens": 0, "output_tokens": 0})
+                b["input_tokens"] += int(backend_input_tokens or 0)
+                b["cached_input_tokens"] += int(backend_cached_input_tokens or 0)
+                b["output_tokens"] += int(backend_output_tokens or 0)
+            st["cost_usd"] += cost_usd
+            st["cost_eur"] += cost_eur
+            self._usage_data["last_updated"] = datetime.now().isoformat()
+            self._check_thresholds()
+            self._save_data()
 
     def _fetch_master_status(self) -> dict:
         now = time.time()

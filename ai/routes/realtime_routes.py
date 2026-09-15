@@ -147,6 +147,16 @@ SUPPORTED_REALTIME_VOICES = {
 
 
 SUPPORTED_PROVIDERS = {"openai", "elevenlabs"}
+
+# GPT-Live-1 (#1884, Prototyp): eigener Endpunkt /v1/live/sessions, keine
+# Ephemeral-Tokens — der Browser schickt sein SDP-Angebot an api-ai, das
+# mit dem Projektschluessel die Sitzung anlegt. Die Stimme ruft keine
+# Werkzeuge; sie delegiert an ein Backend-Modell (Responses), das unsere
+# Werkzeuge sieht. Gemessen 15.09.: DE/SL verstanden, ~0,9 s bis zur
+# ersten Transkriptausgabe, Werkzeug ueber Backend auto/required.
+LIVE_MODEL = "gpt-live-1"
+DEFAULT_LIVE_BACKEND_MODEL = "gpt-5.6-luna"
+SUPPORTED_LIVE_BACKEND_MODELS = {"gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol", "gpt-6-astra"}
 DEFAULT_PROVIDER = "openai"
 
 
@@ -489,6 +499,15 @@ class RealtimeUsageReport(BaseModel):
     cached_text_input_tokens: int = 0
     cached_audio_input_tokens: int = 0
     duration_sec: float = 0.0
+    # GPT-Live (#1884): Sekunden der Stimmschicht (session.usage.updated /
+    # session.closed usage.seconds) und Backend-Token je Delegation
+    # (response.event -> response.completed -> usage). Wer eines davon
+    # setzt, meldet eine Live-Sitzung; die Realtime-Tokenfelder bleiben 0.
+    live_seconds: float = 0.0
+    backend_model: Optional[str] = None
+    backend_input_tokens: int = 0
+    backend_cached_input_tokens: int = 0
+    backend_output_tokens: int = 0
     # Idempotency keys (Codex IACP, Post #1215). Pre-existing callers
     # may not set these; we'll log a non-idempotent warning. New
     # CloudV2 Voice-Companion sessions MUST pass both.
@@ -4859,6 +4878,131 @@ async def mint_realtime_token(
     }
 
 
+class RealtimeLiveSdpRequest(BaseModel):
+    """Body fuer ``POST /ai/realtime/live/sdp`` (GPT-Live-Prototyp #1884)."""
+    sdp: str = Field(description="SDP-Angebot des Browsers (RTCPeerConnection.createOffer)")
+    session_id: Optional[str] = None
+    voice_session_id: Optional[str] = None
+    voice: Optional[str] = DEFAULT_REALTIME_VOICE
+    language: Optional[str] = "de"
+    instructions: Optional[str] = Field(default=None, description="Sprech-Persona der Stimme (kurz). Leer = Vorgabe.")
+    backend_model: Optional[str] = DEFAULT_LIVE_BACKEND_MODEL
+    backend_instructions: Optional[str] = Field(default=None, description="Anweisungen des Backend-Modells. Leer = Federation-Persona (_default_instructions).")
+    tools: Optional[List[dict]] = Field(default=None, description="Werkzeuge des Backends. Leer = Federation-Werkzeugsatz.")
+    tool_choice: Optional[str] = "auto"
+    confirm_api_billing: Optional[bool] = False
+
+
+def _live_sprech_persona(language: str) -> str:
+    """Kurz, nur Sprechverhalten — Verfahren und Regeln gehoeren ins Backend
+    (OpenAI: kleine Kontextgrenze der Stimme, 16 384 Token)."""
+    sprache = {"de": "Deutsch", "en": "Englisch", "sl": "Slowenisch", "it": "Italienisch"}.get(language, language)
+    return (
+        f"Du bist Arcturian, ein freundlicher, knapper Begleiter beim Wandern. Sprich {sprache}. "
+        "Antworte in ein bis zwei Saetzen, warte Sprechpausen ab, fall nicht ins Wort. "
+        "Alles, was Wissen, Orte, Wege oder Aktionen braucht, uebergibst du dem Backend und "
+        "sagst kurz, dass du nachsiehst."
+    )
+
+
+def _live_session_config(request: RealtimeLiveSdpRequest) -> dict:
+    language = request.language or "de"
+    tools = list(request.tools) if request.tools is not None else list(_all_tool_defs())
+    return {
+        "model": LIVE_MODEL,
+        "instructions": request.instructions or _live_sprech_persona(language),
+        # WebRTC: das Audioformat handelt SDP aus, `format` bleibt weg.
+        "audio": {"output": {"voice": request.voice or DEFAULT_REALTIME_VOICE}},
+        "delegation": {
+            "type": "responses",
+            "responses": {
+                "model": request.backend_model or DEFAULT_LIVE_BACKEND_MODEL,
+                "instructions": request.backend_instructions or _default_instructions(language),
+                "tools": tools,
+                "tool_choice": request.tool_choice or "auto",
+            },
+        },
+    }
+
+
+@router.post("/realtime/live/sdp")
+async def live_sdp(
+    request: RealtimeLiveSdpRequest,
+    api_key: str = Depends(get_api_key),
+    grant: VerifiedGrant = Depends(require_realtime_grant("mint")),
+):
+    """GPT-Live-Prototyp (#1884): SDP-Angebot des Browsers gegen eine
+    Live-Sitzung tauschen. api-ai haelt den Projektschluessel, der Browser
+    bekommt nur die SDP-Antwort und die Sitzungs-ID. Ereignisse laufen
+    ueber den Datenkanal `oai-events`; Werkzeugaufrufe kommen als
+    `response.event` (function_call) und werden mit `response.item.create`
+    + `response.create` beantwortet. Nutzung meldet der Browser ueber
+    `/ai/realtime/usage` mit `live_seconds` und `backend_*`."""
+    _check_realtime_billing_gate(request.confirm_api_billing)
+    backend = request.backend_model or DEFAULT_LIVE_BACKEND_MODEL
+    if backend not in SUPPORTED_LIVE_BACKEND_MODELS:
+        raise HTTPException(status_code=400, detail={"error": "unsupported_live_backend_model", "backend_model": backend,
+                                                     "supported": sorted(SUPPORTED_LIVE_BACKEND_MODELS)})
+    voice = request.voice or DEFAULT_REALTIME_VOICE
+    if voice not in SUPPORTED_REALTIME_VOICES:
+        raise HTTPException(status_code=400, detail={"error": "unsupported_realtime_voice", "voice": voice,
+                                                     "supported": sorted(SUPPORTED_REALTIME_VOICES)})
+    if not (request.sdp or "").strip().startswith("v=0"):
+        raise HTTPException(status_code=422, detail={"error": "sdp_offer_required"})
+    api_key_env = os.environ.get("OPENAI_API_KEY")
+    if not api_key_env:
+        raise HTTPException(status_code=503, detail={"error": "openai_api_key_missing"})
+    voice_session_id = request.voice_session_id or f"live-{uuid.uuid4().hex[:12]}"
+    try:
+        reservation = realtime_budget_guard.reserve_mint(
+            profile_id=grant.profile_id, user_id=grant.sub, voice_session_id=voice_session_id,
+            max_parallel_sessions=grant.max_parallel_sessions, daily_budget_eur=grant.daily_budget_eur,
+            monthly_budget_eur=grant.monthly_budget_eur)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=429, detail={"error": "realtime_budget_reservation_failed", "detail": str(exc)[:200]})
+    session_config = _live_session_config(request)
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        try:
+            r = await client.post(
+                "https://api.openai.com/v1/live/sessions",
+                json={"session": session_config, "transport": {"type": "webrtc", "sdp": request.sdp}},
+                headers={"Authorization": f"Bearer {api_key_env}"},
+            )
+        except httpx.HTTPError as e:
+            realtime_budget_guard.release_reservation(reservation)
+            raise HTTPException(status_code=502, detail={"error": "openai_upstream_unreachable", "exc": str(e)[:200]})
+    if r.status_code >= 400:
+        realtime_budget_guard.release_reservation(reservation)
+        try:
+            upstream = r.json()
+        except Exception:
+            upstream = {"raw": r.text[:500]}
+        raise HTTPException(status_code=502 if r.status_code >= 500 else r.status_code,
+                            detail={"error": "openai_upstream_error", "upstream_status": r.status_code, "upstream_body": upstream})
+    body = r.json()
+    from ..services.openai_realtime_cost_tracker import openai_realtime_cost_tracker
+    openai_realtime_cost_tracker.track_session_start()
+    sitzung = body.get("session") or {}
+    return {
+        "provider": "openai-live",
+        "model": LIVE_MODEL,
+        "backend_model": backend,
+        "voice": voice,
+        "live_session_id": sitzung.get("id"),
+        "expires_at": sitzung.get("expires_at"),
+        "sdp": (body.get("transport") or {}).get("sdp"),
+        "tools": [t.get("name") for t in session_config["delegation"]["responses"]["tools"]],
+        "session_id": request.session_id,
+        "voice_session_id": voice_session_id,
+        "data_channel": "oai-events",
+        "usage_contract": {"post": "/ai/realtime/usage", "fields": ["live_seconds", "backend_model",
+                           "backend_input_tokens", "backend_cached_input_tokens", "backend_output_tokens",
+                           "voice_session_id", "usage_event_id"]},
+    }
+
+
 @router.get("/realtime/models")
 async def list_realtime_models():
     """Return the realtime models and voices we support."""
@@ -4884,6 +5028,20 @@ async def list_realtime_models():
                 "tier": "ga",
                 "description": "Kleines 2.1-Modell fuer Tests; ~ein Drittel des Preises.",
                 "price_per_min_usd_estimate": "$0.05-0.10",
+            },
+            {
+                "id": LIVE_MODEL,
+                "provider": "openai-live",
+                "default": False,
+                "tier": "prototype",
+                "endpoint": "/ai/realtime/live/sdp",
+                "backend_models": sorted(SUPPORTED_LIVE_BACKEND_MODELS),
+                "description": (
+                    "GPT-Live-1 (Prototyp #1884): Vollduplex, 0,05 USD/min plus Backend-Modell. "
+                    "Browser schickt sein SDP-Angebot an /ai/realtime/live/sdp. Werkzeuge laufen "
+                    "ueber das Backend (Responses-Delegation). Gemessen 15.09.: DE/SL, ~0,9 s."
+                ),
+                "price_per_min_usd_estimate": "$0.05 + backend",
             },
             {
                 "id": "gpt-realtime",
@@ -4965,6 +5123,17 @@ async def realtime_usage_report(
     endpoint exchanges per request).
     """
     from ..services.openai_realtime_cost_tracker import openai_realtime_cost_tracker
+    if (report.live_seconds or 0) > 0 or (report.backend_input_tokens or 0) > 0 or (report.backend_output_tokens or 0) > 0:
+        result = openai_realtime_cost_tracker.track_live(
+            model=report.model or LIVE_MODEL, live_seconds=report.live_seconds, backend_model=report.backend_model,
+            backend_input_tokens=report.backend_input_tokens, backend_cached_input_tokens=report.backend_cached_input_tokens,
+            backend_output_tokens=report.backend_output_tokens,
+            voice_session_id=report.voice_session_id or report.session_id, usage_event_id=report.usage_event_id)
+        status = openai_realtime_cost_tracker.get_status()
+        status["deduped"] = bool(result and result.get("deduped"))
+        status["accepted"] = bool(result and result.get("accepted"))
+        status["input_estimated"] = False
+        return status
     result = openai_realtime_cost_tracker.track_session(
         model=report.model,
         audio_input_tokens=report.audio_input_tokens,

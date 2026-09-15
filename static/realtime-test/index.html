@@ -73,6 +73,7 @@
       <label for="provider">Provider</label>
       <select id="provider">
         <option value="openai" selected>OpenAI · gpt-realtime-2.1 (WebRTC)</option>
+        <option value="openai-live">OpenAI · gpt-live-1 Prototyp (WebRTC, Vollduplex, Backend gpt-5.6-luna)</option>
         <option value="elevenlabs">ElevenLabs · Conversational AI (WebSocket)</option>
       </select>
     </div>
@@ -209,7 +210,7 @@ async function loadCap() {
 loadCap();
 
 els.provider.addEventListener('change', () => {
-  const isOpenAI = els.provider.value === 'openai';
+  const isOpenAI = els.provider.value === 'openai' || els.provider.value === 'openai-live';
   els.openaiOpts.style.display = isOpenAI ? '' : 'none';
 });
 
@@ -370,6 +371,128 @@ async function handleToolCall(name, args, callId) {
   dc.send(JSON.stringify({ type: 'response.create' }));
 }
 
+// ── GPT-Live-1 Prototyp (#1884) ─────────────────────────────────────
+// Kein Ephemeral-Token: das SDP-Angebot geht an api-ai, das die Sitzung
+// mit dem Projektschluessel anlegt. Werkzeuge kommen als response.event
+// (Backend-Delegation), Antwort mit response.item.create + response.create.
+let live = null;   // {voice_session_id, seconds, backend, reported}
+
+async function startOpenAILive() {
+  setStatus('connecting', 'connecting');
+  live = { voice_session_id: 'live-' + Math.random().toString(36).slice(2, 12), seconds: 0,
+           backend: { model: null, input: 0, cached: 0, output: 0 }, reported: false, events: 0 };
+  micStream = await navigator.mediaDevices.getUserMedia({
+    audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+  });
+  log('  ✓ mic stream acquired', 'ok');
+  pc = new RTCPeerConnection();
+  pc.onconnectionstatechange = () => log('pc.state=' + pc.connectionState, 'info');
+  pc.ontrack = (e) => {
+    els.remoteAudio.srcObject = e.streams[0]; els.remoteAudio.muted = false; els.remoteAudio.volume = 1.0;
+    els.remoteAudio.play().then(() => log('remoteAudio.play() ok', 'ok'),
+      (err) => log('remoteAudio.play() blocked: ' + err.message, 'warn'));
+  };
+  micStream.getTracks().forEach((t) => pc.addTrack(t, micStream));
+  dc = pc.createDataChannel('oai-events');
+  dc.onopen = () => log('data channel open', 'ok');
+  dc.onmessage = (e) => handleLiveEvent(JSON.parse(e.data));
+  const offer = await pc.createOffer();
+  await pc.setLocalDescription(offer);
+  const body = { sdp: offer.sdp, language: els.lang.value, voice: els.voice.value, confirm_api_billing: true,
+                 session_id: 'realtime-test-' + Math.random().toString(36).slice(2, 9), voice_session_id: live.voice_session_id };
+  if (els.instructions.value.trim()) body.instructions = els.instructions.value.trim();
+  log('POST /ai/realtime/live/sdp (offer ' + offer.sdp.length + ' bytes)', 'info');
+  const r = await fetch('/ai/realtime/live/sdp', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  if (!r.ok) { let err; try { err = await r.json(); } catch { err = { raw: await r.text() }; } throw new Error('live/sdp ' + r.status + ': ' + JSON.stringify(err).slice(0, 400)); }
+  session = await r.json();
+  log('live session ' + session.live_session_id + ' — backend ' + session.backend_model + ', tools: ' + (session.tools || []).join(', '), 'ok');
+  await pc.setRemoteDescription({ type: 'answer', sdp: session.sdp });
+  setStatus('live', 'live');
+  log('GPT-Live session live — sprich rein (Vollduplex, du darfst unterbrechen).', 'ok');
+}
+
+let liveUserBuf = '', liveAsstBuf = '';
+function handleLiveEvent(evt) {
+  live.events++;
+  switch (evt.type) {
+    case 'session.started':
+      log('session.started (id=' + (evt.session && evt.session.id) + ')', 'info'); break;
+    case 'session.input_transcript.delta':
+      liveUserBuf += evt.delta || ''; break;
+    case 'session.input_transcript.done':
+      if (liveUserBuf.trim()) { addTranscript('user', liveUserBuf.trim()); log('user said: ' + liveUserBuf.trim(), 'user'); }
+      liveUserBuf = ''; break;
+    case 'session.output_transcript.delta':
+      liveAsstBuf += evt.delta || ''; break;
+    case 'session.output_transcript.done':
+      if (liveAsstBuf.trim()) { addTranscript('assistant', liveAsstBuf.trim()); log('assistant said: ' + liveAsstBuf.trim(), 'assistant'); }
+      liveAsstBuf = ''; break;
+    case 'session.delegation.created':
+      log('delegation → ' + (evt.delegation && evt.delegation.target) + ' (' + (evt.delegation && evt.delegation.id) + ')', 'tool'); break;
+    case 'response.event': {
+      const inner = evt.event || {};
+      if (inner.type === 'response.output_item.done' && inner.item && inner.item.type === 'function_call') {
+        const args = JSON.parse(inner.item.arguments || '{}');
+        log('backend tool call: ' + inner.item.name + '(' + JSON.stringify(args).slice(0, 100) + ')', 'tool');
+        handleLiveToolCall(inner.item.name, args, inner.item.call_id);
+      } else if (inner.type === 'response.completed' && inner.response && inner.response.usage) {
+        const u = inner.response.usage;
+        live.backend.model = session.backend_model;
+        live.backend.input += u.input_tokens || 0;
+        live.backend.cached += (u.input_tokens_details && u.input_tokens_details.cached_tokens) || 0;
+        live.backend.output += u.output_tokens || 0;
+        log('backend usage in=' + (u.input_tokens || 0) + ' out=' + (u.output_tokens || 0), 'info');
+      }
+      break;
+    }
+    case 'session.usage.updated':
+      if (evt.usage && evt.usage.seconds != null) live.seconds = evt.usage.seconds;
+      break;
+    case 'session.closed':
+      if (evt.usage && evt.usage.seconds != null) live.seconds = evt.usage.seconds;
+      log('session.closed (' + live.seconds + ' s)', 'info');
+      break;
+    case 'error':
+      log('ERROR: ' + JSON.stringify(evt), 'err'); setStatus('error', 'error'); break;
+    default:
+      break;   // Audio-Deltas laufen ueber die Medienspur, nicht hier
+  }
+}
+
+async function handleLiveToolCall(name, args, callId) {
+  const READ = ['knowledge_query', 'pois_near', 'narration_near'];
+  let result;
+  try {
+    if (READ.includes(name)) {
+      const r = await fetch('/ai/realtime/tool/' + name, {
+        method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Session-ID': session.session_id || '' },
+        body: JSON.stringify({ arguments: args, call_id: callId }),
+      });
+      const data = await r.json(); result = data.result || data;
+    } else {
+      result = { display_hint_ack: true, tool: name };
+    }
+  } catch (e) { result = { error: e.message }; }
+  log('  → result: ' + JSON.stringify(result).slice(0, 160), 'tool');
+  dc.send(JSON.stringify({ type: 'response.item.create', item: { type: 'function_call_output', call_id: callId, output: JSON.stringify(result) } }));
+  dc.send(JSON.stringify({ type: 'response.create' }));
+}
+
+async function reportLiveUsage() {
+  if (!live || live.reported) return;
+  live.reported = true;
+  const body = { model: 'gpt-live-1', live_seconds: live.seconds, backend_model: live.backend.model,
+                 backend_input_tokens: live.backend.input, backend_cached_input_tokens: live.backend.cached,
+                 backend_output_tokens: live.backend.output, voice_session_id: live.voice_session_id,
+                 usage_event_id: 'close-' + live.voice_session_id };
+  if (dc && dc.readyState === 'open') { try { dc.send(JSON.stringify({ type: 'session.close' })); } catch {} }
+  if (!(live.seconds > 0 || live.backend.input > 0)) return;
+  try {
+    const r = await fetch('/ai/realtime/usage', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    log('usage reported (' + live.seconds + ' s, backend ' + live.backend.input + '/' + live.backend.output + ') → ' + r.status, 'info');
+  } catch (e) { log('usage report failed: ' + e.message, 'warn'); }
+}
+
 // ElevenLabs Conversational AI — uses the official @11labs/client which
 // handles mic capture, PCM upload, audio playback, ping/pong and event
 // dispatch for us. We just need the signed_url our backend already mints.
@@ -418,6 +541,7 @@ async function start() {
   els.start.disabled = true;
   try {
     if (els.provider.value === 'openai') await startOpenAI();
+    else if (els.provider.value === 'openai-live') await startOpenAILive();
     else await startElevenLabs();
     els.stop.disabled = false;
   } catch (e) {
@@ -437,6 +561,7 @@ async function stop() {
 }
 
 async function cleanup() {
+  await reportLiveUsage();
   if (dc) { try { dc.close(); } catch {} dc = null; }
   if (pc) { try { pc.close(); } catch {} pc = null; }
   if (ws) { try { ws.close(); } catch {} ws = null; }

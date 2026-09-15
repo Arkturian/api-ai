@@ -214,6 +214,12 @@ class _OpenAIRealtimeSharedTrackPayload(BaseModel):
     text_output_tokens: int = 0
     duration_sec: float = 0.0
     source_host: Optional[str] = None
+    # GPT-Live (#1884): Sekunden der Stimmschicht + Backend-Token der Delegation.
+    live_seconds: float = 0.0
+    backend_model: Optional[str] = None
+    backend_input_tokens: int = 0
+    backend_cached_input_tokens: int = 0
+    backend_output_tokens: int = 0
     voice_session_id: Optional[str] = None
     usage_event_id: Optional[str] = None
 
@@ -508,7 +514,15 @@ async def openai_realtime_cost_shared_state_track(
     saved = openai_realtime_cost_tracker.master_url
     openai_realtime_cost_tracker.master_url = ""
     try:
-        result = openai_realtime_cost_tracker.track_session(
+        if (payload.live_seconds or 0) > 0 or (payload.backend_input_tokens or 0) > 0 or (payload.backend_output_tokens or 0) > 0:
+            result = openai_realtime_cost_tracker.track_live(
+                model=payload.model, live_seconds=payload.live_seconds, backend_model=payload.backend_model,
+                backend_input_tokens=payload.backend_input_tokens,
+                backend_cached_input_tokens=payload.backend_cached_input_tokens,
+                backend_output_tokens=payload.backend_output_tokens,
+                voice_session_id=payload.voice_session_id, usage_event_id=payload.usage_event_id)
+        else:
+          result = openai_realtime_cost_tracker.track_session(
             model=payload.model,
             audio_input_tokens=payload.audio_input_tokens,
             audio_output_tokens=payload.audio_output_tokens,
