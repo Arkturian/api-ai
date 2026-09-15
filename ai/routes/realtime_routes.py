@@ -126,11 +126,18 @@ def require_realtime_grant(scope: str):
 # 4004 invalid_request_error.model_not_found. Verified live in AiApi
 # headless smoke (this session) and reproduced by GuideDevBot2's browser
 # voice attempt. Only ``gpt-realtime`` is supported end-to-end today.
+# 15.09.2026 (#1881): gpt-realtime-2.1 und -2.1-mini gemessen — Mint 200,
+# WS-Connect ok, tool_choice required 6/6 (wie gpt-realtime am 02.08.).
+# gpt-realtime ist abgekuendigt (20.07.2026), Abschaltung 20.01.2027;
+# bleibt bis dahin waehlbar, damit Aufrufer mit Pin nicht brechen.
 SUPPORTED_REALTIME_MODELS = {
+    "gpt-realtime-2.1",
+    "gpt-realtime-2.1-mini",
     "gpt-realtime",
 }
 
-DEFAULT_REALTIME_MODEL = "gpt-realtime"
+DEFAULT_REALTIME_MODEL = "gpt-realtime-2.1"
+REALTIME_MODEL_SHUTDOWN = {"gpt-realtime": {"shutdown": "2027-01-20", "replacement": "gpt-realtime-2.1"}}
 
 # Voices OpenAI Realtime exposes today. The browser can pick or default.
 DEFAULT_REALTIME_VOICE = "marin"
@@ -162,9 +169,9 @@ class RealtimeTokenRequest(BaseModel):
     model: Optional[str] = Field(
         default=DEFAULT_REALTIME_MODEL,
         description=(
-            "Realtime model. Only 'gpt-realtime' is supported end-to-end "
-            "today — OpenAI's preview aliases still accept token mints but "
-            "fail the WS/SDP connect with model_not_found."
+            "Realtime model: gpt-realtime-2.1 (default), gpt-realtime-2.1-mini "
+            "(cheap tests), gpt-realtime (deprecated, shutdown 2027-01-20). "
+            "OpenAI's preview aliases mint a token but fail the WS/SDP connect."
         ),
     )
     voice: Optional[str] = Field(
@@ -4858,16 +4865,34 @@ async def list_realtime_models():
     return {
         "models": [
             {
-                "id": "gpt-realtime",
+                "id": "gpt-realtime-2.1",
                 "provider": "openai",
                 "default": True,
                 "tier": "ga",
                 "description": (
-                    "OpenAI Realtime GA. Multilingual DE/SL/IT/EN, "
-                    "200-400ms roundtrip, premium voice quality. "
-                    "The only model whose SDP-connect path works today — "
-                    "the preview aliases mint a token but 4004 on WS."
+                    "OpenAI Realtime 2.1 (Nachfolger von gpt-realtime). Gemessen "
+                    "15.09.2026: Mint + WS-Connect ok, tool_choice required 6/6. "
+                    "Meldet bei reiner Textausgabe keine Eingabetoken; der "
+                    "Zaehler schaetzt sie aus der vorigen Antwort der Sitzung."
                 ),
+                "price_per_min_usd_estimate": "$0.15-0.30",
+            },
+            {
+                "id": "gpt-realtime-2.1-mini",
+                "provider": "openai",
+                "default": False,
+                "tier": "ga",
+                "description": "Kleines 2.1-Modell fuer Tests; ~ein Drittel des Preises.",
+                "price_per_min_usd_estimate": "$0.05-0.10",
+            },
+            {
+                "id": "gpt-realtime",
+                "provider": "openai",
+                "default": False,
+                "tier": "deprecated",
+                "shutdown": REALTIME_MODEL_SHUTDOWN["gpt-realtime"]["shutdown"],
+                "replacement": REALTIME_MODEL_SHUTDOWN["gpt-realtime"]["replacement"],
+                "description": "Abgekuendigt (20.07.2026), Abschaltung 2027-01-20; bis dahin waehlbar.",
                 "price_per_min_usd_estimate": "$0.15-0.30",
             },
         ],
@@ -4988,6 +5013,7 @@ async def realtime_usage_report(
     status = openai_realtime_cost_tracker.get_status()
     status["deduped"] = bool(result and result.get("deduped"))
     status["accepted"] = bool(result and result.get("accepted"))
+    status["input_estimated"] = bool(result and result.get("input_estimated"))
     # Kosten DIESER Meldung. Ohne sie kann der Aufrufer die Kosten
     # einer Sitzung nicht mitschreiben, ohne die Preistabelle zu
     # kopieren — und eine zweite Preistabelle driftet gegen meine.

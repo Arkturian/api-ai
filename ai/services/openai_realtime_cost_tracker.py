@@ -63,6 +63,25 @@ logger = logging.getLogger(__name__)
 #     Ohne diese Zeilen wird genau der Anteil voll berechnet, der in
 #     Wahrheit fast nichts kostet.
 OPENAI_REALTIME_PRICING = {
+    # Abgerufen 2026-09-15, developers.openai.com/api/docs/pricing (#1881).
+    # 2.1: Textausgabe 24 statt 16, sonst wie gpt-realtime.
+    "gpt-realtime-2.1": {
+        "audio_input_per_1m":         32.0,
+        "audio_input_cached_per_1m":   0.40,
+        "audio_output_per_1m":        64.0,
+        "text_input_per_1m":           4.0,
+        "text_input_cached_per_1m":    0.40,
+        "text_output_per_1m":         24.0,
+    },
+    "gpt-realtime-2.1-mini": {
+        "audio_input_per_1m":         10.0,
+        "audio_input_cached_per_1m":   0.30,
+        "audio_output_per_1m":        20.0,
+        "text_input_per_1m":           0.60,
+        "text_input_cached_per_1m":    0.06,
+        "text_output_per_1m":          2.40,
+    },
+    # Abgekuendigt 20.07.2026, Abschaltung 20.01.2027 -> gpt-realtime-2.1.
     "gpt-realtime": {
         "audio_input_per_1m":         32.0,
         "audio_input_cached_per_1m":   0.40,
@@ -206,6 +225,7 @@ class OpenAIRealtimeCostTracker:
             "by_model": {},
             "alerts_sent": [],
             "created_at": datetime.now().isoformat(),
+            "last_input_by_session": {},
         }
         self._alerts_sent = set()
 
@@ -383,6 +403,10 @@ class OpenAIRealtimeCostTracker:
                     f"openai_realtime_cost_tracker: master post failed "
                     f"({e}); falling back to local — cap may temporarily lag"
                 )
+        (audio_input_tokens, text_input_tokens, cached_text_input_tokens, cached_audio_input_tokens,
+         geschaetzt, unbekannt) = self._schaetze_eingabe(
+            model, voice_session_id, audio_input_tokens, audio_output_tokens,
+            text_input_tokens, text_output_tokens, cached_text_input_tokens, cached_audio_input_tokens)
         self._track_local(
             model,
             audio_input_tokens,
@@ -392,8 +416,49 @@ class OpenAIRealtimeCostTracker:
             duration_sec,
             cached_text_input_tokens,
             cached_audio_input_tokens,
+            input_estimated=geschaetzt,
+            input_unknown=unbekannt,
         )
-        return {"deduped": False, "accepted": True}
+        return {"deduped": False, "accepted": True, "input_estimated": geschaetzt, "input_unknown": unbekannt}
+
+    # Modelle, die bei Antworten mit reiner Textausgabe KEINE Eingabetoken
+    # melden (gemessen 15.09.2026: input_tokens 0 bei Textausgabe, 857 bei
+    # Audioausgabe derselben Sitzung; Rate-Limit-Rest sank trotzdem um
+    # ~1 800 bei gemeldeten 64). gpt-realtime meldete 742 — dort ist eine
+    # Null eine Null.
+    _EINGABE_UNGEMELDET_BEI_TEXT = ("gpt-realtime-2.1",)
+
+    def _schaetze_eingabe(self, model, voice_session_id, audio_input_tokens, audio_output_tokens,
+                          text_input_tokens, text_output_tokens, cached_text_input_tokens,
+                          cached_audio_input_tokens) -> tuple:
+        """-> (audio_in, text_in, cached_text, cached_audio, geschaetzt, unbekannt).
+        Gemeldete Eingabe wird je Sitzung gemerkt (in der Datei, damit alle
+        Worker sie sehen). Meldet ein 2.1-Modell bei Ausgabe > 0 gar keine
+        Eingabe, gilt der Kontext der letzten gemeldeten Antwort derselben
+        Sitzung als Eingabe — der Affekt-Nachzug (Textausgabe, tool_choice
+        required) laeuft auf demselben Kontext wie die Audioantwort davor.
+        Ohne vorige Antwort wird nichts erfunden, nur gezaehlt."""
+        gemeldet = (audio_input_tokens or 0) + (text_input_tokens or 0) > 0
+        if not voice_session_id:
+            return audio_input_tokens, text_input_tokens, cached_text_input_tokens, cached_audio_input_tokens, False, False
+        with self._data_lock:
+            merk = self._usage_data.setdefault("last_input_by_session", {})
+            if gemeldet:
+                merk[voice_session_id] = {"audio": int(audio_input_tokens or 0), "text": int(text_input_tokens or 0),
+                                          "cached_text": int(cached_text_input_tokens or 0),
+                                          "cached_audio": int(cached_audio_input_tokens or 0)}
+                if len(merk) > 300:
+                    for alt in list(merk)[:-300]:
+                        merk.pop(alt, None)
+                return audio_input_tokens, text_input_tokens, cached_text_input_tokens, cached_audio_input_tokens, False, False
+            if not str(model or "").startswith(self._EINGABE_UNGEMELDET_BEI_TEXT):
+                return audio_input_tokens, text_input_tokens, cached_text_input_tokens, cached_audio_input_tokens, False, False
+            if (audio_output_tokens or 0) + (text_output_tokens or 0) <= 0:
+                return audio_input_tokens, text_input_tokens, cached_text_input_tokens, cached_audio_input_tokens, False, False
+            letzte = merk.get(voice_session_id)
+        if not letzte:
+            return audio_input_tokens, text_input_tokens, cached_text_input_tokens, cached_audio_input_tokens, False, True
+        return letzte["audio"], letzte["text"], letzte["cached_text"], letzte["cached_audio"], True, False
 
     def _track_local(
         self,
@@ -405,6 +470,8 @@ class OpenAIRealtimeCostTracker:
         duration_sec: float,
         cached_text_input_tokens: int = 0,
         cached_audio_input_tokens: int = 0,
+        input_estimated: bool = False,
+        input_unknown: bool = False,
     ) -> None:
         cost_usd, cost_eur = self._cost_for_session(
             model,
@@ -438,6 +505,11 @@ class OpenAIRealtimeCostTracker:
                 "cost_usd": 0.0,
                 "cost_eur": 0.0,
             })
+            if input_estimated:
+                stats["estimated_input_responses"] = stats.get("estimated_input_responses", 0) + 1
+                stats["estimated_input_tokens"] = stats.get("estimated_input_tokens", 0) + int(audio_input_tokens or 0) + int(text_input_tokens or 0)
+            if input_unknown:
+                stats["input_unknown_responses"] = stats.get("input_unknown_responses", 0) + 1
             stats["request_count"] += 1
             stats["audio_input_tokens"] += audio_input_tokens
             stats["audio_output_tokens"] += audio_output_tokens
