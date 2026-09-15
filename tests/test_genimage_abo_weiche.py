@@ -156,3 +156,14 @@ def test_verdrahtung_sitzt_im_rumpf():
     import inspect
     q = inspect.getsource(g._generate_image_einmal)
     assert "_abo_geeignet(" in q and "routed_via" in q
+
+
+def test_route_subscription_mit_referenzbildern_ist_400_nicht_still(monkeypatch):
+    """Der Abo-Pfad kennt keine Referenzbilder; sie still zu verwerfen
+    waere ein anderes Bild mit 200 (Story-Codex, 15.09.)."""
+    aufrufe = _verdrahten(monkeypatch)
+    with pytest.raises(HTTPException) as e:
+        asyncio.run(g._generate_image_einmal(_req(route="subscription", reference_image_urls=["https://x/1.png"]), "x"))
+    assert e.value.status_code == 400
+    assert e.value.detail["error"] == "reference_images_not_supported_on_subscription"
+    assert aufrufe["abo"] == [] and aufrufe["api"] == []

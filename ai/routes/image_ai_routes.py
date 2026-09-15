@@ -1099,6 +1099,10 @@ async def _generate_image_einmal(
         if route not in _ROUTEN:
             raise HTTPException(status_code=422, detail={"error": "unknown_route", "route": request.route,
                                                          "allowed": list(_ROUTEN)})
+        if route == "subscription" and request.reference_image_urls:
+            raise HTTPException(status_code=400, detail={
+                "error": "reference_images_not_supported_on_subscription",
+                "hint": "codex image_gen nimmt keine Referenzbilder; route=api (bezahlt) oder ohne reference_image_urls."})
         abo_auto = _abo_geeignet(request)[0]
         result = None
         routed_via = None
