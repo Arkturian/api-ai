@@ -25,7 +25,8 @@ KATALOG_JSON = {"models": [
 
 def test_katalog_parsen_liest_slug_default_und_stufen():
     k = t._codex_katalog_parsen(KATALOG_JSON)
-    assert k["gpt-5.6-luna"] == {"default": "medium", "levels": ["low", "medium", "high", "xhigh", "max"]}
+    assert k["gpt-5.6-luna"] == {"default": "medium", "levels": ["low", "medium", "high", "xhigh", "max"],
+                                 "visibility": None}   # Fixture ohne Feld -> None, nicht geblockt
     assert "ultra" in k["gpt-5.6-sol"]["levels"] and "ultra" not in k["gpt-5.6-luna"]["levels"]
     assert "" not in k
     assert t._codex_katalog_parsen(None) is None and t._codex_katalog_parsen("kaputt") is None

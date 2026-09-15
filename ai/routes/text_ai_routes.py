@@ -618,6 +618,11 @@ class Prompt(BaseModel):
     # ausgefuehrtem Auftrag heisst "Ergebnis wiederfinden", nicht
     # "Kontingent nochmal ausgeben".
     request_id: Optional[str] = None
+    # Rueckfall auf den Abo-Standard, wenn codex das angeforderte Modell
+    # ablehnt — nur ausdruecklich. Ohne Opt-in ist eine Ablehnung ein 422,
+    # kein stiller Lauf auf einem anderen Modell (Automation, 15.09.2026).
+    # Die Antwort benennt den Rueckfall: model_requested, model_fallback.
+    model_fallback: bool = False
     # Modellwahl im Rumpf. Der Abfrageparameter `?model=` bleibt der
     # dokumentierte Weg und hat Vorrang; dieses Feld gibt es, weil
     # Aufrufer es erwartungsgemaess in den Rumpf schreiben und Pydantic
@@ -644,6 +649,11 @@ class AIResponse(BaseModel):
     # low vs. ultra unterschieden sich um 1 %, weil 14k davon Systemprompt
     # sind und die Reasoning-Tokens verworfen wurden).
     thinking_tokens: Optional[int] = None
+    # Gesetzt, wenn nicht das gelaufen ist, was angefordert (oder als
+    # Servervorgabe gewaehlt) war: model_requested = das abgelehnte Modell,
+    # model_fallback = true, `model` = was wirklich lief.
+    model_requested: Optional[str] = None
+    model_fallback: bool = False
 
     def __init__(self, **data):
         super().__init__(**data)
@@ -1057,7 +1067,8 @@ def _codex_katalog_parsen(daten: Any) -> Optional[dict]:
                 continue
             levels = [str(l.get("effort")).strip() for l in (m.get("supported_reasoning_levels") or [])
                       if isinstance(l, dict) and l.get("effort")]
-            out[slug] = {"default": (m.get("default_reasoning_level") or None), "levels": levels}
+            out[slug] = {"default": (m.get("default_reasoning_level") or None), "levels": levels,
+                         "visibility": (m.get("visibility") or None)}
         return out or None
     except Exception:
         return None
@@ -1083,6 +1094,23 @@ def _codex_katalog() -> Optional[dict]:
     if katalog:
         _codex_katalog_cache.update({"at": now, "katalog": katalog})
     return katalog
+
+
+def _codex_modell_pruefen(katalog: Optional[dict], model: Optional[str]) -> tuple:
+    """-> (ok, available). Fail-closed gegen STILLE Degradation, dieselbe
+    Quelle wie die Effort-Pruefung: ein angefordertes Modell, das
+    `codex debug models` nicht mit visibility=list fuehrt, ist ein Fehler
+    (422 unsupported_model), kein Lauf auf dem Abo-Standard. Ohne Katalog
+    wird nicht geblockt — ein fehlender Katalog darf keinen Aufruf kosten;
+    die Laufzeitablehnung faengt den Fall dann ab. Anlass 15.09.2026
+    (Automation): ?model=gpt-5.4-mini -> 200 model=codex-default."""
+    if not model or not katalog:
+        return True, None
+    available = sorted(slug for slug, e in katalog.items()
+                       if (e.get("visibility") or "list") == "list")
+    eintrag = katalog.get(model)
+    ok = bool(eintrag) and (eintrag.get("visibility") or "list") == "list"
+    return ok, available
 
 
 def _codex_config_effort(config_path: Optional[str] = None) -> Optional[str]:
@@ -1290,6 +1318,23 @@ async def _chatgpt_einmal(
         # "does not support model selection". Treat these known pseudo-aliases
         # as "use the subscription default" → don't pass --model at all.
         selected_model = _codex_model_or_none(selected_model)
+        # Vom Aufrufer angefordert (nicht Servervorgabe): Ablehnung ist dann
+        # ein Fehler, kein Rueckfall — ausser er hat model_fallback gesetzt.
+        _vom_aufrufer = selected_model is not None
+        _model_requested: Optional[str] = None
+        _model_fallback = False
+        if _vom_aufrufer and not prompt.model_fallback:
+            _mok, _mavail = _codex_modell_pruefen(_codex_katalog(), selected_model)
+            if not _mok:
+                raise HTTPException(
+                    status_code=422,
+                    detail={"error": "unsupported_model", "model": selected_model,
+                            "available": _mavail, "rejected_by": "catalog",
+                            "hint": "Das Abo fuehrt dieses Modell nicht (codex debug models, "
+                                    "visibility=list). Nimm eines aus `available`, lass `model` "
+                                    "weg fuer den Abo-Standard, oder setz model_fallback=true, "
+                                    "wenn dir jedes Modell recht ist."},
+                )
         # Vision default: image-bearing calls without Pin nehmen ein schnelles
         # multimodales Modell — seit 10.09. gpt-5.6-luna (gpt-5.4-mini ist im
         # Abo nicht mehr auswaehlbar). Das Mapping laeuft DANACH nochmal, damit
@@ -1389,10 +1434,23 @@ async def _chatgpt_einmal(
             # nachsetzen statt 400 — Storage 10.09.: 26 Safety-Checks endeten
             # als "failed" = Quarantaene-Gate laesst durch.
             if selected_model and "--model" in cmd and _codex_model_rejected(result.stdout or ""):
+                if _vom_aufrufer and not prompt.model_fallback:
+                    # Angefordert und abgelehnt: der Aufrufer bekommt den
+                    # Fehler, nicht ein anderes Modell mit 200.
+                    _, _mavail = _codex_modell_pruefen(_codex_katalog(), selected_model)
+                    raise HTTPException(
+                        status_code=422,
+                        detail={"error": "unsupported_model", "model": selected_model,
+                                "available": _mavail, "rejected_by": "codex",
+                                "hint": "codex hat das Modell abgelehnt. Nimm eines aus `available`, "
+                                        "lass `model` weg fuer den Abo-Standard, oder setz "
+                                        "model_fallback=true."},
+                    )
                 logger.warning(
                     f"codex: model={selected_model!r} abgelehnt — zweiter Lauf ohne --model "
-                    f"(Abo-Standard)"
+                    f"(Abo-Standard; {'Opt-in' if _vom_aufrufer else 'Servervorgabe'})"
                 )
+                _model_requested, _model_fallback = selected_model, True
                 _i = cmd.index("--model")
                 del cmd[_i:_i + 2]
                 selected_model = None
@@ -1514,6 +1572,8 @@ async def _chatgpt_einmal(
             finish_reason="stop",
             effort_applied=_effort_applied,
             thinking_tokens=reasoning_tokens,
+            model_requested=_model_requested,
+            model_fallback=_model_fallback,
         )
 
     except subprocess.TimeoutExpired:
