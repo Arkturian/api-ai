@@ -2472,6 +2472,18 @@ async def reset_notification_cooldown(notification_type: str):
     return {"status": "reset", "notification_type": notification_type}
 
 
+# Frist fuer /var/lib/api-ai/models.json. Automation pusht taeglich 03:00.
+# Bis 23.09.2026 galt 25 h: ein einziger verpasster Lauf kippte nach einer
+# Stunde in den statischen Fallback (6 statt 36 Modelle, 22.09. 04:00 bis
+# 23.09. 03:01). Ein Tag alter Katalog ist naeher an der Wahrheit als der
+# Fallback; ab _MODELS_STALE_S wird er als `stale` markiert, erst nach
+# _MODELS_MAX_AGE_S faellt er weg. Die codex-Modellpruefung haengt nicht an
+# dieser Datei (sie liest `codex debug models`).
+_MODELS_STATE_PATH = None
+_MODELS_STALE_S = 25 * 3600
+_MODELS_MAX_AGE_S = int(float(os.getenv("MODELS_JSON_MAX_AGE_HOURS", "49")) * 3600)
+
+
 @router.get("/models")
 async def list_text_models(
     provider: Optional[str] = None,
@@ -2496,11 +2508,11 @@ async def list_text_models(
     import time
     from pathlib import Path as _Path
 
-    state_path = _Path("/var/lib/api-ai/models.json")
+    state_path = _MODELS_STATE_PATH or _Path("/var/lib/api-ai/models.json")
     if state_path.exists():
         try:
             age = time.time() - state_path.stat().st_mtime
-            if age <= 25 * 3600:  # accept up to 25h (timer is daily + jitter)
+            if age <= _MODELS_MAX_AGE_S:
                 data = _json.loads(state_path.read_text())
                 providers = data.get("providers", {})
                 models = []
@@ -2534,6 +2546,8 @@ async def list_text_models(
                     "updated_at": data.get("updated_at"),
                     "host": data.get("host"),
                     "stale_age_seconds": int(age),
+                    "stale": age > _MODELS_STALE_S,
+                    "max_age_seconds": _MODELS_MAX_AGE_S,
                     "models": models,
                     "providers_meta": {
                         name: {
@@ -2559,7 +2573,7 @@ async def list_text_models(
                         grouped.setdefault(m["provider"], []).append(m["id"])
                     response["by_provider"] = grouped
                 return response
-            logger.warning(f"models.json is {age/3600:.1f}h old (>25h), using fallback")
+            logger.warning(f"models.json is {age/3600:.1f}h old (>{_MODELS_MAX_AGE_S//3600}h), using fallback")
         except Exception as e:
             logger.warning(f"Failed to read models.json: {e} — using fallback")
 

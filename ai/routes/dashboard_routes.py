@@ -292,8 +292,10 @@ async def status_html() -> Response:
         banner = '<div class="banner err">models.json is MISSING — /ai/models will serve fallback</div>'
     elif models.get("_error"):
         banner = f'<div class="banner err">models.json read error: {models["_error"]}</div>'
+    elif models.get("_age_seconds", 0) > 49 * 3600:
+        banner = f'<div class="banner warn">models.json is {models["_age_seconds"] // 3600}h old (>49h) — /ai/models falls back</div>'
     elif models.get("_age_seconds", 0) > 25 * 3600:
-        banner = f'<div class="banner warn">models.json is {models["_age_seconds"] // 3600}h old (>25h) — /ai/models will fall back</div>'
+        banner = f'<div class="banner warn">models.json is {models["_age_seconds"] // 3600}h old (>25h, stale) — Automation-Lauf verpasst</div>'
 
     cards = "".join(_provider_card(p, snap["providers"][p]) for p in _PROVIDERS)
     age = models.get("_age_seconds")
