@@ -211,6 +211,8 @@ class _OpenAIRealtimeSharedTrackPayload(BaseModel):
     # Preis.
     cached_text_input_tokens: int = 0
     cached_audio_input_tokens: int = 0
+    image_input_tokens: int = 0
+    cached_image_input_tokens: int = 0
     text_output_tokens: int = 0
     duration_sec: float = 0.0
     source_host: Optional[str] = None
@@ -530,6 +532,8 @@ async def openai_realtime_cost_shared_state_track(
             text_output_tokens=payload.text_output_tokens,
             cached_text_input_tokens=payload.cached_text_input_tokens,
             cached_audio_input_tokens=payload.cached_audio_input_tokens,
+            image_input_tokens=payload.image_input_tokens,
+            cached_image_input_tokens=payload.cached_image_input_tokens,
             duration_sec=payload.duration_sec,
             voice_session_id=payload.voice_session_id,
             usage_event_id=payload.usage_event_id,

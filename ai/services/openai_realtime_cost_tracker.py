@@ -86,6 +86,8 @@ OPENAI_REALTIME_PRICING = {
         "text_input_per_1m":           4.0,
         "text_input_cached_per_1m":    0.40,
         "text_output_per_1m":         24.0,
+        "image_input_per_1m":          5.0,
+        "image_input_cached_per_1m":   0.5,
     },
     "gpt-realtime-2.1-mini": {
         "audio_input_per_1m":         10.0,
@@ -94,6 +96,8 @@ OPENAI_REALTIME_PRICING = {
         "text_input_per_1m":           0.60,
         "text_input_cached_per_1m":    0.06,
         "text_output_per_1m":          2.40,
+        "image_input_per_1m":          0.8,
+        "image_input_cached_per_1m":   0.08,
     },
     # Abgekuendigt 20.07.2026, Abschaltung 20.01.2027 -> gpt-realtime-2.1.
     "gpt-realtime": {
@@ -103,6 +107,8 @@ OPENAI_REALTIME_PRICING = {
         "text_input_per_1m":           4.0,
         "text_input_cached_per_1m":    0.40,
         "text_output_per_1m":         16.0,
+        "image_input_per_1m":          5.0,
+        "image_input_cached_per_1m":   0.5,
     },
     # Die beiden Preview-Modelle stehen hier seit jeher und werden von
     # SUPPORTED_REALTIME_MODELS nicht angeboten. Ihre Zwischenspeicher-
@@ -116,6 +122,8 @@ OPENAI_REALTIME_PRICING = {
         "text_input_per_1m":           5.0,
         "text_input_cached_per_1m":    5.0,
         "text_output_per_1m":         20.0,
+        "image_input_per_1m":          5.0,
+        "image_input_cached_per_1m":   5.0,
     },
     "gpt-4o-mini-realtime-preview": {
         "audio_input_per_1m":         10.0,
@@ -124,6 +132,8 @@ OPENAI_REALTIME_PRICING = {
         "text_input_per_1m":           0.60,
         "text_input_cached_per_1m":    0.60,
         "text_output_per_1m":          2.40,
+        "image_input_per_1m":          0.8,
+        "image_input_cached_per_1m":   0.8,
     },
     # Rueckfall fuer unbekannte Modelle: die jeweils TEUERSTE bekannte
     # Rate, und zwischengespeicherte Eingabe wird VOLL berechnet. Ein
@@ -288,6 +298,8 @@ class OpenAIRealtimeCostTracker:
         text_output_tokens: int,
         cached_text_input_tokens: int = 0,
         cached_audio_input_tokens: int = 0,
+        image_input_tokens: int = 0,
+        cached_image_input_tokens: int = 0,
     ) -> tuple[float, float]:
         """Preis einer Nutzungsmeldung.
 
@@ -309,7 +321,13 @@ class OpenAIRealtimeCostTracker:
                                       int(text_input_tokens or 0)))
         gespeichert_audio = max(0, min(int(cached_audio_input_tokens or 0),
                                        int(audio_input_tokens or 0)))
-        cost_usd = (
+        # Bild-Token (26.09.2026): Preis je Modell, Rueckfall auf den
+        # teuersten bekannten Bildpreis, falls ein Eintrag ihn nicht kennt.
+        bild = max(0, int(image_input_tokens or 0))
+        gespeichert_bild = max(0, min(int(cached_image_input_tokens or 0), bild))
+        bild_usd = ((bild - gespeichert_bild) * pricing.get("image_input_per_1m", 5.0)
+                    + gespeichert_bild * pricing.get("image_input_cached_per_1m", 5.0)) / 1_000_000.0
+        cost_usd = bild_usd + (
             (audio_input_tokens - gespeichert_audio)
             * pricing["audio_input_per_1m"]
             + gespeichert_audio * pricing["audio_input_cached_per_1m"]
@@ -334,6 +352,8 @@ class OpenAIRealtimeCostTracker:
         cached_audio_input_tokens: int = 0,
         voice_session_id: Optional[str] = None,
         usage_event_id: Optional[str] = None,
+        image_input_tokens: int = 0,
+        cached_image_input_tokens: int = 0,
     ) -> dict:
         """Track a Realtime session's per-turn usage delta.
 
@@ -355,7 +375,8 @@ class OpenAIRealtimeCostTracker:
         federation master).
         """
         if (
-            audio_input_tokens <= 0
+            (image_input_tokens or 0) <= 0
+            and audio_input_tokens <= 0
             and audio_output_tokens <= 0
             and text_input_tokens <= 0
             and text_output_tokens <= 0
@@ -410,6 +431,8 @@ class OpenAIRealtimeCostTracker:
                     cached_audio_input_tokens=cached_audio_input_tokens,
                     voice_session_id=voice_session_id,
                     usage_event_id=usage_event_id,
+                    image_input_tokens=image_input_tokens,
+                    cached_image_input_tokens=cached_image_input_tokens,
                 )
                 return {"deduped": False, "accepted": True}
             except Exception as e:
@@ -432,6 +455,8 @@ class OpenAIRealtimeCostTracker:
             cached_audio_input_tokens,
             input_estimated=geschaetzt,
             input_unknown=unbekannt,
+            image_input_tokens=image_input_tokens,
+            cached_image_input_tokens=cached_image_input_tokens,
         )
         return {"deduped": False, "accepted": True, "input_estimated": geschaetzt, "input_unknown": unbekannt}
 
@@ -486,6 +511,8 @@ class OpenAIRealtimeCostTracker:
         cached_audio_input_tokens: int = 0,
         input_estimated: bool = False,
         input_unknown: bool = False,
+        image_input_tokens: int = 0,
+        cached_image_input_tokens: int = 0,
     ) -> None:
         cost_usd, cost_eur = self._cost_for_session(
             model,
@@ -495,6 +522,8 @@ class OpenAIRealtimeCostTracker:
             text_output_tokens,
             cached_text_input_tokens,
             cached_audio_input_tokens,
+            image_input_tokens=image_input_tokens,
+            cached_image_input_tokens=cached_image_input_tokens,
         )
         if cost_usd <= 0:
             return
@@ -540,6 +569,11 @@ class OpenAIRealtimeCostTracker:
                 stats.get("cached_audio_input_tokens", 0)
                 + max(0, min(int(cached_audio_input_tokens or 0),
                              int(audio_input_tokens or 0)))
+            )
+            stats["image_input_tokens"] = stats.get("image_input_tokens", 0) + max(0, int(image_input_tokens or 0))
+            stats["cached_image_input_tokens"] = (
+                stats.get("cached_image_input_tokens", 0)
+                + max(0, min(int(cached_image_input_tokens or 0), int(image_input_tokens or 0)))
             )
             stats["duration_sec"] += duration_sec
             stats["cost_usd"] += cost_usd
@@ -773,6 +807,8 @@ class OpenAIRealtimeCostTracker:
         cached_audio_input_tokens: int = 0,
         voice_session_id: Optional[str] = None,
         usage_event_id: Optional[str] = None,
+        image_input_tokens: int = 0,
+        cached_image_input_tokens: int = 0,
     ) -> None:
         url = f"{self.master_url}/internal/openai-realtime-cost-shared-state"
         with httpx.Client(timeout=5.0) as client:
@@ -786,6 +822,8 @@ class OpenAIRealtimeCostTracker:
                     "text_output_tokens": text_output_tokens,
                     "cached_text_input_tokens": cached_text_input_tokens,
                     "cached_audio_input_tokens": cached_audio_input_tokens,
+                    "image_input_tokens": image_input_tokens,
+                    "cached_image_input_tokens": cached_image_input_tokens,
                     "duration_sec": duration_sec,
                     "voice_session_id": voice_session_id,
                     "usage_event_id": usage_event_id,

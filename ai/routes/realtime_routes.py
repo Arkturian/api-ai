@@ -507,6 +507,11 @@ class RealtimeUsageReport(BaseModel):
     # angenommen, also niemals zu WENIG gezaehlt.
     cached_text_input_tokens: int = 0
     cached_audio_input_tokens: int = 0
+    # Bild-Token (26.09.2026, Bildschirm nativ): aus
+    # response.done.usage.input_token_details.image_tokens bzw.
+    # cached_tokens_details.image_tokens. Teilmenge von input_tokens.
+    image_input_tokens: int = 0
+    cached_image_input_tokens: int = 0
     duration_sec: float = 0.0
     # GPT-Live (#1884): Sekunden der Stimmschicht (session.usage.updated /
     # session.closed usage.seconds) und Backend-Token je Delegation
@@ -5155,6 +5160,8 @@ async def realtime_usage_report(
         text_output_tokens=report.text_output_tokens,
         cached_text_input_tokens=report.cached_text_input_tokens,
         cached_audio_input_tokens=report.cached_audio_input_tokens,
+        image_input_tokens=report.image_input_tokens,
+        cached_image_input_tokens=report.cached_image_input_tokens,
         duration_sec=report.duration_sec,
         voice_session_id=report.voice_session_id or report.session_id,
         usage_event_id=report.usage_event_id,
@@ -5178,6 +5185,8 @@ async def realtime_usage_report(
                 text_output_tokens=report.text_output_tokens,
                 cached_text_input_tokens=report.cached_text_input_tokens,
                 cached_audio_input_tokens=report.cached_audio_input_tokens,
+                image_input_tokens=report.image_input_tokens,
+                cached_image_input_tokens=report.cached_image_input_tokens,
             )
             zeilen_eur = float(per_row_eur)
             realtime_budget_guard.confirm_usage_charge(
@@ -6193,8 +6202,9 @@ def _screen_tool_defs() -> List[dict]:
             "name": "look_at_screen",
             "description": (
                 "Beschreibt ein zuvor mit screen_capture aufgenommenes Bild und beantwortet "
-                "eine Frage dazu. Nimmt die storage_id aus screen_capture. Dauert einige "
-                "Sekunden; sag kurz, dass du hinschaust."
+                "eine Frage dazu. NUR aufrufen, wenn screen_capture image_attached:false "
+                "geliefert hat — bei image_attached:true siehst du das Bild selbst. Nimmt die "
+                "storage_id aus screen_capture. Dauert einige Sekunden; sag kurz, dass du hinschaust."
             ),
             "parameters": {
                 "type": "object",
@@ -6214,8 +6224,10 @@ def _screen_tools_addendum(language: str = "de") -> str:
         "\n\nBILDSCHIRM: Du kannst den Portal-Bildschirm des Nutzers ansehen, aber nur "
         "auf seinen ausdruecklichen Wunsch. Ablauf: screen_capture aufrufen und dabei "
         "sagen: \u201eTippe auf \u201aBild zeigen\u2018.\u201c Dann warten, bis das Werkzeug "
-        "antwortet (bis zu einer Minute), nicht nachfragen. Bei Erfolg look_at_screen mit "
-        "der storage_id und seiner Frage. Kommt ein error (z. B. abgelehnt, keine_freigabe, "
+        "antwortet (bis zu einer Minute), nicht nachfragen. Bei Erfolg mit "
+        "image_attached:true folgt das Bild direkt im Gespraech: sieh es dir an und "
+        "beantworte seine Frage selbst, ohne look_at_screen. Nur bei image_attached:false "
+        "look_at_screen mit der storage_id und seiner Frage aufrufen. Kommt ein error (z. B. abgelehnt, keine_freigabe, "
         "nicht_unterstuetzt), sag kurz, dass kein Bild da ist, und ruf screen_capture nicht "
         "von selbst erneut auf. Beschreibe nur, was "
         "look_at_screen zurueckgibt, erfinde nichts dazu."
