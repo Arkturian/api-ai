@@ -219,6 +219,15 @@ class RealtimeTokenRequest(BaseModel):
             "federation-shared cap). Must be true to mint a token."
         ),
     )
+    # Bildschirm-Werkzeuge (CloudV2 26.09.2026, Auftrag Alex, Portal):
+    # screen_capture (Client) + look_at_screen (Server). Opt-in, weil der
+    # freigegebene Arcturian-Vertrag genau ein Modellwerkzeug vorsieht und
+    # das Werkzeugset dort die Rechtegrenze ist — ohne dieses Feld bleibt
+    # jede Sitzung wie bisher.
+    screen_tools: bool = Field(
+        default=False,
+        description="true: screen_capture + look_at_screen in die Sitzung aufnehmen (Portal).",
+    )
     persona_variant: Optional[str] = Field(
         default=None,
         description=(
@@ -4472,6 +4481,10 @@ async def mint_realtime_token(
     # arcturian, which serves it per turn instead. Rationale and the
     # measured incident behind the exception: see _session_tools().
     tools = _session_tools(tools, companion_mode, affect_projection)
+    if request.screen_tools:
+        tools = list(tools) + _screen_tool_defs()
+        instructions += _screen_tools_addendum(request.language or "de")
+        logger.info("Realtime: screen_tools opt-in (companion_mode=%s)", companion_mode or "(none)")
     if affect_projection:
         instructions += _affect_projection_addendum(request.language or "de")
         logger.info(
@@ -6079,7 +6092,10 @@ READ_TOOL_NAMES = {"knowledge_query", "pois_near", "narration_near", "osm_nearby
                    # Produktfinder — beide lesend, beide ohne Produktdaten
                    # im Rueckgabewert (Bauplan #4831, Vertrag c887a89).
                    "find_products", "refine_search", "product_details",
-                   "cart_details"}
+                   "cart_details",
+                   # Bildschirm (26.09.): lesend, holt das Bild mit dem
+                   # Nutzer-JWT ueber cloud-api und beschreibt es.
+                   "look_at_screen"}
 
 
 # Zahlwoerter aus #1037, deutsch und englisch. Die Faltung muss auf
@@ -6151,6 +6167,102 @@ async def _resolve_agent_by_fold(
     if len(treffer) == 1:
         return treffer[0], treffer
     return None, treffer
+
+
+def _screen_tool_defs() -> List[dict]:
+    """Werkzeugvertrag mit CloudV2 (26.09.2026). screen_capture fuehrt der
+    Browser aus (getDisplayMedia mit Rueckfrage, ein Frame, JPEG <= 1280 px,
+    privat ueber cloud-api POST /api/media); look_at_screen der Server."""
+    return [
+        {
+            "type": "function",
+            "name": "screen_capture",
+            "description": (
+                "Nimmt EIN Bild des aktuellen Portal-Bildschirms auf. Der Nutzer muss "
+                "die Freigabe im Browser bestaetigen. Nur aufrufen, wenn der Nutzer "
+                "ausdruecklich will, dass du seinen Bildschirm ansiehst. Liefert "
+                "{storage_id, width, height} oder {error, detail}."
+            ),
+            "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
+        },
+        {
+            "type": "function",
+            "name": "look_at_screen",
+            "description": (
+                "Beschreibt ein zuvor mit screen_capture aufgenommenes Bild und beantwortet "
+                "eine Frage dazu. Nimmt die storage_id aus screen_capture. Dauert einige "
+                "Sekunden; sag kurz, dass du hinschaust."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "storage_id": {"type": "integer", "description": "storage_id aus screen_capture"},
+                    "question": {"type": "string", "description": "Was du auf dem Bild wissen willst"},
+                },
+                "required": ["storage_id", "question"],
+                "additionalProperties": False,
+            },
+        },
+    ]
+
+
+def _screen_tools_addendum(language: str = "de") -> str:
+    return (
+        "\n\nBILDSCHIRM: Du kannst den Portal-Bildschirm des Nutzers ansehen, aber nur "
+        "auf seinen ausdruecklichen Wunsch. Ablauf: screen_capture aufrufen; bei Erfolg "
+        "look_at_screen mit der storage_id und seiner Frage. Lehnt der Nutzer die "
+        "Freigabe ab (error abgelehnt), sag das kurz und frag nicht erneut. Beschreibe "
+        "nur, was look_at_screen zurueckgibt, erfinde nichts dazu."
+    )
+
+
+_SCREEN_MAX_BYTES = 8 * 1024 * 1024
+_SCREEN_VISION_MODEL = os.getenv("REALTIME_SCREEN_VISION_MODEL", "gpt-5.6-luna")
+
+
+async def _tool_look_at_screen(args: dict, authorization: Optional[str]) -> dict:
+    """Bild mit dem Nutzer-JWT ueber cloud-api holen und ueber das ChatGPT-
+    Abo beschreiben. Bewusst NICHT mit dem Storage-Dienstschluessel: private
+    Objekte (private_media) sind fuer ihn gesperrt, und das ist richtig so —
+    cloud-api entscheidet mit der Identitaet des Nutzers, ob er das Bild
+    sehen darf. Keine Rechnung (Abo), kein confirm_api_billing."""
+    if not authorization:
+        return {"error": "user_jwt_required"}
+    sid = args.get("storage_id")
+    if isinstance(sid, bool) or not isinstance(sid, int) or sid <= 0:
+        return {"error": "invalid_storage_id", "storage_id": sid}
+    frage = str(args.get("question") or "").strip()[:500] or "Was ist auf dem Bildschirm zu sehen?"
+    base = os.getenv("CLOUD_API_URL", "https://cloud-api.arkserver.arkturian.com")
+    async with httpx.AsyncClient(timeout=20.0) as client:
+        r = await client.get(f"{base}/api/media/{sid}", headers={"Authorization": authorization})
+    if r.status_code != 200:
+        return {"error": "media_not_accessible", "status": r.status_code, "storage_id": sid}
+    ctype = (r.headers.get("content-type") or "").split(";")[0].strip().lower()
+    if not ctype.startswith("image/"):
+        return {"error": "not_an_image", "content_type": ctype, "storage_id": sid}
+    if len(r.content) > _SCREEN_MAX_BYTES:
+        return {"error": "image_too_large", "bytes": len(r.content), "storage_id": sid}
+    import tempfile
+    from . import text_ai_routes as _t
+    endung = {"image/png": ".png", "image/webp": ".webp"}.get(ctype, ".jpg")
+    with tempfile.NamedTemporaryFile(suffix=endung, delete=False) as f:
+        f.write(r.content)
+        pfad = f.name
+    try:
+        os.chmod(pfad, 0o644)   # codex laeuft als alex
+        prompt = _t.Prompt(
+            prompt=("Das Bild ist ein Bildschirmfoto aus dem Browser-Portal des Nutzers. "
+                    "Beantworte knapp auf Deutsch, in hoechstens vier Saetzen, nur was sichtbar ist: "
+                    + frage),
+            image_paths=[pfad], sandbox="read-only", effort="low",
+        )
+        antwort = await _t._chatgpt_einmal(prompt, _SCREEN_VISION_MODEL, "realtime-screen")
+    finally:
+        try:
+            os.remove(pfad)
+        except OSError:
+            pass
+    return {"storage_id": sid, "description": antwort.response, "model": antwort.model}
 
 
 async def _tool_agent_status(args: dict, authorization: Optional[str]) -> Any:
@@ -6970,6 +7082,8 @@ async def realtime_tool_call(
             result = await _tool_osm_nearby(args)
         elif tool_name == "agent_status":
             result = await _tool_agent_status(args, authorization)
+        elif tool_name == "look_at_screen":
+            result = await _tool_look_at_screen(args, authorization)
         elif tool_name == "find_products":
             result = await _tool_product_search(args, x_session_id, False, diagnose)
         elif tool_name == "refine_search":
