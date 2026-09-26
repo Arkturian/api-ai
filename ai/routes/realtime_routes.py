@@ -6179,9 +6179,11 @@ def _screen_tool_defs() -> List[dict]:
             "name": "screen_capture",
             "description": (
                 "Nimmt EIN Bild des aktuellen Portal-Bildschirms auf. Der Nutzer muss "
-                "die Freigabe im Browser bestaetigen. Nur aufrufen, wenn der Nutzer "
-                "ausdruecklich will, dass du seinen Bildschirm ansiehst. Liefert "
-                "{storage_id, width, height} oder {error, detail}."
+                "dafuer in der Sprachanzeige auf 'Bild zeigen' tippen und die Freigabe "
+                "bestaetigen; die Antwort kommt deshalb erst nach einigen Sekunden (bis 60 s). "
+                "Nur aufrufen, wenn der Nutzer ausdruecklich will, dass du seinen Bildschirm "
+                "ansiehst. Liefert {storage_id, width, height} oder {error: "
+                "abgelehnt|keine_freigabe|kein_bild|upload_fehlgeschlagen, detail}."
             ),
             "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
         },
@@ -6209,10 +6211,12 @@ def _screen_tool_defs() -> List[dict]:
 def _screen_tools_addendum(language: str = "de") -> str:
     return (
         "\n\nBILDSCHIRM: Du kannst den Portal-Bildschirm des Nutzers ansehen, aber nur "
-        "auf seinen ausdruecklichen Wunsch. Ablauf: screen_capture aufrufen; bei Erfolg "
-        "look_at_screen mit der storage_id und seiner Frage. Lehnt der Nutzer die "
-        "Freigabe ab (error abgelehnt), sag das kurz und frag nicht erneut. Beschreibe "
-        "nur, was look_at_screen zurueckgibt, erfinde nichts dazu."
+        "auf seinen ausdruecklichen Wunsch. Ablauf: screen_capture aufrufen und dabei "
+        "sagen: \u201eTippe auf \u201aBild zeigen\u2018.\u201c Dann warten, bis das Werkzeug "
+        "antwortet (bis zu einer Minute), nicht nachfragen. Bei Erfolg look_at_screen mit "
+        "der storage_id und seiner Frage. Kommt error abgelehnt oder keine_freigabe, sag "
+        "das kurz und ruf screen_capture nicht von selbst erneut auf. Beschreibe nur, was "
+        "look_at_screen zurueckgibt, erfinde nichts dazu."
     )
 
 

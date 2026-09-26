@@ -96,3 +96,12 @@ def test_kein_bild_wird_nicht_beschrieben(monkeypatch):
     g = _verdrahten(monkeypatch, _Antwort(200, "application/pdf", b"%PDF"))
     r = asyncio.run(rr._tool_look_at_screen({"storage_id": 5, "question": "x"}, "Bearer j"))
     assert r["error"] == "not_an_image" and "prompt" not in g
+
+
+def test_prompt_nennt_knopf_und_fehler():
+    """CloudV2 26.09.: getDisplayMedia braucht einen echten Klick; das
+    Modell muss den Knopf nennen und keine_freigabe kennen."""
+    z = rr._screen_tools_addendum("de")
+    assert "Bild zeigen" in z and "keine_freigabe" in z
+    sc = rr._screen_tool_defs()[0]["description"]
+    assert "Bild zeigen" in sc and "keine_freigabe" in sc
