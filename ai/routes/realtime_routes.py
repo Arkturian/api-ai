@@ -6183,7 +6183,8 @@ def _screen_tool_defs() -> List[dict]:
                 "bestaetigen; die Antwort kommt deshalb erst nach einigen Sekunden (bis 60 s). "
                 "Nur aufrufen, wenn der Nutzer ausdruecklich will, dass du seinen Bildschirm "
                 "ansiehst. Liefert {storage_id, width, height} oder {error: "
-                "abgelehnt|keine_freigabe|kein_bild|upload_fehlgeschlagen, detail}."
+                "abgelehnt|keine_freigabe|kein_bild|upload_fehlgeschlagen|nicht_unterstuetzt|"
+                "ersetzt|sitzung_beendet|zeitueberschreitung, detail}."
             ),
             "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
         },
@@ -6214,8 +6215,9 @@ def _screen_tools_addendum(language: str = "de") -> str:
         "auf seinen ausdruecklichen Wunsch. Ablauf: screen_capture aufrufen und dabei "
         "sagen: \u201eTippe auf \u201aBild zeigen\u2018.\u201c Dann warten, bis das Werkzeug "
         "antwortet (bis zu einer Minute), nicht nachfragen. Bei Erfolg look_at_screen mit "
-        "der storage_id und seiner Frage. Kommt error abgelehnt oder keine_freigabe, sag "
-        "das kurz und ruf screen_capture nicht von selbst erneut auf. Beschreibe nur, was "
+        "der storage_id und seiner Frage. Kommt ein error (z. B. abgelehnt, keine_freigabe, "
+        "nicht_unterstuetzt), sag kurz, dass kein Bild da ist, und ruf screen_capture nicht "
+        "von selbst erneut auf. Beschreibe nur, was "
         "look_at_screen zurueckgibt, erfinde nichts dazu."
     )
 

@@ -105,3 +105,5 @@ def test_prompt_nennt_knopf_und_fehler():
     assert "Bild zeigen" in z and "keine_freigabe" in z
     sc = rr._screen_tool_defs()[0]["description"]
     assert "Bild zeigen" in sc and "keine_freigabe" in sc
+    for f in ("nicht_unterstuetzt", "ersetzt", "sitzung_beendet", "zeitueberschreitung"):
+        assert f in sc
