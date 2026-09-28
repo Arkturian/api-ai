@@ -48,8 +48,28 @@ def _pruefen(req: JevRequest) -> None:
                 raise HTTPException(422, {"error": "score_levels_2_to_10", "question": qid})
 
 
+def _jwt_sub_geprueft(authorization: Optional[str]) -> Optional[str]:
+    """`sub` eines Agenten-JWT, NUR nach Signatur- und Ausstellerpruefung
+    gegen die gepinnte auth-api-JWKS (dieselbe wie beim Realtime-Grant).
+    Ungepruefte Claims waeren ein freies Textfeld. Nur Etikett, nie Recht."""
+    if not authorization or not authorization.lower().startswith("bearer "):
+        return None
+    token = authorization.split(" ", 1)[1].strip()
+    try:
+        import jwt
+        from ai.services import realtime_grant_verifier as v
+        key = v._jwks().get_signing_key_from_jwt(token)
+        claims = jwt.decode(token, key.key, algorithms=["RS256"], issuer=v.AUTH_ISSUER,
+                            options={"verify_aud": False})
+        sub = str(claims.get("sub") or "").strip()
+        return sub[:64] or None
+    except Exception:
+        return None
+
+
 @router.post("/jev")
-async def jev_endpoint(req: JevRequest, x_agent_name: Optional[str] = Header(default=None, alias="X-Agent-Name")):
+async def jev_endpoint(req: JevRequest, x_agent_name: Optional[str] = Header(default=None, alias="X-Agent-Name"),
+                       authorization: Optional[str] = Header(default=None)):
     """Typisierte Urteile (noul/choice/score) ueber TypeSafe System One.
     Antwort unveraendert, ergaenzt um cost_usd und latency_ms. X-Agent-Name
     (vom MCP-Gateway aus dem geprueften JWT) dient nur der Zuordnung im
@@ -66,7 +86,16 @@ async def jev_endpoint(req: JevRequest, x_agent_name: Optional[str] = Header(def
         s.budget_pruefen()
     except s.JevBudget as e:
         raise HTTPException(429, e.detail)
-    caller = (x_agent_name or "").strip()[:64] or "(unbekannt)"
+    # Etikett fuers Nutzungslog, nie Recht: Gateway-Kopf (aus dem dort
+    # geprueften JWT), sonst `sub` eines hier geprueften JWT.
+    if not isinstance(x_agent_name, str):
+        x_agent_name = None
+    if not isinstance(authorization, str):
+        authorization = None
+    caller = (x_agent_name or "").strip()[:64]
+    if not caller and authorization:
+        caller = _jwt_sub_geprueft(authorization) or "(jwt-ungueltig)"
+    caller = caller or "(unbekannt)"
     t0 = time.monotonic()
     try:
         code, data, _hdr = await s.aufrufen(body)

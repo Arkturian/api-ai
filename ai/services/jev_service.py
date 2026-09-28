@@ -1,5 +1,8 @@
 """Jev — TypeSafe System One (Anforderung Content #5083, Jev/Alex 28.09.2026).
 
+Preis belegt: docs.typesafe.ai/models.md, 0,042 USD je Mio Eingabetoken,
+Ausgabe frei (jev-1.13.0 = jev-latest).
+
 Durchreichen statt nachbauen: api-ai validiert nur grob, ruft
 POST https://api.typesafe.ai/v1/systemone und ergaenzt Kosten und Latenz.
 Upstream-Doku: https://docs.typesafe.ai/api.md (401, 422, 429, 529).
