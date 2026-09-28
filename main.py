@@ -180,6 +180,30 @@ if not os.getenv(_API_KEY_ENV):
 
 
 @app.middleware("http")
+async def _jev_jwt_pflicht(request, call_next):
+    """Sicherheitsbefund Jev, 28.09.2026: /ai/jev war ohne Anmeldung
+    oeffentlich nutzbar, weil das Schluesseltor (API_ACCESS_KEY, #1755) auf
+    keinem Host scharf ist — jeder konnte den TypeSafe-Schluessel benutzen.
+    Fuer /ai/jev gilt deshalb unabhaengig vom Tor: ein gegen die gepinnte
+    auth-api-JWKS gepruefetes Agenten-JWT, sonst 401 VOR Validierung und
+    Anbieteraufruf. Das MCP-Gateway reicht das JWT des Aufrufers durch."""
+    pfad = request.url.path
+    if (pfad == "/ai/jev" or pfad.startswith("/ai/jev/")) and request.method != "OPTIONS":
+        import asyncio as _asyncio
+        from ai.routes import jev_routes as _jev
+        sub = await _asyncio.to_thread(_jev._jwt_sub_geprueft, request.headers.get("authorization"))
+        if not sub:
+            logging.getLogger("api-ai.authwatch").warning(
+                "JEV GESPERRT path=%s client=%s ua=%s", pfad,
+                (request.client.host if request.client else "?"),
+                (request.headers.get("user-agent") or "?")[:60])
+            return JSONResponse(status_code=401, content={"detail": {
+                "error": "jwt_required",
+                "hint": "/ai/jev verlangt ein Agenten-JWT der Federation (Authorization: Bearer ...)."}})
+    return await call_next(request)
+
+
+@app.middleware("http")
 async def _require_api_key(request, call_next):
     erwartet = os.getenv(_API_KEY_ENV)
     if not erwartet:
