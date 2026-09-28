@@ -152,6 +152,8 @@ _BEZAHLPFADE = (
     "/ai/scene",
     "/ai/generate_speech",
     "/ai/dialog",
+    # Jev (TypeSafe) — pro Token abgerechnet, 0,042 USD/1M Eingabe (#5083).
+    "/ai/jev",
 )
 
 
@@ -264,6 +266,8 @@ app.include_router(audio_ai_routes.router, prefix="/ai", tags=["Audio AI"])
 app.include_router(dialog_routes.router, prefix="/ai/dialog", tags=["Dialog System"])
 app.include_router(image_generation_routes.router, prefix="/ai/scene", tags=["Scene Images"])
 app.include_router(narration_routes.router, prefix="/ai", tags=["Narration TTS"])
+from ai.routes import jev_routes  # noqa: E402
+app.include_router(jev_routes.router, prefix="/ai", tags=["Jev (TypeSafe)"])
 from ai.routes import audio_mix_routes  # noqa: E402
 app.include_router(audio_mix_routes.router, prefix="/ai", tags=["Audio Mix"])
 app.include_router(music_ai_routes.router, prefix="/ai", tags=["Music AI"])
