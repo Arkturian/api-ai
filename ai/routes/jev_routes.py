@@ -95,6 +95,10 @@ async def jev_endpoint(req: JevRequest, x_agent_name: Optional[str] = Header(def
     caller = (x_agent_name or "").strip()[:64]
     if not caller and authorization:
         caller = _jwt_sub_geprueft(authorization) or "(jwt-ungueltig)"
+    # Einheitlich blanker Name (Jev 28.09.): Gateway liefert "AiApi", das
+    # JWT "agent:AiApi" — sonst zwei Zeilen fuer denselben Agenten.
+    if caller.startswith("agent:"):
+        caller = caller[len("agent:"):]
     caller = caller or "(unbekannt)"
     t0 = time.monotonic()
     try:

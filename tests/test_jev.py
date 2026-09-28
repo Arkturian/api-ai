@@ -154,7 +154,7 @@ def test_etikett_aus_geprueftem_jwt(umgebung, monkeypatch):
     asyncio.run(j.jev_endpoint(_req(), x_agent_name=None, authorization="Bearer gefaelscht"))
     asyncio.run(j.jev_endpoint(_req(), x_agent_name="Gateway-Agent", authorization="Bearer gut"))
     by = s.status()["by_caller"]
-    assert by["agent:Jev"]["requests"] == 1
+    assert by["Jev"]["requests"] == 1 and "agent:Jev" not in by
     assert by["(jwt-ungueltig)"]["requests"] == 1
     assert by["Gateway-Agent"]["requests"] == 1          # Gateway-Kopf hat Vorrang
 
@@ -162,3 +162,11 @@ def test_etikett_aus_geprueftem_jwt(umgebung, monkeypatch):
 def test_jwt_pruefung_lehnt_ungeprueftes_ab():
     assert j._jwt_sub_geprueft("Bearer eyJhbGciOiJub25lIn0.eyJzdWIiOiJhZ2VudDpGYWxzY2gifQ.") is None
     assert j._jwt_sub_geprueft(None) is None and j._jwt_sub_geprueft("Basic x") is None
+
+
+def test_gateway_und_direkt_eine_zeile(umgebung, monkeypatch):
+    monkeypatch.setattr(j, "_jwt_sub_geprueft", lambda auth: "agent:Jev")
+    asyncio.run(j.jev_endpoint(_req(), x_agent_name=None, authorization="Bearer x"))
+    asyncio.run(j.jev_endpoint(_req(), x_agent_name="agent:Jev", authorization=None))
+    asyncio.run(j.jev_endpoint(_req(), x_agent_name="Jev", authorization=None))
+    assert s.status()["by_caller"]["Jev"]["requests"] == 3
