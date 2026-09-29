@@ -130,10 +130,22 @@ def buchen(caller: str, model: Optional[str], input_tokens: int, output_tokens: 
         _schreiben(d)
 
 
+def rueckstellung() -> str:
+    """Naechste lokale Mitternacht des Hosts (Tagesdatei wechselt dann)."""
+    from datetime import timedelta
+    jetzt = datetime.now().astimezone()
+    morgen = (jetzt + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+    return morgen.isoformat()
+
+
 def status() -> dict:
     max_req, max_usd = _grenzen()
     with _sperre():
         d = _lesen()
+    erschoepft = (max_req > 0 and d["requests"] >= max_req) or (max_usd > 0 and d["cost_usd"] >= max_usd)
+    d["budget_exhausted"] = bool(erschoepft)
+    d["resets_at"] = rueckstellung()
+    d["timezone"] = str(datetime.now().astimezone().tzinfo)
     d["cost_usd"] = round(d["cost_usd"], 8)
     d["limits"] = {"max_requests_per_day": max_req, "max_usd_per_day": max_usd}
     d["price_per_1m_input_usd"] = _preis_je_mio()
@@ -146,7 +158,7 @@ class JevBudget(Exception):
         super().__init__("jev daily budget")
         self.detail = {"error": "jev_daily_budget_exceeded", "requests_today": requests,
                        "cost_usd_today": cost_usd, "max_requests_per_day": max_req,
-                       "max_usd_per_day": max_usd,
+                       "max_usd_per_day": max_usd, "resets_at": rueckstellung(),
                        "hint": "Schutz gegen Endlosschleifen; Grenzen per JEV_DAILY_MAX_REQUESTS/JEV_DAILY_MAX_USD."}
 
 

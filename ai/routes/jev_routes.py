@@ -6,7 +6,7 @@ import logging
 import time
 from typing import Any, Dict, Optional, Union
 
-from fastapi import APIRouter, Header, HTTPException
+from fastapi import APIRouter, Header, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from ai.services import jev_service as s
@@ -69,7 +69,9 @@ def _jwt_sub_geprueft(authorization: Optional[str]) -> Optional[str]:
 
 @router.post("/jev")
 async def jev_endpoint(req: JevRequest, x_agent_name: Optional[str] = Header(default=None, alias="X-Agent-Name"),
-                       authorization: Optional[str] = Header(default=None)):
+                       authorization: Optional[str] = Header(default=None),
+                       max_attempts: int = Query(default=3, ge=1, le=3,
+                                                 description="Versuche bei Upstream-429/529; 1 = keine Wiederholung (kurze Client-Timeouts).")):
     """Typisierte Urteile (noul/choice/score) ueber TypeSafe System One.
     Antwort unveraendert, ergaenzt um cost_usd und latency_ms. X-Agent-Name
     (vom MCP-Gateway aus dem geprueften JWT) dient nur der Zuordnung im
@@ -85,16 +87,24 @@ async def jev_endpoint(req: JevRequest, x_agent_name: Optional[str] = Header(def
     try:
         s.budget_pruefen()
     except s.JevBudget as e:
-        raise HTTPException(429, e.detail)
-    # Etikett fuers Nutzungslog, nie Recht: Gateway-Kopf (aus dem dort
-    # geprueften JWT), sonst `sub` eines hier geprueften JWT.
+        from datetime import datetime as _dt
+        warte = max(1, int((_dt.fromisoformat(e.detail["resets_at"]) - _dt.now().astimezone()).total_seconds()))
+        raise HTTPException(429, e.detail, headers={"Retry-After": str(warte)})
+    # Etikett fuers Nutzungslog, nie Recht. Vorrang hat der `sub` des hier
+    # geprueften JWT (Cloud 29.09.: X-Agent-Name ist frei setzbar, ein
+    # angemeldeter Aufrufer duerfte sich sonst als anderer ausgeben). Das
+    # Gateway reicht das Aufrufer-JWT durch, sub und Kopf stimmen dort ueberein.
     if not isinstance(x_agent_name, str):
         x_agent_name = None
     if not isinstance(authorization, str):
         authorization = None
-    caller = (x_agent_name or "").strip()[:64]
-    if not caller and authorization:
+    if not isinstance(max_attempts, int):
+        max_attempts = 3
+    caller = ""
+    if authorization:
         caller = _jwt_sub_geprueft(authorization) or "(jwt-ungueltig)"
+    if not caller:
+        caller = (x_agent_name or "").strip()[:64]
     # Einheitlich blanker Name (Jev 28.09.): Gateway liefert "AiApi", das
     # JWT "agent:AiApi" — sonst zwei Zeilen fuer denselben Agenten.
     if caller.startswith("agent:"):
@@ -102,7 +112,7 @@ async def jev_endpoint(req: JevRequest, x_agent_name: Optional[str] = Header(def
     caller = caller or "(unbekannt)"
     t0 = time.monotonic()
     try:
-        code, data, _hdr = await s.aufrufen(body)
+        code, data, _hdr = await s.aufrufen(body, versuche=max_attempts)
     except Exception as e:   # Netzfehler / Timeout
         s.buchen(caller, None, 0, 0, 0.0, fehler=True)
         raise HTTPException(502, {"error": "jev_upstream_unreachable", "exc": type(e).__name__})

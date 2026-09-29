@@ -154,9 +154,9 @@ def test_etikett_aus_geprueftem_jwt(umgebung, monkeypatch):
     asyncio.run(j.jev_endpoint(_req(), x_agent_name=None, authorization="Bearer gefaelscht"))
     asyncio.run(j.jev_endpoint(_req(), x_agent_name="Gateway-Agent", authorization="Bearer gut"))
     by = s.status()["by_caller"]
-    assert by["Jev"]["requests"] == 1 and "agent:Jev" not in by
+    # Seit 29.09.: gepruefter JWT-sub vor dem frei setzbaren Kopf.
+    assert by["Jev"]["requests"] == 2 and "agent:Jev" not in by and "Gateway-Agent" not in by
     assert by["(jwt-ungueltig)"]["requests"] == 1
-    assert by["Gateway-Agent"]["requests"] == 1          # Gateway-Kopf hat Vorrang
 
 
 def test_jwt_pruefung_lehnt_ungeprueftes_ab():
@@ -170,3 +170,40 @@ def test_gateway_und_direkt_eine_zeile(umgebung, monkeypatch):
     asyncio.run(j.jev_endpoint(_req(), x_agent_name="agent:Jev", authorization=None))
     asyncio.run(j.jev_endpoint(_req(), x_agent_name="Jev", authorization=None))
     assert s.status()["by_caller"]["Jev"]["requests"] == 3
+
+
+# --- Cloud-Integration 29.09.: Etikett, Budget-Signal, Wiederholungen ------
+
+def test_etikett_nur_aus_geprueftem_jwt_nicht_aus_kopf(umgebung, monkeypatch):
+    """X-Agent-Name ist frei setzbar; ein Aufrufer mit gueltigem JWT darf
+    sich im Log nicht als jemand anderes ausgeben."""
+    monkeypatch.setattr(j, "_jwt_sub_geprueft", lambda auth: "agent:cloud-api-jev")
+    asyncio.run(j.jev_endpoint(_req(), x_agent_name="Jev", authorization="Bearer x"))
+    by = s.status()["by_caller"]
+    assert "cloud-api-jev" in by and "Jev" not in by
+
+
+def test_status_budget_signal(umgebung):
+    st = s.status()
+    assert st["budget_exhausted"] is False
+    assert st["resets_at"].endswith(("+02:00", "+01:00")) or "T00:00:00" in st["resets_at"]
+    assert st["timezone"]
+    for _ in range(3):
+        asyncio.run(j.jev_endpoint(_req(), x_agent_name=None))
+    assert s.status()["budget_exhausted"] is True
+
+
+def test_budget_429_nennt_rueckstellzeit(umgebung):
+    for _ in range(3):
+        asyncio.run(j.jev_endpoint(_req(), x_agent_name=None))
+    with pytest.raises(HTTPException) as e:
+        asyncio.run(j.jev_endpoint(_req(), x_agent_name=None))
+    assert "resets_at" in e.value.detail and e.value.headers and "Retry-After" in e.value.headers
+
+
+def test_max_attempts_1_wiederholt_nicht(umgebung):
+    calls, antworten, schlaf = umgebung
+    antworten.append(_R(429, {"detail": "rate"}, {"retry-after": "2"}))
+    with pytest.raises(HTTPException) as e:
+        asyncio.run(j.jev_endpoint(_req(), x_agent_name=None, max_attempts=1))
+    assert e.value.status_code == 429 and len(calls) == 1 and schlaf == []
