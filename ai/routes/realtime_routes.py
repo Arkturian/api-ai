@@ -4909,6 +4909,31 @@ class RealtimeLiveSdpRequest(BaseModel):
     tools: Optional[List[dict]] = Field(default=None, description="Werkzeuge des Backends. Leer = Federation-Werkzeugsatz.")
     tool_choice: Optional[str] = "auto"
     confirm_api_billing: Optional[bool] = False
+    # Arcturian ueber GPT-Live (Alex 30.09.2026). companion_mode="arcturian":
+    # Backend bekommt den freigegebenen Arcturian-Prompt + Resolver-Zusatz und
+    # resolve_arcturian_turn mit tool_choice required; ausgefuehrt wird der
+    # Resolver wie heute vom Portal (response.item.create mit dem Ergebnis).
+    companion_mode: Optional[str] = None
+    arcturian_resolver: Optional[str] = None
+    read_tools: bool = False
+    name_resolution: bool = False
+    screen_tools: bool = False
+
+
+_LIVE_COMPANION_MODES = {None, "arcturian"}
+
+
+def _live_arcturian_stimme(language: str) -> str:
+    """Nur Sprechverhalten. Was Arcturian tun darf und wie er entscheidet,
+    steht im Backend-Prompt; die Stimme delegiert."""
+    sprache = {"de": "Deutsch", "en": "Englisch", "sl": "Slowenisch", "it": "Italienisch"}.get(language, language)
+    return (
+        f"Du bist Arcturian, Alex' operativer Begleiter in der AgentOS-Federation. Sprich {sprache}, "
+        "ruhig, knapp, in ein bis zwei Saetzen. Warte Sprechpausen ab und fall nicht ins Wort. "
+        "Alles, was eine Handlung, eine Nachricht an einen Agenten, einen Status oder Wissen braucht, "
+        "uebergibst du dem Backend und sagst kurz, dass du dich darum kuemmerst. "
+        "Behaupte nie, etwas sei erledigt oder gesendet, solange das Backend es dir nicht bestaetigt hat."
+    )
 
 
 def _live_sprech_persona(language: str) -> str:
@@ -4925,6 +4950,46 @@ def _live_sprech_persona(language: str) -> str:
 
 def _live_session_config(request: RealtimeLiveSdpRequest) -> dict:
     language = request.language or "de"
+    modus = request.companion_mode or None
+    if modus not in _LIVE_COMPANION_MODES:
+        raise HTTPException(status_code=422, detail={"error": "unsupported_live_companion_mode",
+                                                     "companion_mode": modus, "supported": ["arcturian"]})
+    if modus == "arcturian":
+        resolver = request.arcturian_resolver or DEFAULT_ARCTURIAN_RESOLVER
+        if resolver not in SUPPORTED_ARCTURIAN_RESOLVERS:
+            raise HTTPException(status_code=422, detail={"error": "unsupported_arcturian_resolver",
+                                                         "requested": resolver,
+                                                         "supported": sorted(SUPPORTED_ARCTURIAN_RESOLVERS)})
+        tools = list(_arcturian_resolver_tools(resolver))
+        if request.read_tools:
+            tools += _arcturian_read_tools(request.name_resolution)
+        if request.screen_tools:
+            tools += _screen_tool_defs()
+        backend = _companion_arcturian_prompt(language) + _arcturian_resolver_addendum(language, resolver)
+        if request.screen_tools:
+            backend += _screen_tools_addendum(language)
+        return {
+            "model": LIVE_MODEL,
+            "instructions": request.instructions or _live_arcturian_stimme(language),
+            "audio": {"output": {"voice": request.voice or DEFAULT_REALTIME_VOICE}},
+            "delegation": {
+                "type": "responses",
+                "responses": {
+                    "model": request.backend_model or DEFAULT_LIVE_BACKEND_MODEL,
+                    "instructions": request.backend_instructions or backend,
+                    "tools": tools,
+                    # NICHT "required": der Zwang gilt in GPT-Live auch fuer die
+                    # Fortsetzung nach dem Werkzeugergebnis — das Backend ruft
+                    # dann erneut den Resolver oder die Fortsetzung scheitert mit
+                    # invalid_request_error, und Arcturian spricht das Ergebnis nie
+                    # aus (gemessen 30.09.). Mit "auto" rief das Backend den
+                    # Resolver bei 3/3 Delegationen und sprach Bestaetigung bzw.
+                    # Rueckfrage. Delegiert wird ohnehin nur, wenn die Stimme eine
+                    # Handlung/Pruefung erkennt; Smalltalk laeuft ohne Backend.
+                    "tool_choice": "auto",
+                },
+            },
+        }
     tools = list(request.tools) if request.tools is not None else list(_all_tool_defs())
     return {
         "model": LIVE_MODEL,
@@ -5014,6 +5079,9 @@ async def live_sdp(
         "tools": [t.get("name") for t in session_config["delegation"]["responses"]["tools"]],
         "session_id": request.session_id,
         "voice_session_id": voice_session_id,
+        "companion_mode": request.companion_mode,
+        "arcturian_resolver": (request.arcturian_resolver or DEFAULT_ARCTURIAN_RESOLVER)
+        if request.companion_mode == "arcturian" else None,
         "data_channel": "oai-events",
         "usage_contract": {"post": "/ai/realtime/usage", "fields": ["live_seconds", "backend_model",
                            "backend_input_tokens", "backend_cached_input_tokens", "backend_output_tokens",
