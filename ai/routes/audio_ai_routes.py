@@ -18,6 +18,8 @@ import time
 import re
 import io
 import os
+import json
+import base64
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -433,6 +435,16 @@ async def transcribe_audio(
     prompt: Optional[str] = Form(None),
     language: Optional[str] = Form(None),
     response_format: Optional[str] = Form(None),
+    # Zeitstempel (whisper-1 + verbose_json): "segment", "word" oder
+    # "segment,word". Nur mit verbose_json erlaubt (OpenAI-Vertrag).
+    timestamp_granularities: Optional[str] = Form(None),
+    # Bekannte Sprecher fuer gpt-4o-transcribe-diarize, JSON-Liste:
+    # [{"name": "Alex", "start": 12.0, "end": 18.5, "file_url": "..."}].
+    # Der Server schneidet je Sprecher 2-10 s aus der Aufnahme (ohne
+    # file_url: aus der zu transkribierenden Datei) und reicht sie als
+    # known_speaker_references weiter. So tragen getrennt transkribierte
+    # Teile einer langen Aufnahme dieselben Sprechernamen.
+    speaker_references: Optional[str] = Form(None),
     # GCP-cost-incident hardening (2026-05-30): when `model` starts with
     # `gemini`, the request hits the Gemini API (GCP-billed) and must
     # carry this opt-in form-field set to "true" / "1" / "yes". Whisper
@@ -454,9 +466,15 @@ async def transcribe_audio(
 
     Parameters:
     - language (optional): ISO code like "de", "en" — improves accuracy
-    - response_format (optional): text | json | diarized_json.
+    - response_format (optional): text | json | verbose_json | diarized_json.
       For speaker separation set model=gpt-4o-transcribe-diarize +
       response_format=diarized_json.
+      verbose_json (whisper-1) liefert zusaetzlich `segments` (und `words`
+      mit timestamp_granularities=word) mit Zeitstempeln.
+    - timestamp_granularities (optional, nur verbose_json): segment | word |
+      segment,word.
+    - speaker_references (optional, nur gpt-4o-transcribe-diarize): JSON-Liste
+      [{"name","start","end","file_url"?}], max. 4, je 2-10 s.
 
     Supports typical audio MIME types (mp3, m4a, wav, webm, etc.).
 
@@ -490,6 +508,8 @@ async def transcribe_audio(
                 file, model, prompt,
                 language=language,
                 response_format=response_format,
+                timestamp_granularities=timestamp_granularities,
+                speaker_references=speaker_references,
             )
 
     except HTTPException:
@@ -699,6 +719,8 @@ async def _transcribe_with_whisper(
     prompt: Optional[str] = None,
     language: Optional[str] = None,
     response_format: Optional[str] = None,
+    timestamp_granularities: Optional[str] = None,
+    speaker_references: Optional[str] = None,
 ):
     """Transcribe audio using OpenAI Whisper / GPT-4o transcribe family."""
     if not os.getenv("OPENAI_API_KEY"):
@@ -707,6 +729,10 @@ async def _transcribe_with_whisper(
     data = await file.read()
     if not data:
         raise HTTPException(status_code=400, detail="Uploaded audio file is empty.")
+
+    # Vor jedem Anbieteraufruf pruefen: ein Vertragsfehler darf nichts kosten.
+    granularitaeten = _granularitaeten_pruefen(timestamp_granularities, response_format)
+    sprecher = _sprecher_spec_pruefen(speaker_references, model, response_format)
 
     # Normalize the audio for OpenAI:
     #   1) Probe the actual codec via ffprobe (ignores filename + MIME lies).
@@ -747,6 +773,16 @@ async def _transcribe_with_whisper(
     # need a different strategy.
     if "diarize" in model:
         kwargs.setdefault("chunking_strategy", "auto")
+    if granularitaeten:
+        kwargs["timestamp_granularities"] = granularitaeten
+    if sprecher:
+        namen, referenzen = await _sprecher_referenzen_bauen(sprecher, data)
+        # extra_body statt Keyword: aeltere SDK-Staende (arkserver) kennen
+        # known_speaker_* noch nicht; als Formularfeld kommt es identisch an.
+        kwargs["extra_body"] = {
+            "known_speaker_names": namen,
+            "known_speaker_references": referenzen,
+        }
 
     result = await client.audio.transcriptions.create(**kwargs)
 
@@ -759,6 +795,7 @@ async def _transcribe_with_whisper(
             "language": language,
             "filename": file.filename,
             "response_format": "diarized_json",
+            "speaker_names": [x["name"] for x in sprecher] if sprecher else None,
             "diarized": raw,
         }
 
@@ -773,9 +810,10 @@ async def _transcribe_with_whisper(
             "latency_ms": latency_ms,
         }
 
-    detected = getattr(result, "language", None) if auto_verbose else None
-    api_duration = getattr(result, "duration", None) if auto_verbose else None
-    return {
+    verbose = auto_verbose or response_format == "verbose_json"
+    detected = getattr(result, "language", None) if verbose else None
+    api_duration = getattr(result, "duration", None) if verbose else None
+    antwort = {
         "text": text,
         "model": model,
         "prompt": prompt,
@@ -787,6 +825,117 @@ async def _transcribe_with_whisper(
             round(float(api_duration), 2) if api_duration is not None else None),
         "latency_ms": latency_ms,
     }
+    # Segmente/Woerter nur, wenn der Aufrufer verbose_json AUSDRUECKLICH
+    # verlangt hat — der automatische verbose_json-Pfad (Spracherkennung
+    # fuer comm-api) bleibt schlank wie bisher.
+    if response_format == "verbose_json":
+        roh = jsonable_encoder(result)
+        antwort["segments"] = roh.get("segments")
+        if roh.get("words") is not None:
+            antwort["words"] = roh.get("words")
+    return antwort
+
+
+_GRANULARITAETEN = ("segment", "word")
+_SPRECHER_MAX = 4
+_REF_MIN_S, _REF_MAX_S = 2.0, 10.0
+
+
+def _granularitaeten_pruefen(wert: Optional[str], response_format: Optional[str]) -> Optional[list]:
+    if not wert:
+        return None
+    teile = [t.strip().lower() for t in wert.split(",") if t.strip()]
+    falsch = [t for t in teile if t not in _GRANULARITAETEN]
+    if falsch or not teile:
+        raise HTTPException(status_code=422, detail={
+            "error": "invalid_timestamp_granularities", "invalid": falsch,
+            "available": list(_GRANULARITAETEN)})
+    if response_format != "verbose_json":
+        raise HTTPException(status_code=422, detail={
+            "error": "timestamp_granularities_requires_verbose_json",
+            "hint": "response_format=verbose_json setzen (nur whisper-1)."})
+    return list(dict.fromkeys(teile))
+
+
+def _sprecher_spec_pruefen(wert: Optional[str], model: str,
+                           response_format: Optional[str]) -> Optional[list]:
+    if not wert:
+        return None
+    if "diarize" not in model:
+        raise HTTPException(status_code=422, detail={
+            "error": "speaker_references_requires_diarize_model",
+            "hint": "model=gpt-4o-transcribe-diarize + response_format=diarized_json."})
+    try:
+        spec = json.loads(wert)
+    except ValueError:
+        raise HTTPException(status_code=422, detail={"error": "speaker_references_not_json"})
+    if not isinstance(spec, list) or not 1 <= len(spec) <= _SPRECHER_MAX:
+        raise HTTPException(status_code=422, detail={
+            "error": "speaker_references_count", "max": _SPRECHER_MAX})
+    aus = []
+    for i, e in enumerate(spec):
+        if not isinstance(e, dict):
+            raise HTTPException(status_code=422, detail={"error": "speaker_reference_not_object", "index": i})
+        name = str(e.get("name") or "").strip()
+        try:
+            start, ende = float(e.get("start")), float(e.get("end"))
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=422, detail={"error": "speaker_reference_start_end", "index": i})
+        dauer = ende - start
+        if not name or start < 0 or not (_REF_MIN_S <= dauer <= _REF_MAX_S):
+            raise HTTPException(status_code=422, detail={
+                "error": "speaker_reference_invalid", "index": i,
+                "hint": f"name Pflicht, 0 <= start, Laenge {_REF_MIN_S:g}-{_REF_MAX_S:g} s",
+                "length_s": round(dauer, 2)})
+        aus.append({"name": name, "start": start, "end": ende,
+                    "file_url": (e.get("file_url") or None)})
+    namen = [x["name"] for x in aus]
+    if len(set(namen)) != len(namen):
+        raise HTTPException(status_code=422, detail={"error": "speaker_reference_duplicate_name"})
+    return aus
+
+
+def _ausschnitt_wav(data: bytes, start: float, ende: float) -> bytes:
+    """Schneidet [start, ende) als 16-kHz-Mono-WAV. Prueft die Ist-Laenge:
+    ein Ausschnitt hinter dem Dateiende waere sonst leer oder zu kurz und
+    OpenAI wiese ihn erst nach dem Hochladen ab."""
+    import subprocess
+    import tempfile
+    with tempfile.NamedTemporaryFile(suffix=".audio") as src:
+        src.write(data)
+        src.flush()
+        r = subprocess.run(
+            ["ffmpeg", "-y", "-loglevel", "error", "-ss", f"{start:.3f}",
+             "-t", f"{ende - start:.3f}", "-i", src.name,
+             "-ac", "1", "-ar", "16000", "-f", "wav", "pipe:1"],
+            capture_output=True, timeout=60,
+        )
+    if r.returncode != 0 or len(r.stdout) < 44:
+        raise HTTPException(status_code=422, detail={
+            "error": "speaker_reference_cut_failed", "upstream": r.stderr[:300].decode("utf-8", "replace")})
+    ist = (len(r.stdout) - 44) / (16000 * 2)
+    if ist < _REF_MIN_S - 0.05:
+        raise HTTPException(status_code=422, detail={
+            "error": "speaker_reference_beyond_audio", "length_s": round(ist, 2),
+            "hint": "start/end liegen (teilweise) hinter dem Ende der Aufnahme."})
+    return r.stdout
+
+
+async def _sprecher_referenzen_bauen(spec: list, data: bytes) -> tuple[list, list]:
+    quellen: dict = {}
+    namen, referenzen = [], []
+    for e in spec:
+        url = e["file_url"]
+        if url:
+            if url not in quellen:
+                quellen[url] = await (await _fetch_audio_from_url(url)).read()
+            quelle = quellen[url]
+        else:
+            quelle = data
+        wav = _ausschnitt_wav(quelle, e["start"], e["end"])
+        namen.append(e["name"])
+        referenzen.append("data:audio/wav;base64," + base64.b64encode(wav).decode("ascii"))
+    return namen, referenzen
 
 
 async def _transcribe_with_gemini(
