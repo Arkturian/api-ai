@@ -158,12 +158,33 @@ def test_verdrahtung_sitzt_im_rumpf():
     assert "_abo_geeignet(" in q and "routed_via" in q
 
 
-def test_route_subscription_mit_referenzbildern_ist_400_nicht_still(monkeypatch):
-    """Der Abo-Pfad kennt keine Referenzbilder; sie still zu verwerfen
-    waere ein anderes Bild mit 200 (Story-Codex, 15.09.)."""
+def test_route_subscription_reicht_referenzbilder_an_das_abo(monkeypatch):
+    """Bis 11.10. war das ein 400: der Abo-Pfad kannte keine Referenzen.
+    Gemessen: codex image_gen nimmt angehaengte Bilder als Vorlage. Das
+    alte Schutzziel bleibt — Referenzen duerfen NIE still verworfen werden
+    (anderes Bild mit 200, Story-Codex 15.09.): sie muessen am Abo-Aufruf
+    ankommen."""
     aufrufe = _verdrahten(monkeypatch)
-    with pytest.raises(HTTPException) as e:
-        asyncio.run(g._generate_image_einmal(_req(route="subscription", reference_image_urls=["https://x/1.png"]), "x"))
-    assert e.value.status_code == 400
-    assert e.value.detail["error"] == "reference_images_not_supported_on_subscription"
-    assert aufrufe["abo"] == [] and aufrufe["api"] == []
+    refs = ["https://api-storage.arkturian.com/storage/media/1"]
+    out = asyncio.run(g._generate_image_einmal(_req(route="subscription", reference_image_urls=refs), "x"))
+    assert aufrufe["api"] == [] and len(aufrufe["abo"]) == 1
+    assert aufrufe["abo"][0]["reference_image_urls"] == refs
+    assert out["routed_via"] == "subscription"
+
+
+def test_modell_codex_imagegen_nimmt_referenzbilder(monkeypatch):
+    aufrufe = _verdrahten(monkeypatch)
+    refs = ["https://api-storage.arkturian.com/storage/media/1"]
+    asyncio.run(g._generate_image_einmal(_req(model="codex-imagegen", reference_image_urls=refs), "x"))
+    assert aufrufe["api"] == [] and aufrufe["abo"][0]["reference_image_urls"] == refs
+
+
+def test_route_auto_mit_referenz_bleibt_bezahlt(monkeypatch):
+    """Bestehende Aufrufer: auto + Referenz lief bezahlt (Groesse, Treue,
+    bis 16 Referenzen). Das Abo gibt es dafuer nur ausdruecklich."""
+    aufrufe = _verdrahten(monkeypatch)
+    refs = ["https://api-storage.arkturian.com/storage/media/1"]
+    out = asyncio.run(g._generate_image_einmal(
+        _req(reference_image_urls=refs, confirm_api_billing=True), "x"))
+    assert aufrufe["abo"] == [] and aufrufe["api"][0]["reference_image_urls"] == refs
+    assert out["routed_via"] == "api"

@@ -1090,6 +1090,7 @@ async def _generate_image_einmal(
             if not (
                 is_openai_image_model(model_name)
                 or is_openai_image_model(actual_model)
+                or is_codex_image_model(actual_model)
             ) or actual_model == "dall-e-3":
                 raise HTTPException(
                     status_code=400,
@@ -1099,7 +1100,8 @@ async def _generate_image_einmal(
                         "hint": (
                             "reference_image_urls is only wired for "
                             "gpt-image-2 / gpt-image-1 / gpt-image-1.5 "
-                            "(OpenAI /v1/images/edits). Pick one of those, "
+                            "(OpenAI /v1/images/edits) and codex-imagegen "
+                            "(subscription, max 4). Pick one of those, "
                             "or drop reference_image_urls and use the model "
                             "with text-only generation."
                         ),
@@ -1112,10 +1114,12 @@ async def _generate_image_einmal(
         if route not in _ROUTEN:
             raise HTTPException(status_code=422, detail={"error": "unknown_route", "route": request.route,
                                                          "allowed": list(_ROUTEN)})
-        if route == "subscription" and request.reference_image_urls:
-            raise HTTPException(status_code=400, detail={
-                "error": "reference_images_not_supported_on_subscription",
-                "hint": "codex image_gen nimmt keine Referenzbilder; route=api (bezahlt) oder ohne reference_image_urls."})
+        # Referenzbilder auf dem Abo-Weg (3DNerd/Alex, 11.10.): codex image_gen
+        # nimmt angehaengte Bilder als Vorlage an (gemessen, auch mit
+        # Merkmalen, die nur im Bild standen). Nur AUSDRUECKLICH ueber
+        # route=subscription oder model=codex-imagegen; route=auto mit
+        # Referenz bleibt beim bezahlten Pfad (_abo_geeignet), damit sich
+        # fuer bestehende Aufrufer weder Groesse noch Treue aendert.
         abo_auto = _abo_geeignet(request)[0]
         result = None
         routed_via = None
@@ -1171,7 +1175,8 @@ async def _generate_image_einmal(
                     prompt=request.prompt,
                     collection_id=request.collection_id or "ai-generated-images",
                     link_id=request.link_id,
-                private=bool(request.private),
+                    private=bool(request.private),
+                    reference_image_urls=request.reference_image_urls,
                     negative_prompt=request.negative_prompt,
                     aspect_ratio=_ci.seitenverhaeltnis_aus(request.width, request.height, request.aspect_ratio),
                     background=request.background,
