@@ -84,6 +84,8 @@ async def save_file_and_record(
     analyze: bool = False,  # Skip AI analysis for AI-generated content
     skip_ai_safety: bool = True,  # Skip safety check for AI-generated content
     private: bool = False,  # vertraulich: /storage/media liefert nur an Eigentuemer/Admin (403 sonst)
+    grant_scope: Optional[str] = None,  # bindet das Objekt beim Upload an einen Scope (media_grants)
+    ttl_hours: Optional[int] = None,  # Storage loescht das Objekt nach N Stunden selbst
     reuse_existing: bool = False,  # AI-generated content is always a new work — storage's
     # filename-based reuse (its default!) silently OVERWRITES an earlier object when two
     # generations finish in the same second (timestamp filenames, Issue #512: two parallel
@@ -130,6 +132,10 @@ async def save_file_and_record(
         # waere ein Widerspruch, den der Aufrufer nicht bemerken wuerde.
         form_data["private"] = "true"
         form_data["is_public"] = "false"
+    if grant_scope:
+        form_data["grant_scope"] = grant_scope
+    if ttl_hours:
+        form_data["ttl_hours"] = str(int(ttl_hours))
     if collection_id:
         form_data["collection_id"] = collection_id
     if link_id:

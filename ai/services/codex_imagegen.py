@@ -229,6 +229,8 @@ async def generate_with_codex_imagegen(
     collection_id: str,
     link_id: Optional[str],
     private: bool = False,
+    grant_scope: Optional[str] = None,
+    ttl_hours: Optional[int] = None,
     negative_prompt: Optional[str] = None,
     aspect_ratio: Optional[str] = None,
     background: Optional[str] = None,
@@ -345,6 +347,8 @@ async def generate_with_codex_imagegen(
         context="image-generation",
         is_public=not private,
         private=private,
+        grant_scope=grant_scope,
+        ttl_hours=ttl_hours,
         collection_id=collection_id,
         link_id=link_id,
     )

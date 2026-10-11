@@ -12,6 +12,8 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from typing import List, Optional
 import logging
+import re
+
 from ai.clients.storage_client import storage_api_key
 from ai.provider_config import provider_missing
 
@@ -66,6 +68,12 @@ class ImageGenRequest(BaseModel):
     # Storage legt das Bild mit private_media ab (nur Eigentuemer/Admin),
     # false/fehlend -> wie bisher oeffentlich.
     private: Optional[bool] = Field(default=False, description="true = Ergebnis vertraulich ablegen (anonym 403)")
+    # Bindung an einen Scope beim Ablegen (cloud-api/3DNerd, 11.10.): Das
+    # Ergebnis gehoert dem Upload-Konto von api-ai; ueber den Scope kann
+    # der signierende Dienst (cloud-api) es fuer genau den Menschen lesbar
+    # machen, der es bestellt hat. Form wie im Storage: <art>:<id>.
+    grant_scope: Optional[str] = Field(default=None, description="Storage-Scope <art>:<id>, an den das Ergebnis gebunden wird")
+    ttl_hours: Optional[int] = Field(default=None, ge=1, le=8760, description="Ergebnis nach N Stunden im Storage loeschen (Vorgabe: dauerhaft)")
     # OpenAI gpt-image-* quality knob. Default null → server picks "auto"
     # (which itself auto-scales by resolution). Set to "low" / "medium" /
     # "high" if you explicitly want OpenAI's quality tier (high consistently
@@ -188,6 +196,11 @@ _ROUTEN = ("auto", "subscription", "api")
 # zu treffen. Darueber (2K, 4K) bleibt der bezahlte Pfad.
 _ABO_MAX_KANTE = 1536
 _ABO_MAX_PIXEL = 1024 * 1536
+
+
+# Gleiches Muster wie storage/signing.py SCOPE_RE (gelesen 11.10.). Weicht
+# es je ab, weist der Storage weiterhin selbst ab — nur spaeter.
+_SCOPE_RE = re.compile(r"^[a-z][a-z0-9-]{0,40}:[A-Za-z0-9._-]{1,120}$")
 
 
 def _abo_geeignet(request: "ImageGenRequest") -> tuple:
@@ -390,6 +403,8 @@ async def generate_with_openai_image(
     reference_image_urls: Optional[List[str]] = None,
     background: Optional[str] = None,
     private: bool = False,
+    grant_scope: Optional[str] = None,
+    ttl_hours: Optional[int] = None,
 ) -> dict:
     """Generate image via OpenAI Images API (gpt-image-2 / gpt-image-1 / dall-e-3).
 
@@ -619,6 +634,8 @@ async def generate_with_openai_image(
         context="image-generation",
         is_public=not private,
         private=private,
+        grant_scope=grant_scope,
+        ttl_hours=ttl_hours,
         collection_id=collection_id,
         link_id=link_id,
     )
@@ -712,6 +729,8 @@ async def generate_with_higgsfield(
     collection_id: str,
     link_id: Optional[str],
     private: bool = False,
+    grant_scope: Optional[str] = None,
+    ttl_hours: Optional[int] = None,
 ) -> dict:
     """Generate image using Higgsfield API"""
     import httpx
@@ -761,6 +780,8 @@ async def generate_with_higgsfield(
         context="image-generation",
         is_public=not private,
         private=private,
+        grant_scope=grant_scope,
+        ttl_hours=ttl_hours,
         collection_id=collection_id,
         link_id=link_id
     )
@@ -783,6 +804,8 @@ async def generate_with_minimax(
     collection_id: str,
     link_id: Optional[str],
     private: bool = False,
+    grant_scope: Optional[str] = None,
+    ttl_hours: Optional[int] = None,
 ) -> dict:
     """Generate image using MiniMax Image-01 (pay-as-you-go REST API).
 
@@ -847,6 +870,8 @@ async def generate_with_minimax(
         context="image-generation",
         is_public=not private,
         private=private,
+        grant_scope=grant_scope,
+        ttl_hours=ttl_hours,
         collection_id=collection_id,
         link_id=link_id,
     )
@@ -874,6 +899,8 @@ async def generate_with_gemini(
     aspect_ratio: Optional[str] = None,
     image_size: Optional[str] = None,
     private: bool = False,
+    grant_scope: Optional[str] = None,
+    ttl_hours: Optional[int] = None,
 ) -> dict:
     """Generate image using Google Gemini/Imagen API"""
     from google import genai
@@ -976,6 +1003,8 @@ async def generate_with_gemini(
         context="image-generation",
         is_public=not private,
         private=private,
+        grant_scope=grant_scope,
+        ttl_hours=ttl_hours,
         collection_id=collection_id,
         link_id=link_id
     )
@@ -1114,6 +1143,14 @@ async def _generate_image_einmal(
         if route not in _ROUTEN:
             raise HTTPException(status_code=422, detail={"error": "unknown_route", "route": request.route,
                                                          "allowed": list(_ROUTEN)})
+        # Scope VOR der Erzeugung pruefen: der Storage weist einen
+        # ungueltigen Scope erst beim Ablegen ab — dann ist das Bild schon
+        # erzeugt und Kontingent oder Geld verbraucht.
+        grant_scope = (request.grant_scope or "").strip() or None
+        if grant_scope and not _SCOPE_RE.match(grant_scope):
+            raise HTTPException(status_code=422, detail={
+                "error": "invalid_grant_scope", "grant_scope": request.grant_scope,
+                "hint": "Form <art>:<id> — art klein, bis 41 Zeichen; id aus A-Z a-z 0-9 . _ -, bis 120 Zeichen."})
         # Referenzbilder auf dem Abo-Weg (3DNerd/Alex, 11.10.): codex image_gen
         # nimmt angehaengte Bilder als Vorlage an (gemessen, auch mit
         # Merkmalen, die nur im Bild standen). Nur AUSDRUECKLICH ueber
@@ -1134,7 +1171,9 @@ async def _generate_image_einmal(
                 aspect_ratio=request.aspect_ratio or "1:1",
                 collection_id=request.collection_id or "ai-generated-images",
                 link_id=request.link_id,
-                private=bool(request.private)
+                private=bool(request.private),
+                grant_scope=grant_scope,
+                ttl_hours=request.ttl_hours,
             )
 
         elif is_gemini_model(model_name) or actual_model.startswith("gemini") or actual_model.startswith("imagen"):
@@ -1144,6 +1183,8 @@ async def _generate_image_einmal(
                 collection_id=request.collection_id or "ai-generated-images",
                 link_id=request.link_id,
                 private=bool(request.private),
+                grant_scope=grant_scope,
+                ttl_hours=request.ttl_hours,
                 aspect_ratio=request.aspect_ratio,
                 image_size=request.image_size
             )
@@ -1162,6 +1203,8 @@ async def _generate_image_einmal(
                 collection_id=request.collection_id or "ai-generated-images",
                 link_id=request.link_id,
                 private=bool(request.private),
+                grant_scope=grant_scope,
+                ttl_hours=request.ttl_hours,
             )
 
         elif is_codex_image_model(actual_model) or route == "subscription" or abo_auto:
@@ -1176,6 +1219,8 @@ async def _generate_image_einmal(
                     collection_id=request.collection_id or "ai-generated-images",
                     link_id=request.link_id,
                     private=bool(request.private),
+                    grant_scope=grant_scope,
+                    ttl_hours=request.ttl_hours,
                     reference_image_urls=request.reference_image_urls,
                     negative_prompt=request.negative_prompt,
                     aspect_ratio=_ci.seitenverhaeltnis_aus(request.width, request.height, request.aspect_ratio),
@@ -1218,6 +1263,8 @@ async def _generate_image_einmal(
                 collection_id=request.collection_id or "ai-generated-images",
                 link_id=request.link_id,
                 private=bool(request.private),
+                grant_scope=grant_scope,
+                ttl_hours=request.ttl_hours,
                 width=request.width,
                 height=request.height,
                 aspect_ratio=request.aspect_ratio,
@@ -1244,6 +1291,8 @@ async def _generate_image_einmal(
             # Sagt dem Aufrufer, wie das Ergebnis WIRKLICH abgelegt wurde —
             # nicht, was er verlangt hat (true = anonym 403 am Storage).
             "private": bool(request.private),
+            "grant_scope": grant_scope,
+            "ttl_hours": request.ttl_hours,
         }
         if model_requested:
             antwort["model_requested"] = model_requested
