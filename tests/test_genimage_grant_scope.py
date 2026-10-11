@@ -19,14 +19,24 @@ from ai.services import codex_imagegen as c
 
 
 class _Antwort:
+    def __init__(self, gebunden=None):
+        self.gebunden = gebunden
+
     def raise_for_status(self):
         return None
 
     def json(self):
-        return {"id": 7, "object_key": "k", "original_filename": "x.png", "file_url": "u"}
+        return {"id": 7, "object_key": "k", "original_filename": "x.png", "file_url": "u",
+                "grant_scope": self.gebunden}
 
 
-def _client(store):
+_WIE_GESENDET = object()
+
+
+def _client(store, gebunden=_WIE_GESENDET):
+    """Storage-Attrappe. Vorgabe: meldet den gesendeten Scope als gebunden
+    zurueck (storage-api seit 06f8e7f). `gebunden=None` stellt den Fall
+    nach, in dem der Storage speichert, aber nicht bindet."""
     class _C:
         def __init__(self, *a, **k):
             pass
@@ -39,7 +49,7 @@ def _client(store):
 
         async def post(self, url, files=None, data=None, headers=None):
             store["data"] = dict(data)
-            return _Antwort()
+            return _Antwort(data.get("grant_scope") if gebunden is _WIE_GESENDET else gebunden)
     return _C
 
 
@@ -154,3 +164,48 @@ def test_muster_ist_das_des_storage():
     # storage/signing.py SCOPE_RE, gelesen 11.10. (dev @ 90e8be2)
     assert g._SCOPE_RE.pattern == r"^[a-z][a-z0-9-]{0,40}:[A-Za-z0-9._-]{1,120}$"
     assert g._SCOPE_RE.match("cloud-user:17") and g._SCOPE_RE.match("cloud-session:AiApi")
+
+
+# --- Bindung am Ziel pruefen (storage-api 06f8e7f meldet den gebundenen Scope) ---
+# Gegen den echten Fehler gehalten: am 11.10. speicherte der Storage Objekt
+# 130172, band es nicht ("owner mismatch") und antwortete 200. api-ai meldete
+# den Scope trotzdem als gesetzt.
+
+@pytest.mark.parametrize("gebunden", [None, "cloud-user:99"])
+def test_client_scheitert_wenn_der_storage_nicht_oder_anders_bindet(monkeypatch, gebunden):
+    store = {}
+    monkeypatch.setattr(sc.httpx, "AsyncClient", _client(store, gebunden=gebunden))
+    with pytest.raises(sc.GrantNichtGebunden) as e:
+        asyncio.run(sc.save_file_and_record(b"x", "x.png", private=True, grant_scope="cloud-user:17"))
+    assert e.value.object_id == 7 and e.value.verlangt == "cloud-user:17" and e.value.gebunden == gebunden
+
+
+def test_client_gibt_den_gebundenen_scope_zurueck(monkeypatch):
+    monkeypatch.setattr(sc.httpx, "AsyncClient", _client({}))
+    obj = asyncio.run(sc.save_file_and_record(b"x", "x.png", grant_scope="cloud-user:17"))
+    assert obj.grant_scope == "cloud-user:17"
+
+
+def test_ohne_verlangten_scope_wird_nichts_geprueft(monkeypatch):
+    monkeypatch.setattr(sc.httpx, "AsyncClient", _client({}, gebunden=None))
+    assert asyncio.run(sc.save_file_and_record(b"x", "x.png")).id == 7
+
+
+def test_handler_meldet_fehlende_bindung_als_502_und_zahlt_nicht_nach(monkeypatch):
+    """Unter route=auto darf eine fehlende Bindung NICHT in den bezahlten
+    Pfad fallen: das Bild existiert schon, ein zweites kostet Geld und
+    haette denselben Fehler."""
+    aufrufe = _verdrahten(monkeypatch)
+
+    async def abo_ohne_bindung(**kw):
+        aufrufe["abo"].append(kw)
+        raise sc.GrantNichtGebunden(object_id=130172, verlangt=kw["grant_scope"], gebunden=None)
+    monkeypatch.setattr(c, "generate_with_codex_imagegen", abo_ohne_bindung)
+    with pytest.raises(HTTPException) as e:
+        asyncio.run(g._generate_image_einmal(
+            _req(grant_scope="cloud-user:17", confirm_api_billing=True), "x"))
+    assert e.value.status_code == 502
+    assert e.value.detail["error"] == "grant_scope_not_bound"
+    assert e.value.detail["storage_object_id"] == 130172
+    assert e.value.detail["grant_scope_requested"] == "cloud-user:17"
+    assert len(aufrufe["abo"]) == 1 and aufrufe["api"] == []

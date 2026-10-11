@@ -14,7 +14,7 @@ from typing import List, Optional
 import logging
 import re
 
-from ai.clients.storage_client import storage_api_key
+from ai.clients.storage_client import GrantNichtGebunden, storage_api_key
 from ai.provider_config import provider_missing
 
 logger = logging.getLogger(__name__)
@@ -1308,6 +1308,16 @@ async def _generate_image_einmal(
 
     except HTTPException:
         raise
+    except GrantNichtGebunden as e:
+        # Das Bild ist erzeugt und liegt im Storage, aber nicht im verlangten
+        # Scope: fuer den Besteller unlesbar. Kein 200 — der Aufrufer muss es
+        # wissen und bekommt die Objekt-ID, um es zu finden.
+        logger.error("genimage: Scope nicht gebunden: %s", e)
+        raise HTTPException(status_code=502, detail={
+            "error": "grant_scope_not_bound", "storage_object_id": e.object_id,
+            "grant_scope_requested": e.verlangt, "grant_scope_bound": e.gebunden,
+            "hint": "Das Bild wurde gespeichert, der Storage hat es aber nicht an den Scope gebunden. "
+                    "Nicht erneut erzeugen, bevor die Ursache klar ist."})
     except TimeoutError as e:
         logger.error(f"Image generation timeout: {e}")
         raise HTTPException(status_code=504, detail="Image generation timed out")

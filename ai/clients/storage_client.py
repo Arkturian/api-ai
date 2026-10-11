@@ -31,6 +31,19 @@ class StorageObject(BaseModel):
     ai_subtitle: Optional[str] = None
     ai_tags: Optional[list] = None
     ai_safety_rating: Optional[str] = None
+    # Scope, der bei DIESEM Upload wirklich gebunden wurde (storage-api seit
+    # 06f8e7f, 11.10.); None = nicht gebunden. Bei einem spaeteren GET bleibt
+    # das Feld None, es beschreibt nur den Upload-Aufruf selbst.
+    grant_scope: Optional[str] = None
+
+
+class GrantNichtGebunden(Exception):
+    """Der Storage hat das Objekt gespeichert, aber NICHT an den verlangten
+    Scope gebunden. Traegt die Objekt-ID, damit der Aufrufer sie nennen kann."""
+
+    def __init__(self, object_id, verlangt, gebunden):
+        self.object_id, self.verlangt, self.gebunden = object_id, verlangt, gebunden
+        super().__init__(f"storage object {object_id}: grant_scope {verlangt!r} verlangt, {gebunden!r} gebunden")
 
 
 # Storage API Configuration
@@ -172,6 +185,16 @@ async def save_file_and_record(
 
         # Parse response
         result = response.json()
+
+        # Bindung am Ziel pruefen, nicht an der Naht: Der Storage antwortet
+        # auch dann mit 200, wenn er die Bindung nicht angelegt hat. Am 11.10.
+        # meldete /ai/genimage so einen Scope als gesetzt, der nie gebunden
+        # war (Objekt 130172). Seit storage-api 06f8e7f nennt die Antwort den
+        # wirklich gebundenen Scope. Stimmt er nicht, ist das ein Fehler —
+        # das Objekt liegt dann privat und fuer den Besteller unlesbar da.
+        if grant_scope and result.get("grant_scope") != grant_scope:
+            raise GrantNichtGebunden(
+                object_id=result.get("id"), verlangt=grant_scope, gebunden=result.get("grant_scope"))
 
         # Return as StorageObject
         return StorageObject(**result)
