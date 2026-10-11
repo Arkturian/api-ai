@@ -61,6 +61,11 @@ class ImageGenRequest(BaseModel):
     # verlangte Groesse eingepasst; Antwort traegt routed_via, model,
     # model_requested. subscription: Abo erzwingen. api: bezahlt erzwingen.
     route: Optional[str] = Field(default="auto", description="auto | subscription | api")
+    # Vertrauliche Ablage des Ergebnisses (3DNerd, 12.10.): Produktbilder
+    # aus Kunden-Screenshots duerfen nicht anonym abrufbar sein. true ->
+    # Storage legt das Bild mit private_media ab (nur Eigentuemer/Admin),
+    # false/fehlend -> wie bisher oeffentlich.
+    private: Optional[bool] = Field(default=False, description="true = Ergebnis vertraulich ablegen (anonym 403)")
     # OpenAI gpt-image-* quality knob. Default null → server picks "auto"
     # (which itself auto-scales by resolution). Set to "low" / "medium" /
     # "high" if you explicitly want OpenAI's quality tier (high consistently
@@ -384,6 +389,7 @@ async def generate_with_openai_image(
     quality: Optional[str] = None,
     reference_image_urls: Optional[List[str]] = None,
     background: Optional[str] = None,
+    private: bool = False,
 ) -> dict:
     """Generate image via OpenAI Images API (gpt-image-2 / gpt-image-1 / dall-e-3).
 
@@ -611,7 +617,8 @@ async def generate_with_openai_image(
         data=image_bytes,
         original_filename=filename,
         context="image-generation",
-        is_public=True,
+        is_public=not private,
+        private=private,
         collection_id=collection_id,
         link_id=link_id,
     )
@@ -703,7 +710,8 @@ async def generate_with_higgsfield(
     model: str,
     aspect_ratio: str,
     collection_id: str,
-    link_id: Optional[str]
+    link_id: Optional[str],
+    private: bool = False,
 ) -> dict:
     """Generate image using Higgsfield API"""
     import httpx
@@ -751,7 +759,8 @@ async def generate_with_higgsfield(
         data=image_bytes,
         original_filename=filename,
         context="image-generation",
-        is_public=True,
+        is_public=not private,
+        private=private,
         collection_id=collection_id,
         link_id=link_id
     )
@@ -773,6 +782,7 @@ async def generate_with_minimax(
     aspect_ratio: str,
     collection_id: str,
     link_id: Optional[str],
+    private: bool = False,
 ) -> dict:
     """Generate image using MiniMax Image-01 (pay-as-you-go REST API).
 
@@ -835,7 +845,8 @@ async def generate_with_minimax(
         data=image_bytes,
         original_filename=filename,
         context="image-generation",
-        is_public=True,
+        is_public=not private,
+        private=private,
         collection_id=collection_id,
         link_id=link_id,
     )
@@ -861,7 +872,8 @@ async def generate_with_gemini(
     collection_id: str,
     link_id: Optional[str],
     aspect_ratio: Optional[str] = None,
-    image_size: Optional[str] = None
+    image_size: Optional[str] = None,
+    private: bool = False,
 ) -> dict:
     """Generate image using Google Gemini/Imagen API"""
     from google import genai
@@ -962,7 +974,8 @@ async def generate_with_gemini(
         data=image_bytes,
         original_filename=filename,
         context="image-generation",
-        is_public=True,
+        is_public=not private,
+        private=private,
         collection_id=collection_id,
         link_id=link_id
     )
@@ -1116,7 +1129,8 @@ async def _generate_image_einmal(
                 model=actual_model,
                 aspect_ratio=request.aspect_ratio or "1:1",
                 collection_id=request.collection_id or "ai-generated-images",
-                link_id=request.link_id
+                link_id=request.link_id,
+                private=bool(request.private)
             )
 
         elif is_gemini_model(model_name) or actual_model.startswith("gemini") or actual_model.startswith("imagen"):
@@ -1125,6 +1139,7 @@ async def _generate_image_einmal(
                 model=actual_model,
                 collection_id=request.collection_id or "ai-generated-images",
                 link_id=request.link_id,
+                private=bool(request.private),
                 aspect_ratio=request.aspect_ratio,
                 image_size=request.image_size
             )
@@ -1142,6 +1157,7 @@ async def _generate_image_einmal(
                 aspect_ratio=request.aspect_ratio or "1:1",
                 collection_id=request.collection_id or "ai-generated-images",
                 link_id=request.link_id,
+                private=bool(request.private),
             )
 
         elif is_codex_image_model(actual_model) or route == "subscription" or abo_auto:
@@ -1155,6 +1171,7 @@ async def _generate_image_einmal(
                     prompt=request.prompt,
                     collection_id=request.collection_id or "ai-generated-images",
                     link_id=request.link_id,
+                private=bool(request.private),
                     negative_prompt=request.negative_prompt,
                     aspect_ratio=_ci.seitenverhaeltnis_aus(request.width, request.height, request.aspect_ratio),
                     background=request.background,
@@ -1195,6 +1212,7 @@ async def _generate_image_einmal(
                 model=actual_model,
                 collection_id=request.collection_id or "ai-generated-images",
                 link_id=request.link_id,
+                private=bool(request.private),
                 width=request.width,
                 height=request.height,
                 aspect_ratio=request.aspect_ratio,
@@ -1218,6 +1236,9 @@ async def _generate_image_einmal(
             "model": model_name,
             "actual_model": actual_model,
             "routed_via": routed_via,
+            # Sagt dem Aufrufer, wie das Ergebnis WIRKLICH abgelegt wurde —
+            # nicht, was er verlangt hat (true = anonym 403 am Storage).
+            "private": bool(request.private),
         }
         if model_requested:
             antwort["model_requested"] = model_requested

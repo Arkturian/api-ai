@@ -83,6 +83,7 @@ async def save_file_and_record(
     owner_email: Optional[str] = "apopovic.aut@gmail.com",  # Default from legacy
     analyze: bool = False,  # Skip AI analysis for AI-generated content
     skip_ai_safety: bool = True,  # Skip safety check for AI-generated content
+    private: bool = False,  # vertraulich: /storage/media liefert nur an Eigentuemer/Admin (403 sonst)
     reuse_existing: bool = False,  # AI-generated content is always a new work — storage's
     # filename-based reuse (its default!) silently OVERWRITES an earlier object when two
     # generations finish in the same second (timestamp filenames, Issue #512: two parallel
@@ -122,6 +123,13 @@ async def save_file_and_record(
         "skip_ai_safety": str(skip_ai_safety).lower(),
     }
 
+    if private:
+        # Storage-Vertrag (Issue #420): Formularfeld `private` setzt
+        # metadata_json.private_media. Vertraulich heisst immer auch nicht
+        # oeffentlich — ein privates, aber als oeffentlich gelistetes Objekt
+        # waere ein Widerspruch, den der Aufrufer nicht bemerken wuerde.
+        form_data["private"] = "true"
+        form_data["is_public"] = "false"
     if collection_id:
         form_data["collection_id"] = collection_id
     if link_id:
