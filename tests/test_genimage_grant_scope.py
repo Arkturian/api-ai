@@ -50,6 +50,24 @@ def test_client_schickt_scope_und_verfall_als_formularfelder(monkeypatch):
     assert store["data"]["grant_scope"] == "cloud-user:17" and store["data"]["ttl_hours"] == "24"
 
 
+def test_mit_scope_wird_kein_fremder_besitzer_angegeben(monkeypatch):
+    """Am Ziel gemessen (11.10., Objekt 130172): mit owner_email war der
+    Besitzer ein anderer Benutzer als der Schluessel, der Storage uebersprang
+    die Bindung still. Die Suite war dabei gruen."""
+    store = {}
+    monkeypatch.setattr(sc.httpx, "AsyncClient", _client(store))
+    asyncio.run(sc.save_file_and_record(b"x", "x.png", grant_scope="cloud-user:17"))
+    assert store["data"]["grant_scope"] == "cloud-user:17"
+    assert "owner_email" not in store["data"]
+
+
+def test_ohne_scope_bleibt_die_besitzervorgabe(monkeypatch):
+    store = {}
+    monkeypatch.setattr(sc.httpx, "AsyncClient", _client(store))
+    asyncio.run(sc.save_file_and_record(b"x", "x.png"))
+    assert store["data"]["owner_email"] == "apopovic.aut@gmail.com"
+
+
 def test_client_ohne_angabe_schickt_keines_der_felder(monkeypatch):
     store = {}
     monkeypatch.setattr(sc.httpx, "AsyncClient", _client(store))

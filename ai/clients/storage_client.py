@@ -140,7 +140,14 @@ async def save_file_and_record(
         form_data["collection_id"] = collection_id
     if link_id:
         form_data["link_id"] = link_id
-    if owner_email:
+    # Mit grant_scope KEIN fremdes Besitzerkonto angeben. Der Storage bindet
+    # beim Upload nur, wenn der Hochladende selbst Besitzer ist
+    # (_bind_on_upload). Mit der owner_email-Vorgabe gehoerte das Objekt
+    # einem anderen Benutzer als dem Schluessel: die Bindung wurde STILL
+    # uebersprungen ("upload grant skipped ... owner mismatch"), der Upload
+    # meldete trotzdem 200. Gemessen am 11.10. an Objekt 130172; ohne
+    # owner_email entstand die Bindung (130174).
+    if owner_email and not grant_scope:
         form_data["owner_email"] = owner_email
 
     # Detect MIME type from filename extension
