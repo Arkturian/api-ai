@@ -92,6 +92,55 @@ def codex_als_benutzer(cmd, env):
     return ["sudo", "-n", "-u", user, "-H", "env"] + umgebung + [binaer] + list(cmd[1:])
 
 
+def bilder_fuer_codex_benutzer(pfade):
+    """Macht lokale Bilder fuer den Benutzer lesbar, als der codex laeuft.
+
+    Anlass (YouTube-Pipeline, 11.10.): seit codex_als_benutzer (13.09.)
+    laeuft codex auf arkserver als alex, die Bilder lagen aber weiter
+    unter /root/.aiapi-neutral/.vision (/root ist 0700). `-i <pfad>` war
+    fuer codex unlesbar; das Modell antwortete "kein Bild sichtbar", der
+    Dienst meldete trotzdem "attached 1 image(s)". Acht von acht
+    Sichtpruefungen des Piloten waren dadurch blind.
+
+    Ohne CODEX_RUN_AS_USER: unveraendert. Sonst wird jedes lesbare lokale
+    Bild in ein Verzeichnis kopiert, das NUR dem Zielbenutzer gehoert
+    (0700, Dateien 0600) — die Bilder koennen vertraulich sein, ein
+    weltlesbarer Ort kommt nicht in Frage. Rueckgabe: (neue_pfade,
+    aufzuraeumende_kopien). Der Aufrufer loescht die Kopien nach dem Lauf.
+    Schlaegt das Kopieren fehl, wird das laut (RuntimeError) statt still:
+    ein Bild, das codex nicht lesen kann, ist kein angehaengtes Bild.
+    """
+    import pwd
+    import shutil
+    import uuid
+    user = (os.getenv("CODEX_RUN_AS_USER") or "").strip()
+    if not user or not pfade:
+        return list(pfade or []), []
+    try:
+        pw = pwd.getpwnam(user)
+    except KeyError:
+        raise RuntimeError(f"CODEX_RUN_AS_USER={user} existiert nicht")
+    if pw.pw_uid == os.geteuid():
+        return list(pfade), []
+    basis = os.getenv("CODEX_VISION_DIR") or f"/var/lib/api-ai/vision-{user}"
+    os.makedirs(basis, mode=0o700, exist_ok=True)
+    os.chown(basis, pw.pw_uid, pw.pw_gid)
+    os.chmod(basis, 0o700)
+    neu, kopien = [], []
+    for quelle in pfade:
+        q = str(quelle)
+        if q.startswith(("http://", "https://")) or not os.path.isfile(q):
+            neu.append(q)
+            continue
+        ziel = os.path.join(basis, "aiimg_" + uuid.uuid4().hex[:12] + os.path.splitext(q)[1])
+        shutil.copyfile(q, ziel)
+        os.chown(ziel, pw.pw_uid, pw.pw_gid)
+        os.chmod(ziel, 0o600)
+        neu.append(ziel)
+        kopien.append(ziel)
+    return neu, kopien
+
+
 def _run_cli_with_pgid(cmd, env, timeout=300, cwd="/", input=None):
     """Run a CLI subprocess as its own process-group leader.
 
@@ -1377,6 +1426,19 @@ async def _chatgpt_einmal(
         # accuracy). `-i` needs a LOCAL file — storage URLs are localized above;
         # any remaining non-local ref falls back to the prompt-append so nothing
         # is silently dropped.
+        _codex_bildkopien = []
+        if image_paths:
+            try:
+                image_paths, _codex_bildkopien = bilder_fuer_codex_benutzer(image_paths)
+            except Exception:
+                # Vor dem Lauf gescheitert: die heruntergeladenen Bilder
+                # nicht liegen lassen, der finally-Zweig unten laeuft nicht.
+                for _u, _p in _imgs:
+                    try:
+                        os.remove(_p)
+                    except Exception:
+                        pass
+                raise
         if image_paths:
             local_imgs, remote_refs = [], []
             for _p in image_paths:
@@ -1457,7 +1519,7 @@ async def _chatgpt_einmal(
                 result = await asyncio.to_thread(run_codex_cli)
         finally:
             sem.release()
-            for _u, _p in _imgs:
+            for _p in [_p for _u, _p in _imgs] + list(_codex_bildkopien):
                 try:
                     os.remove(_p)
                 except Exception:
