@@ -356,3 +356,19 @@ def test_die_pflicht_ist_noch_aus():
 def test_das_flag_steht_im_anfragemodell():
     assert "brand_open" in rr.RealtimeTokenRequest.model_fields
     assert rr.RealtimeTokenRequest.model_fields["brand_open"].default is False
+
+
+def test_persona_erklaert_die_finder_funktionen_ohne_sie_zu_bedienen():
+    """Stufe 1 aus Post #5634: Merkliste, Meine Auswahl, KI-Outfit,
+    Gruppieren/Sortieren und Produktkarte erklaeren — aber ohne
+    Werkzeugnamen der geplanten Stufe 2 (ein Name ist eine Einladung)
+    und ohne zu behaupten, selbst geklickt zu haben."""
+    text = rr._product_finder_prompt("de")
+    assert "WAS DER FINDER KANN" in text
+    for stichwort in ("Herz", "Lesezeichen", "Ausruestung mit KI zeigen",
+                      "Gruppieren", "Sortieren", "nie vorausgewaehlt"):
+        assert stichwort in text, stichwort
+    assert "Behaupte nie, du haettest selbst etwas angeklickt" in text
+    for name in ("set_grouping", "toggle_favorite", "open_my_selection",
+                 "show_outfit_image"):
+        assert name not in text
