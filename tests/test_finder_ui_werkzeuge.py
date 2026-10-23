@@ -79,3 +79,14 @@ def test_anrede_ist_du_ohne_sie_beispiele(ui):
     for sie in ("Ihnen", "Oeffnen Sie", "Schauen Sie", "meinen Sie",
                 "Ihr Warenkorb"):
         assert sie not in text, sie
+
+
+def test_outfit_bild_ohne_fertig_versprechen_und_jeder_wunsch_neu():
+    """OnealServ-Test 23.10.: „Sobald das Bild fertig ist, sag ich dir
+    Bescheid" — ein Fertig-Signal gibt es nicht. Und ein alter Fehler
+    wurde wiederholt, statt neu auszuloesen."""
+    text = rr._product_finder_prompt("de", ui_tools=True)
+    assert "das Bild erscheint von selbst unten im Finder" in text
+    assert "Wann es fertig ist, erfaehrst du nicht" in text
+    assert "Bei JEDEM Wunsch loest du neu aus" in text
+    assert "Bescheid" not in text
