@@ -228,6 +228,21 @@ class RealtimeTokenRequest(BaseModel):
         default=False,
         description="true: screen_capture + look_at_screen in die Sitzung aufnehmen (Portal).",
     )
+    # Stufe 2 aus Post #5634 (OnealServ, 23.10.2026): vier reine
+    # Oberflaechenwerkzeuge, die der Finder-Browser SELBST ausfuehrt.
+    # Opt-in, weil ein Client ohne Adapter sie sonst an /realtime/tool
+    # weiterreichte — und das Modell danach eine Bedienung versuchte,
+    # die nirgends ankommt.
+    finder_ui_tools: bool = Field(
+        default=False,
+        description=(
+            "Nur fuer 'product-finder'. true: set_grouping, "
+            "toggle_favorite, open_my_selection, show_outfit_image in die "
+            "Sitzung aufnehmen. Client-Werkzeuge: Der Browser fuehrt sie "
+            "aus und schickt function_call_output; /realtime/tool weist "
+            "sie mit 400 client_tool ab."
+        ),
+    )
     persona_variant: Optional[str] = Field(
         default=None,
         description=(
@@ -3712,7 +3727,8 @@ PRODUCT_FINDER_DEFAULT_YEAR = 2027
 
 
 def _product_finder_prompt(language: str = "de",
-                           brand: Optional[str] = None) -> str:
+                           brand: Optional[str] = None,
+                           ui_tools: bool = False) -> str:
     """Persona des sprechenden Produktfinders.
 
     Drei Dinge stehen hier bewusst NICHT drin:
@@ -3733,6 +3749,36 @@ def _product_finder_prompt(language: str = "de",
     # der Katalogeinstieg gerade ausgeschlossen hat.
     marken = brand or ", ".join(_oneal_marken()) or "das Sortiment"
     sprache = _sprachname(language)
+    # Ohne die Oberflaechenwerkzeuge erklaert der Berater nur. Mit ihnen
+    # loest er vier Dinge selbst aus — beschrieben ueber die WIRKUNG,
+    # nicht ueber Werkzeugnamen (die stehen in der Werkzeugliste; ein
+    # Name im Prompt ist eine Einladung).
+    if ui_tools:
+        bedienung = (
+            "Vier Dinge kannst du fuer den Kunden selbst ausloesen: die "
+            "Produkte gruppieren, beim offenen Produkt das Herz setzen "
+            "oder entfernen, 'Meine Auswahl' oeffnen und das KI-Outfit-"
+            "Bild starten. Tu es, wenn er es will — nicht auf Verdacht. "
+            "Was passiert ist, sagst du NUR aus der Antwort: 'gemerkt' "
+            "oder 'wieder entfernt' je nach zurueckgemeldetem Zustand, "
+            "bei Meine Auswahl die gemeldeten Anzahlen. Kommt ein "
+            "Fehler, sag ihn schlicht: kein Produkt offen, die Einteilung "
+            "trennt auf dieser Ebene nichts, keine Trefferliste da, "
+            "weniger als drei Teile, oder ein Bild laeuft schon.\n"
+            "Das KI-Outfit-Bild startest du NUR auf ausdruecklichen "
+            "Wunsch. Es dauert ein bis zwei Minuten: Sag das an und "
+            "rede weiter, warte nicht stumm darauf.\n"
+            "Alles andere — Sortieren, Ansicht umschalten, Groesse "
+            "waehlen, Hintergrund — bedient der Kunde selbst. Dafuer "
+            "sagst du, WO er klickt, und behauptest nie, du haettest es "
+            "getan.\n"
+        )
+    else:
+        bedienung = (
+            "Du sagst, WO er klickt. Behaupte nie, du haettest selbst "
+            "etwas angeklickt, geoeffnet oder gemerkt: Die Oberflaeche "
+            "bedient der Kunde.\n"
+        )
     return (
         "Du bist die Stimme im O'Neal-Produktfinder und beraetst den "
         "Aussendienst beim Kunden.\n\n"
@@ -3740,6 +3786,12 @@ def _product_finder_prompt(language: str = "de",
         "diese Sprache im Finder gewaehlt. Wechselt er im Gespraech in "
         "eine andere, folge ihm — aber beginne nicht von dir aus in "
         "einer anderen.\n\n"
+        # Anrede (OnealServ-Test 23.10.: Sie und du wechselten in einer
+        # Sitzung). Die Beispielsaetze unten stehen ebenfalls in du —
+        # ein einziges Beispiel in Sie reicht, damit das Modell kippt.
+        "ANREDE\nDu duzt den Kunden, durchgehend, vom ersten Satz "
+        "an — so spricht O'Neal mit seinen Kunden. Wechsle nie ins "
+        "Sie. In anderen Sprachen gilt die vertraute Anrede.\n\n"
         f"SORTIMENT: {marken}. Zwei Welten: MOTO und MTB.\n\n"
         "WIE DU ARBEITEST\n"
         "Du uebersetzt gesprochenen Bedarf in Filter und fragst nach dem "
@@ -3755,7 +3807,7 @@ def _product_finder_prompt(language: str = "de",
         "DREI ANTWORTEN, DIE NICHT VERWECHSELT WERDEN DUERFEN\n"
         "- Es gibt Treffer: sag, WIE VIELE DU ZEIGST, und die Spanne. "
         "Die Zahl ist die der gezeigten Stuecke, NICHT die des "
-        "Sortiments. Sag also 'ich zeig Ihnen fuenf', niemals 'wir "
+        "Sortiments. Sag also 'ich zeig dir fuenf', niemals 'wir "
         "haben fuenf' oder 'ich habe fuenf gefunden' — wie viele es "
         "insgesamt gibt, weisst du nicht.\n"
         "- Es gibt nachweislich nichts: 'In L fuehren wir davon nichts. "
@@ -3785,14 +3837,14 @@ def _product_finder_prompt(language: str = "de",
         "und `limit` auf 5.\n"
         "Nenn dabei, WONACH du sortiert hast — aber sag NICHT 'die "
         "besten'. Der Katalog kennt keine Bewertung; neu und teuer ist "
-        "keine Qualitaet. Sag: 'Ich zeig Ihnen die fuenf neuesten, "
+        "keine Qualitaet. Sag: 'Ich zeig dir die fuenf neuesten, "
         "teuerste zuerst.'\n"
         "Was du aussprichst, liest du aus `applied_sort` und "
         "`applied_limit` in den Eckwerten — nie aus dem, was du "
         "angefragt hast. Fehlen die Angaben, sag nichts ueber die "
         "Reihenfolge.\n"
         "Bekommst du so wenige Stuecke, wie du angefragt hast, frag "
-        "NICHT nach der Groesse. Sag 'Schauen Sie sich die fuenf an' "
+        "NICHT nach der Groesse. Sag 'Schau dir die fuenf an' "
         "und lass den Kunden schauen.\n\n"
         "GROESSE\n"
         "Du kannst nach Groesse filtern und die Tabelle des Herstellers "
@@ -3800,7 +3852,7 @@ def _product_finder_prompt(language: str = "de",
         "kannst du NICHT — dazu fehlen die Messwerte im Katalog. Sag das "
         "gerade heraus, weiche nicht aus: 'Groesse kann ich aus "
         "Koerpermassen nicht bestimmen, dazu fehlen mir die Tabellen. "
-        "Ich zeig Ihnen, was der Hersteller angibt.'\n\n"
+        "Ich zeig dir, was der Hersteller angibt.'\n\n"
         "UEBER EIN PRODUKT SPRECHEN\n"
         "Fragt der Kunde nach Material, Ausstattung oder Passform, hol "
         "dir die Auskunft. Ohne Angabe gilt das Produkt, das er offen "
@@ -3808,10 +3860,10 @@ def _product_finder_prompt(language: str = "de",
         "Erfinde nichts dazu und lies nichts vor, was nicht "
         "zurueckkam.\n"
         "Zwei Antworten, die KEINE Stoerung sind:\n"
-        "- nichts geoeffnet: 'Oeffnen Sie eins, dann sag ich Ihnen "
+        "- nichts geoeffnet: 'Oeffne eins, dann sag ich dir "
         "alles dazu.'\n"
         "- die Nummer gibt es nicht: 'So weit reicht die Liste nicht — "
-        "welches meinen Sie?'\n"
+        "welches meinst du?'\n"
         "Beides sind Auskuenfte, keine Fehler. Sag NICHT, der Katalog "
         "antworte nicht — das waere eine falsche Auskunft ueber den "
         "Zustand des Systems.\n\n"
@@ -3846,7 +3898,7 @@ def _product_finder_prompt(language: str = "de",
         "zuerst nach. Zaehl nie aus dem Gedaechtnis auf — was ihr "
         "vorhin besprochen habt, muss nicht drin sein, und er hat "
         "vielleicht seither etwas geaendert.\n"
-        "Ist er leer, sag es einfach: 'Ihr Warenkorb ist noch leer.'\n\n"
+        "Ist er leer, sag es einfach: 'Dein Warenkorb ist noch leer.'\n\n"
         # Stufe 1 aus Post #5634 (Alex, 23.10.2026): Der Berater soll die
         # Bedienung ERKLAEREN koennen. Bedienen kann er sie noch nicht —
         # deshalb steht hier, wo man klickt, und kein Werkzeugname.
@@ -3855,9 +3907,8 @@ def _product_finder_prompt(language: str = "de",
         # anderen Marke; das Jahr ist Sitzungs-Scope und wuerde altern.
         "WAS DER FINDER KANN\n"
         "Das erklaerst du, wenn der Kunde fragt oder wenn es gerade "
-        "passt — nicht ungefragt alles auf einmal. Du sagst, WO er "
-        "klickt. Behaupte nie, du haettest selbst etwas angeklickt, "
-        "geoeffnet oder gemerkt: Die Oberflaeche bedient der Kunde.\n"
+        "passt — nicht ungefragt alles auf einmal. "
+        + bedienung +
         "- Merkliste: Jede Produktkarte hat oben rechts ein Herz. Ein "
         "Klick merkt das Produkt, ein zweiter nimmt es wieder heraus.\n"
         "- Meine Auswahl: Das Lesezeichen oben rechts oeffnet ein "
@@ -3947,6 +3998,74 @@ def _product_finder_brand(roh: Optional[str]) -> Optional[str]:
             },
         )
     return marke
+
+
+FINDER_UI_TOOL_NAMES = {"set_grouping", "toggle_favorite",
+                        "open_my_selection", "show_outfit_image"}
+# Werte laut OnealServ (IACP f18fb1e5) — der Finder prueft sie selbst,
+# hier stehen sie, damit das Modell keine eigene Schreibweise erfindet.
+FINDER_GROUPING_DIMENSIONS = ["product_type", "product_line", "color",
+                              "price", "model_year", "availability", "size"]
+
+
+def _product_finder_ui_tools() -> List[dict]:
+    """Vier Client-Werkzeuge ohne Aussenwirkung (Post #5634, Stufe 2).
+
+    Der Browser fuehrt sie aus, nicht dieser Server: Es gibt nichts
+    serverseitig zu pruefen — keine Produkt-IDs vom Modell, nur Enums
+    oder gar keine Argumente; das fokussierte Produkt kennt der Finder
+    selbst. Der Umweg ueber `/realtime/tool` kostete nur Latenz.
+    """
+    leer = {"type": "object", "properties": {}, "additionalProperties": False}
+    return [
+        {
+            "type": "function",
+            "name": "set_grouping",
+            "description": (
+                "Gruppiert die Produkte der aktuellen Ebene im Finder. "
+                "Liefert {ok, dimension} oder {error: "
+                "dimension_nicht_verfuegbar} — dann trennt diese Einteilung "
+                "auf der Ebene nichts."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {"dimension": {
+                    "type": "string", "enum": list(FINDER_GROUPING_DIMENSIONS)}},
+                "required": ["dimension"],
+                "additionalProperties": False,
+            },
+        },
+        {
+            "type": "function",
+            "name": "toggle_favorite",
+            "description": (
+                "Setzt oder entfernt das Herz am Produkt, das der Kunde "
+                "gerade offen hat. Liefert {favorite: true|false} — den "
+                "NEUEN Zustand — oder {error: kein_produkt_geoeffnet}."
+            ),
+            "parameters": dict(leer),
+        },
+        {
+            "type": "function",
+            "name": "open_my_selection",
+            "description": (
+                "Oeffnet das Seitenfenster 'Meine Auswahl'. Liefert "
+                "{ok, favorites, outfits} mit den Anzahlen."
+            ),
+            "parameters": dict(leer),
+        },
+        {
+            "type": "function",
+            "name": "show_outfit_image",
+            "description": (
+                "Startet das KI-Outfit-Bild aus der aktuellen Trefferliste. "
+                "NUR auf ausdruecklichen Wunsch; dauert 1-2 Minuten. "
+                "Liefert sofort {started: true} oder {error: "
+                "keine_trefferliste|zu_wenige_teile|laeuft_bereits}."
+            ),
+            "parameters": dict(leer),
+        },
+    ]
 
 
 def _product_finder_tools(brand: Optional[str] = None) -> List[dict]:
@@ -4252,8 +4371,12 @@ async def mint_realtime_token(
                     },
                 )
         jahr = request.collection_year or PRODUCT_FINDER_DEFAULT_YEAR
-        instructions = _product_finder_prompt(request.language or "de", marke)
+        instructions = _product_finder_prompt(
+            request.language or "de", marke, ui_tools=request.finder_ui_tools)
         companion_tools_override = _product_finder_tools(marke)
+        if request.finder_ui_tools:
+            companion_tools_override = (list(companion_tools_override)
+                                        + _product_finder_ui_tools())
         # Scope serverseitig ablegen — der Werkzeug-Dispatch bekommt
         # spaeter nur eine Sitzungskennung und die Argumente des
         # Modells. Weder Browser noch Modell duerfen Marke und Jahr
@@ -7107,6 +7230,24 @@ async def realtime_tool_call(
     Federation MCPs being colocated on arkserver / arkturian, and a
     hot httpx client at runtime.
     """
+    # Client-Werkzeuge des Finders (Stufe 2, #5634) fuehrt der Browser
+    # aus. Kommt eins hier an, hat der Adapter es nicht abgefangen — das
+    # soll laut scheitern, nicht als „unknown tool" untergehen.
+    if tool_name in FINDER_UI_TOOL_NAMES:
+        logger.warning("Client-Werkzeug %s an /realtime/tool geschickt", tool_name)
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "client_tool",
+                "tool": tool_name,
+                "hint": (
+                    "Dieses Werkzeug fuehrt der Finder-Browser selbst aus "
+                    "und schickt function_call_output direkt an das "
+                    "Modell. Es gehoert nicht an /realtime/tool."
+                ),
+            },
+        )
+
     # Die beiden Produktwerkzeuge verlangen einen gueltigen Grant. Die
     # uebrigen Lesewerkzeuge NICHT — nicht weil das richtig waere,
     # sondern weil der Wanderlaut-Browser sie heute ohne ruft und eine

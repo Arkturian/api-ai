@@ -164,7 +164,7 @@ def test_persona_sagt_zur_passform_ehrlich_nein():
     text = rr._product_finder_prompt("de")
     assert "Koerpermassen" in text
     assert "kannst du NICHT" in text or "kann ich" in text
-    assert "Ich zeig Ihnen, was der Hersteller angibt" in text
+    assert "Ich zeig dir, was der Hersteller angibt" in text
 
 
 def test_persona_verbietet_erfundene_produktnamen():

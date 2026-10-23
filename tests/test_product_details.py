@@ -201,6 +201,6 @@ def test_dispatch_kennt_das_werkzeug():
 
 def test_persona_nennt_beide_fachzustaende_und_verbietet_die_stoerung():
     t = rr._product_finder_prompt("de", "O'Neal")
-    assert "Oeffnen Sie eins" in t
+    assert "Oeffne eins" in t
     assert "So weit reicht" in t
     assert "Sag NICHT, der Katalog" in t
