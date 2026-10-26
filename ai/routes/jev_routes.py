@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import time
 from typing import Any, Dict, Optional, Union
 
@@ -71,12 +72,21 @@ def _jwt_sub_geprueft(authorization: Optional[str]) -> Optional[str]:
 async def jev_endpoint(req: JevRequest, x_agent_name: Optional[str] = Header(default=None, alias="X-Agent-Name"),
                        authorization: Optional[str] = Header(default=None),
                        max_attempts: int = Query(default=3, ge=1, le=3,
-                                                 description="Versuche bei Upstream-429/529; 1 = keine Wiederholung (kurze Client-Timeouts).")):
+                                                 description="Versuche bei Upstream-429/529; 1 = keine Wiederholung (kurze Client-Timeouts)."),
+                       engine: Optional[str] = Query(default=None, pattern="^(jev|openai)$",
+                                                     description="jev = TypeSafe; openai = derselbe Body ueber die OpenAI Decisions API, Antwort in Jev-Form (A/B, Auftrag Alex 26.10.2026). Ohne Angabe gilt JEV_DEFAULT_ENGINE (Vorgabe jev).")):
     """Typisierte Urteile (noul/choice/score) ueber TypeSafe System One.
     Antwort unveraendert, ergaenzt um cost_usd und latency_ms. X-Agent-Name
     (vom MCP-Gateway aus dem geprueften JWT) dient nur der Zuordnung im
     Nutzungslog, nie als Berechtigung."""
     _pruefen(req)
+    # Ohne Angabe entscheidet der Betreiber je Host: so laesst sich der
+    # Motor fuer ALLE Aufrufer umschalten, ohne MCP-Werkzeug oder Clients
+    # anzufassen — und genauso zurueck.
+    if not isinstance(engine, str) or not engine:
+        engine = (os.getenv("JEV_DEFAULT_ENGINE") or "jev").strip().lower()
+    if engine == "openai":
+        return await _ueber_decisions(req, authorization, x_agent_name, max_attempts)
     body = {"state": req.state, "model": req.model or s.default_model(), "questions": req.questions}
     groesse = len(json.dumps(body, ensure_ascii=False))
     if groesse > _MAX_ZEICHEN:
@@ -128,6 +138,19 @@ async def jev_endpoint(req: JevRequest, x_agent_name: Optional[str] = Header(def
     logger.info("jev ok caller=%s model=%s in=%s out=%s %dms", caller, data.get("model"),
                 usage.get("input_tokens"), usage.get("output_tokens"), latenz)
     return {**data, "cost_usd": kosten, "latency_ms": latenz}
+
+
+async def _ueber_decisions(req: JevRequest, authorization, x_agent_name, max_attempts) -> dict:
+    """Jev-Body -> Decisions -> Jev-Form. Das `model` des Jev-Bodys gilt
+    hier nicht (jev-Versionen gibt es bei OpenAI nicht); gerechnet und
+    gebucht wird im Decisions-Zaehler, nicht in Jevs."""
+    from ai.routes import decisions_routes as d
+    from ai.services import decisions_service as ds
+    body = ds.jev_zu_decisions(req.state, req.questions)
+    roh = await d.ausfuehren(body, d.aufrufer(authorization, x_agent_name),
+                             versuche=max_attempts if isinstance(max_attempts, int) else 3)
+    return {**ds.decisions_zu_jev(roh), "engine": "openai",
+            "cost_usd": roh.get("cost_usd"), "latency_ms": roh.get("latency_ms")}
 
 
 @router.get("/jev/cost-status")

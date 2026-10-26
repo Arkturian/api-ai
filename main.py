@@ -188,7 +188,10 @@ async def _jev_jwt_pflicht(request, call_next):
     auth-api-JWKS gepruefetes Agenten-JWT, sonst 401 VOR Validierung und
     Anbieteraufruf. Das MCP-Gateway reicht das JWT des Aufrufers durch."""
     pfad = request.url.path
-    if (pfad == "/ai/jev" or pfad.startswith("/ai/jev/")) and request.method != "OPTIONS":
+    # /ai/decisions (OpenAI, 26.10.2026) hinter demselben Tor: derselbe
+    # Grund — sonst waere der OpenAI-Schluessel oeffentlich nutzbar.
+    if (pfad in ("/ai/jev", "/ai/decisions") or pfad.startswith(("/ai/jev/", "/ai/decisions/"))) \
+            and request.method != "OPTIONS":
         import asyncio as _asyncio
         from ai.routes import jev_routes as _jev
         sub = await _asyncio.to_thread(_jev._jwt_sub_geprueft, request.headers.get("authorization"))
@@ -292,6 +295,8 @@ app.include_router(image_generation_routes.router, prefix="/ai/scene", tags=["Sc
 app.include_router(narration_routes.router, prefix="/ai", tags=["Narration TTS"])
 from ai.routes import jev_routes  # noqa: E402
 app.include_router(jev_routes.router, prefix="/ai", tags=["Jev (TypeSafe)"])
+from ai.routes import decisions_routes  # noqa: E402
+app.include_router(decisions_routes.router, prefix="/ai", tags=["Decisions (OpenAI)"])
 from ai.routes import audio_mix_routes  # noqa: E402
 app.include_router(audio_mix_routes.router, prefix="/ai", tags=["Audio Mix"])
 app.include_router(music_ai_routes.router, prefix="/ai", tags=["Music AI"])
