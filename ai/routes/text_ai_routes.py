@@ -795,6 +795,34 @@ def _weise_response_format_ab(prompt: "Prompt", endpoint: str) -> None:
     )
 
 
+# ── Kein Claude-Konto frei (Cloud/Alex, 30.10.2026) ────────────────
+# Hinter /ai/claude steht ein Abo-Konto, das Login je Host verteilt. Ist
+# dessen Wochenlimit erreicht oder die Anmeldung widerrufen, ist das kein
+# Fehler des Aufrufs, sondern "kein Konto frei": 503 mit klarer Meldung
+# statt 500 mit Anbietertext. Kein Ausweichen auf ein anderes Modell.
+_CLAUDE_LIMIT = re.compile(r"hit your (weekly|daily|session|usage)? ?limit|usage limit|limit reached|rate_limit_error", re.I)
+_CLAUDE_AUTH = re.compile(r"failed to authenticate|oauth token (revoked|expired|has expired)|please run /login|invalid api key|not logged in", re.I)
+_CLAUDE_RESET = re.compile(r"resets? ([^\n]+?)(?:$|\n)", re.I)
+
+
+def _claude_konto_pruefen(meldung) -> None:
+    text = str(meldung or "")
+    grund = "limit" if _CLAUDE_LIMIT.search(text) else "anmeldung" if _CLAUDE_AUTH.search(text) else None
+    if not grund:
+        return
+    reset = _CLAUDE_RESET.search(text) if grund == "limit" else None
+    raise HTTPException(status_code=503, headers={"Retry-After": "1800"}, detail={
+        "error": "claude_account_unavailable",
+        "grund": grund,
+        "message": ("Kein Claude-Konto frei: Das Wochenlimit des Kontos hinter /ai/claude ist erreicht."
+                    if grund == "limit" else
+                    "Kein Claude-Konto frei: Die Anmeldung hinter /ai/claude ist ungueltig."),
+        "resets": reset.group(1).strip() if reset else None,
+        "fallback": None,
+        "upstream": text[:300],
+    })
+
+
 @router.post("/claude", response_model=AIResponse)
 async def claude_endpoint(
     prompt: Prompt,
@@ -996,6 +1024,7 @@ async def claude_endpoint(
                 if cli_response.get("is_error"):
                     error_msg = cli_response.get("result", "Unknown error")
                     logger.error(f"Claude CLI error (from JSON): {error_msg}")
+                    _claude_konto_pruefen(error_msg)
                     raise HTTPException(status_code=500, detail=f"Claude error: {error_msg}")
 
             except json_module.JSONDecodeError as e:
@@ -1003,6 +1032,7 @@ async def claude_endpoint(
                 if result.returncode != 0:
                     error_msg = result.stderr or raw_output or "Unknown error from claude CLI"
                     logger.error(f"Claude CLI error (non-JSON): {error_msg}")
+                    _claude_konto_pruefen(error_msg)
                     raise HTTPException(status_code=500, detail=f"Claude CLI error: {error_msg}")
 
                 # Otherwise treat as plain text response (unusual but possible)
@@ -1952,11 +1982,55 @@ def _agy_effort_vorgabe(model: str) -> Optional[str]:
     return vorgabe
 
 
+# ── agy-Weiterleitung (30.10.2026) ──────────────────────────────────
+# Seit 30.10. 19:20 lehnt Google Antigravity Aufrufe von arkturian mit
+# "User location is not supported" ab; dasselbe Konto geht auf arkserver.
+# Mit GEMINI_FORWARD_URL reicht ein Host /ai/gemini an einen anderen
+# api-ai weiter. Lokale Bildpfade bleiben lokal (der Ziel-Host sieht die
+# Datei nicht), eine weitergereichte Anfrage wird nie erneut weitergereicht.
+_WEITER_KOPF = "X-Api-Ai-Forwarded"
+
+
+async def _gemini_weiterreichen(prompt, model, request):
+    ziel = (os.getenv("GEMINI_FORWARD_URL") or "").rstrip("/")
+    if not ziel or request is None or request.headers.get(_WEITER_KOPF):
+        return None
+    pfade = list(prompt.image_paths or [])
+    if not isinstance(prompt.prompt, str):
+        pfade += list(prompt.prompt.image_paths or [])
+    if any(not str(p).startswith(("http://", "https://")) for p in pfade):
+        return None
+    import httpx
+    from fastapi.responses import JSONResponse
+    kopf = {_WEITER_KOPF: "1"}
+    for k in ("authorization", "x-agent-name", "x-request-id"):
+        if request.headers.get(k):
+            kopf[k] = request.headers[k]
+    params = dict(request.query_params)
+    if model:
+        params["model"] = model
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(600, connect=10)) as c:
+            r = await c.post(f"{ziel}/ai/gemini", params=params, headers=kopf,
+                             json=prompt.model_dump(exclude_none=True))
+    except Exception as e:
+        logger.warning("gemini-Weiterleitung an %s gescheitert (%s) — lokal", ziel, type(e).__name__)
+        return None
+    try:
+        inhalt = r.json()
+    except ValueError:
+        inhalt = {"detail": r.text[:500]}
+    if isinstance(inhalt, dict):
+        inhalt.setdefault("forwarded_to", ziel)
+    return JSONResponse(inhalt, status_code=r.status_code)
+
+
 @router.post("/gemini", response_model=AIResponse)
 async def gemini_endpoint(
     prompt: Prompt,
     model: Optional[str] = None,
     api_key: str = Depends(get_api_key),
+    request: Request = None,
 ):
     """
     Gemini endpoint — runs the `agy` (Google Antigravity) CLI headless over
@@ -1979,6 +2053,10 @@ async def gemini_endpoint(
     import os
     import json as json_module
     from ..services.gemini_cli_cost_tracker import gemini_cli_cost_tracker
+
+    weiter = await _gemini_weiterreichen(prompt, model, request)
+    if weiter is not None:
+        return weiter
 
     _weise_response_format_ab(prompt, endpoint="gemini")
     model = model or prompt.model
