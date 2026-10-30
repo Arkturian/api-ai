@@ -823,6 +823,26 @@ def _claude_konto_pruefen(meldung) -> None:
     })
 
 
+def _claude_konto_vorab() -> None:
+    """Login schreibt ohne freies Konto {"agentosNoAccount": true, "reason": ...}
+    in die Credentials-Datei (30.10.): dann gar nicht erst die CLI starten."""
+    import json as _j
+    pfad = Path(os.getenv("CLAUDE_CONFIG_DIR") or Path.home() / ".claude") / ".credentials.json"
+    try:
+        d = _j.loads(pfad.read_text())
+    except Exception:
+        return
+    if isinstance(d, dict) and d.get("agentosNoAccount"):
+        raise HTTPException(status_code=503, headers={"Retry-After": "600"}, detail={
+            "error": "claude_account_unavailable",
+            "grund": "kein_konto",
+            "message": "Kein Claude-Konto frei: /ai/claude hat derzeit kein Konto zugeteilt.",
+            "reason": str(d.get("reason") or "")[:300] or None,
+            "resets": None,
+            "fallback": None,
+        })
+
+
 @router.post("/claude", response_model=AIResponse)
 async def claude_endpoint(
     prompt: Prompt,
@@ -842,6 +862,7 @@ async def claude_endpoint(
 
     Note: Claude CLI does NOT support images. For vision tasks, use /ai/gemini/vision instead.
     """
+    _claude_konto_vorab()
     import subprocess
     import asyncio
     import json as json_module

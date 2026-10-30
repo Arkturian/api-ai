@@ -87,3 +87,14 @@ def test_gemini_bleibt_lokal(monkeypatch, kopf, body):
     with pytest.raises(Stop):
         TestClient(main.app).post("/ai/gemini", json=body, headers=kopf)
     assert gesehen == {}
+
+
+def test_kein_konto_zugeteilt_503_ohne_cli(monkeypatch, tmp_path):
+    (tmp_path / ".credentials.json").write_text('{"agentosNoAccount": true, "reason": "kein Profil unter 90 %"}')
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path))
+    def nie(*a, **k):
+        raise AssertionError("CLI darf nicht starten")
+    monkeypatch.setattr(t, "_run_cli_with_pgid", nie)
+    r = TestClient(main.app).post("/ai/claude", json={"prompt": "ok"})
+    assert r.status_code == 503 and r.json()["detail"]["grund"] == "kein_konto"
+    assert r.json()["detail"]["reason"] == "kein Profil unter 90 %"
