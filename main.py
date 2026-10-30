@@ -180,6 +180,45 @@ if not os.getenv(_API_KEY_ENV):
 
 
 @app.middleware("http")
+async def _aufrufer_protokoll(request, call_next):
+    """Wer erzeugt welche Last? (Cloud, 30.10.2026: nach einer Woche sehen,
+    wer /ai/claude & Co. ruft.) Je POST /ai/* eine Zeile JSONL in
+    AUFRUFER_LOG_DIR/<datum>.jsonl: X-Agent-Name, sonst das geprueftes
+    JWT-`sub`, sonst die IP. Nur Etikett, nie Recht; ein Fehler hier
+    darf nie den Aufruf treffen."""
+    import time as _time
+    t0 = _time.monotonic()
+    antwort = await call_next(request)
+    try:
+        pfad = request.url.path
+        if request.method == "POST" and pfad.startswith("/ai/"):
+            import asyncio as _asyncio, json as _json
+            from datetime import datetime as _dt
+            from pathlib import Path as _P
+            k = request.headers
+            caller, quelle = (k.get("x-agent-name") or "").strip()[:64], "header"
+            if not caller and k.get("authorization"):
+                from ai.routes import jev_routes as _jev
+                caller = await _asyncio.to_thread(_jev._jwt_sub_geprueft, k.get("authorization")) or ""
+                quelle = "jwt"
+            if not caller:
+                caller = (k.get("x-real-ip") or (k.get("x-forwarded-for") or "").split(",")[0].strip()
+                          or (request.client.host if request.client else "?"))
+                quelle = "ip"
+            zeile = {"ts": _dt.now().astimezone().isoformat(timespec="seconds"), "pfad": pfad,
+                     "caller": caller, "quelle": quelle, "ua": (k.get("user-agent") or "")[:60],
+                     "weitergereicht": bool(k.get("x-api-ai-forwarded")),
+                     "status": antwort.status_code, "ms": int((_time.monotonic() - t0) * 1000)}
+            d = _P(os.getenv("AUFRUFER_LOG_DIR") or "/var/lib/api-ai/aufrufer")
+            d.mkdir(parents=True, exist_ok=True)
+            with open(d / f"{_dt.now():%Y-%m-%d}.jsonl", "a") as f:
+                f.write(_json.dumps(zeile, ensure_ascii=False) + "\n")
+    except Exception as e:
+        logging.getLogger("api-ai.aufrufer").warning("Aufrufer-Protokoll: %s", type(e).__name__)
+    return antwort
+
+
+@app.middleware("http")
 async def _jev_jwt_pflicht(request, call_next):
     """Sicherheitsbefund Jev, 28.09.2026: /ai/jev war ohne Anmeldung
     oeffentlich nutzbar, weil das Schluesseltor (API_ACCESS_KEY, #1755) auf

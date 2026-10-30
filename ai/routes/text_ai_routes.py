@@ -680,6 +680,10 @@ class Prompt(BaseModel):
     # meldete `model: "codex-default"` zurueck — der Aufrufer hielt eine
     # Auswertung fuer das Ergebnis eines Modells, das nie lief.
     model: Optional[str] = None
+    # Nur /ai/claude: "claude" verlangt Claude selbst. Ist der Betreiber-
+    # Schalter CLAUDE_ROUTE=codex aktiv, kommt dann 503 statt eines Laufs
+    # auf Codex — nichts weicht still aus.
+    require_provider: Optional[str] = None
 
 
 class AIResponse(BaseModel):
@@ -703,6 +707,10 @@ class AIResponse(BaseModel):
     # model_fallback = true, `model` = was wirklich lief.
     model_requested: Optional[str] = None
     model_fallback: bool = False
+    # /ai/claude mit CLAUDE_ROUTE=codex (Alex, 30.10.2026): gesetzt, wenn der
+    # Aufruf serverseitig auf einem anderen Anbieter lief; `model` ist dann
+    # das tatsaechliche Modell, model_requested das angefragte.
+    routed_to: Optional[str] = None
 
     def __init__(self, **data):
         super().__init__(**data)
@@ -823,6 +831,57 @@ def _claude_konto_pruefen(meldung) -> None:
     })
 
 
+# ── /ai/claude ueber Codex (Alex, 30.10.2026) ───────────────────────
+# "Die Dienstlast von api-ai laeuft ueber Codex, die Claude-Konten gehoeren
+# den Agenten." CLAUDE_ROUTE=codex reicht /ai/claude serverseitig an den
+# Codex-Weg weiter, damit kein Aufrufer einzeln umgebaut werden muss. Die
+# Antwort sagt es (routed_to, model, model_requested); wer Claude selbst
+# braucht, schickt require_provider="claude" und bekommt 503.
+_CLAUDE_ZU_CODEX = {"stark": ("opus", "fable"), "leicht": ("haiku",)}
+
+
+def _codex_modell_fuer(claude_modell: Optional[str]) -> Optional[str]:
+    m = (claude_modell or "").lower()
+    if any(k in m for k in _CLAUDE_ZU_CODEX["stark"]):
+        return os.getenv("CLAUDE_ROUTE_MODEL_STARK", "gpt-6.1-sol")
+    if any(k in m for k in _CLAUDE_ZU_CODEX["leicht"]):
+        return os.getenv("CLAUDE_ROUTE_MODEL_LEICHT", "gpt-6-luna")
+    return os.getenv("CLAUDE_ROUTE_MODEL_STANDARD") or None  # None = Codex-Vorgabe
+
+
+def _claude_route_503(grund: str, text: str) -> HTTPException:
+    return HTTPException(status_code=503, detail={
+        "error": "claude_routed_to_codex", "grund": grund, "message": text,
+        "routed_to": "codex", "fallback": None})
+
+
+async def _claude_umleiten(prompt: "Prompt", model: Optional[str]):
+    if (os.getenv("CLAUDE_ROUTE") or "").strip().lower() != "codex":
+        return None
+    if (prompt.require_provider or "").strip().lower() == "claude":
+        raise _claude_route_503("require_provider",
+            "Claude ist fuer api-ai abgeschaltet; die Dienstlast laeuft ueber Codex (Vorgabe Alex, 30.10.). "
+            "Ohne require_provider laeuft der Aufruf auf Codex.")
+    if prompt.response_format is not None:
+        # json_schema gegen Codex noch nicht geprueft: lieber klar ablehnen
+        # als still ohne Schema laufen (Cloud, 30.10.).
+        raise _claude_route_503("response_format",
+            "response_format ist auf /ai/claude ueber Codex noch nicht freigegeben.")
+    if prompt.persona_variant:
+        bundle = await get_persona_bundle("claude", prompt.persona_variant)
+        if bundle.get("allowed_tools"):
+            raise _claude_route_503("persona_mcp",
+                f"persona_variant {prompt.persona_variant!r} bringt MCP-Werkzeuge mit; die gibt es nur auf Claude.")
+    angefragt = model or prompt.model
+    ziel = _codex_modell_fuer(angefragt)
+    neu = prompt.model_copy(update={"model": None, "require_provider": None})
+    out = await chatgpt_endpoint(neu, model=ziel, api_key="placeholder")
+    out.routed_to = "codex"
+    out.model_requested = angefragt or "claude-default"
+    logger.info("claude->codex angefragt=%s ziel=%s lief=%s", angefragt, ziel, out.model)
+    return out
+
+
 def _claude_konto_vorab() -> None:
     """Login schreibt ohne freies Konto {"agentosNoAccount": true, "reason": ...}
     in die Credentials-Datei (30.10.): dann gar nicht erst die CLI starten."""
@@ -862,6 +921,9 @@ async def claude_endpoint(
 
     Note: Claude CLI does NOT support images. For vision tasks, use /ai/gemini/vision instead.
     """
+    umgeleitet = await _claude_umleiten(prompt, model)
+    if umgeleitet is not None:
+        return umgeleitet
     _claude_konto_vorab()
     import subprocess
     import asyncio
