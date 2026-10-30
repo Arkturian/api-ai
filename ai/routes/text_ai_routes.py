@@ -1926,12 +1926,16 @@ def _agy_effort_vorgabe(model: str) -> Optional[str]:
     """
     import json as _json
 
+    from ai.services import cli_katalog as _ck
+
     meta: dict = {}
     try:
+        basis = None
         if _MODELS_JSON_PFAD.exists():
-            daten = _json.loads(_MODELS_JSON_PFAD.read_text())
-            meta = ((daten.get("providers") or {})
-                    .get("gemini") or {}).get("efforts") or {}
+            basis = _json.loads(_MODELS_JSON_PFAD.read_text()).get("providers") or {}
+        # Seit #5740 zuerst die CLI-Erhebung (`agy models`) dieses Knotens.
+        providers, _ = _ck.zusammenfuehren(basis, _ck.lesen(_MODELS_MAX_AGE_S), config=(None, None))
+        meta = (providers.get("gemini") or {}).get("efforts") or {}
     except Exception as exc:
         logger.warning("Effort-Vorgabe: Katalog nicht lesbar (%s)", exc)
 
@@ -2553,10 +2557,12 @@ async def list_text_models(
 ):
     """List available text AI models.
 
-    Live source: ``/var/lib/api-ai/models.json`` produced by the daily
-    ``api-ai-maintenance.timer`` (CLI version + smoke-test driven). When
-    that file is missing or stale we return a conservative hardcoded
-    fallback so existing clients don't break.
+    Quellen (#5740): claude/codex/gemini aus der CLI-Erhebung der
+    cloud-api dieses Knotens (``cli-models.json``, Pfad per
+    ``CLI_MODELS_PATH``); API-Anbieter aus ``ai/data/api_anbieter.json``;
+    grok und alles, was die Erhebung nicht kennt, aus
+    ``/var/lib/api-ai/models.json`` (Push von Automation). Fehlt beides,
+    gilt die feste Rueckfallliste unten.
 
     Query params:
         provider: filter results to a single provider (claude/codex/gemini).
@@ -2570,74 +2576,87 @@ async def list_text_models(
     import time
     from pathlib import Path as _Path
 
+    from ai.services import cli_katalog as _ck
+
     state_path = _MODELS_STATE_PATH or _Path("/var/lib/api-ai/models.json")
+    data: dict = {}
+    basis = None
+    age = None
     if state_path.exists():
         try:
             age = time.time() - state_path.stat().st_mtime
             if age <= _MODELS_MAX_AGE_S:
                 data = _json.loads(state_path.read_text())
-                providers = data.get("providers", {})
-                models = []
-                for prov_name, prov_info in providers.items():
-                    endpoint = {
-                        "claude": "/ai/claude",
-                        "codex":  "/ai/chatgpt",
-                        "gemini": "/ai/gemini",
-                    }.get(prov_name, f"/ai/{prov_name}")
-                    for m in (prov_info.get("available") or []):
-                        models.append({
-                            "id": m,
-                            "provider": prov_name,
-                            "endpoint": endpoint,
-                            "is_default": (m == prov_info.get("default")),
-                            "cli_version": prov_info.get("cli_version"),
-                        })
-                # Apply ?provider= filter (case-insensitive)
-                if provider:
-                    p = provider.lower().strip()
-                    models = [m for m in models if m["provider"] == p]
-                    providers = {k: v for k, v in providers.items() if k == p}
-
-                response = {
-                    # _source is "automation-curated" when Automation's
-                    # orchestrator pushed via POST /internal/notify-cli-update
-                    # with a `models` payload (KI-validated). Otherwise
-                    # "discovery" (local script). Surface that distinction
-                    # so callers can tell which side wrote the data.
-                    "source": data.get("_source", "discovery"),
-                    "updated_at": data.get("updated_at"),
-                    "host": data.get("host"),
-                    "stale_age_seconds": int(age),
-                    "stale": age > _MODELS_STALE_S,
-                    "max_age_seconds": _MODELS_MAX_AGE_S,
-                    "models": models,
-                    "providers_meta": {
-                        name: {
-                            "default": info.get("default"),
-                            "subscription_locked": info.get("subscription_locked", False),
-                            "cli_version": info.get("cli_version"),
-                            "discovery_method": info.get("discovery_method"),
-                            # Reasoning-depth spec — Automation's curated
-                            # block, see /internal/notify-cli-update payload
-                            # schema. Shape: {param_name, available[],
-                            # default, supported_via, note?}. None when the
-                            # current payload doesn't include it.
-                            "efforts": info.get("efforts"),
-                        }
-                        for name, info in providers.items()
-                    },
-                }
-                # Optional grouped view: {provider: [ids]} for clients that
-                # want pre-pivoted dropdowns
-                if group_by == "provider":
-                    grouped: dict[str, list[str]] = {}
-                    for m in models:
-                        grouped.setdefault(m["provider"], []).append(m["id"])
-                    response["by_provider"] = grouped
-                return response
-            logger.warning(f"models.json is {age/3600:.1f}h old (>{_MODELS_MAX_AGE_S//3600}h), using fallback")
+                basis = data.get("providers", {})
+            else:
+                logger.warning(f"models.json is {age/3600:.1f}h old (>{_MODELS_MAX_AGE_S//3600}h)")
         except Exception as e:
-            logger.warning(f"Failed to read models.json: {e} — using fallback")
+            logger.warning(f"Failed to read models.json: {e}")
+    # Seit #5740: die CLI-Erhebung der cloud-api dieses Knotens ersetzt
+    # claude/codex/gemini; models.json bleibt Basis fuer grok und Rueckfall.
+    cli = _ck.lesen(_MODELS_MAX_AGE_S)
+    if basis is not None or cli is not None:
+        try:
+            providers, quellen = _ck.zusammenfuehren(basis, cli)
+            if cli is not None:
+                age = time.time() - cli["erhoben_am"]
+            models = []
+            for prov_name, prov_info in providers.items():
+                endpoint = {
+                    "claude": "/ai/claude",
+                    "codex":  "/ai/chatgpt",
+                    "gemini": "/ai/gemini",
+                }.get(prov_name, f"/ai/{prov_name}")
+                for m in (prov_info.get("available") or []):
+                    models.append({
+                        "id": m,
+                        "provider": prov_name,
+                        "endpoint": endpoint,
+                        "is_default": (m == prov_info.get("default")),
+                        "cli_version": prov_info.get("cli_version"),
+                    })
+            # Apply ?provider= filter (case-insensitive)
+            if provider:
+                p = provider.lower().strip()
+                models = [m for m in models if m["provider"] == p]
+                providers = {k: v for k, v in providers.items() if k == p}
+
+            response = {
+                # "cli" = Erhebung aus den installierten CLIs (cloud-api
+                # cli-models.json); "automation-curated" = nur der Push
+                # von Automation; quellen je Provider in `sources`.
+                "source": "cli" if cli is not None else data.get("_source", "discovery"),
+                "sources": {k: quellen.get(k) for k in providers},
+                "cli_models_path": str(_ck.pfad()) if cli is not None else None,
+                "updated_at": data.get("updated_at"),
+                "host": data.get("host"),
+                "stale_age_seconds": int(age or 0),
+                "stale": (age or 0) > _MODELS_STALE_S,
+                "max_age_seconds": _MODELS_MAX_AGE_S,
+                "models": models,
+                "providers_meta": {
+                    name: {
+                        "default": info.get("default"),
+                        "subscription_locked": info.get("subscription_locked", False),
+                        "cli_version": info.get("cli_version"),
+                        "discovery_method": info.get("discovery_method"),
+                        # Reasoning-depth spec: {param_name, available[],
+                        # default, supported_via, per_model?, required?}.
+                        "efforts": info.get("efforts"),
+                    }
+                    for name, info in providers.items()
+                },
+            }
+            # Optional grouped view: {provider: [ids]} for clients that
+            # want pre-pivoted dropdowns
+            if group_by == "provider":
+                grouped: dict[str, list[str]] = {}
+                for m in models:
+                    grouped.setdefault(m["provider"], []).append(m["id"])
+                response["by_provider"] = grouped
+            return response
+        except Exception as e:
+            logger.warning(f"Modellkatalog nicht baubar: {e} — using fallback")
 
     # Fallback: minimal hardcoded list that's known to work today
     fallback_models = [

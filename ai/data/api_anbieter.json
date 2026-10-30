@@ -1,0 +1,73 @@
+{
+ "_comment": "API-Anbieter ohne CLI (Content #5740). Startstand 30.10.2026 aus Automations curate.py PROVIDERS (c3cb1df). Pflege hier; /ai/models liest diese Datei.",
+ "providers": {
+  "minimax": {
+   "available": [
+    "MiniMax-M3",
+    "MiniMax-M2.7",
+    "MiniMax-M2.7-highspeed",
+    "MiniMax-M2.5",
+    "MiniMax-M2.5-highspeed",
+    "MiniMax-M2.1",
+    "MiniMax-M2.1-highspeed",
+    "MiniMax-M2"
+   ],
+   "default": "MiniMax-M3",
+   "endpoint_url": "https://api.minimax.io/anthropic",
+   "subscription_locked": false,
+   "efforts": {
+    "param_name": "reasoning_effort",
+    "available": [
+     "low",
+     "medium",
+     "high"
+    ],
+    "default": "medium",
+    "supported_via": "top-level reasoning_effort"
+   }
+  },
+  "deepseek": {
+   "available": [
+    "deepseek-v4-pro",
+    "deepseek-v4-flash"
+   ],
+   "default": "deepseek-v4-pro",
+   "endpoint_url": "https://api.deepseek.com/anthropic",
+   "subscription_locked": false,
+   "efforts": {
+    "param_name": "thinking",
+    "available": [
+     "off",
+     "on"
+    ],
+    "default": "on",
+    "supported_via": "thinking block"
+   }
+  },
+  "glm": {
+   "available": [
+    "glm-4.5",
+    "glm-4.5-air",
+    "glm-4.6",
+    "glm-4.7",
+    "glm-5",
+    "glm-5-turbo",
+    "glm-5.1",
+    "glm-5.2"
+   ],
+   "default": "glm-5.2",
+   "endpoint_url": "https://api.z.ai/api/anthropic",
+   "subscription_locked": false,
+   "efforts": {
+    "param_name": "reasoning_effort",
+    "available": [
+     "low",
+     "medium",
+     "high"
+    ],
+    "default": "medium",
+    "supported_via": "top-level reasoning_effort"
+   }
+  }
+ }
+}

@@ -21,6 +21,9 @@ os.environ.setdefault("OPENAI_API_KEY", "x")
 import tempfile as _tempfile
 os.environ.setdefault("ELEVENLABS_COST_TRACKER_DATA_DIR", _tempfile.mkdtemp(prefix="eleven-usage-"))
 os.environ.setdefault("ELEVENLABS_BLOCK_BEYOND_INCLUDED", "false")
+# Die echte CLI-Erhebung der cloud-api (#5740) liegt auf arkserver unter
+# /var/lib/cloud-api; Tests duerfen den Produktionsstand nie mitlesen.
+os.environ.setdefault("CLI_MODELS_PATH", "/nonexistent/cli-models.json")
 
 TEST_MARKEN = ["O'Neal", "ONE Industries", "Kini Red Bull"]
 TEST_KATEGORIEN = ["helmets-mx", "jerseys-offroad", "gloves", "goggles",

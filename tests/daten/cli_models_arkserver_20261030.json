@@ -1,0 +1,237 @@
+{
+ "erhoben_am": 1793370418.3927722,
+ "clis": {
+  "codex": {
+   "binaer": "/home/alex/.local/bin/codex",
+   "fassung": "codex-cli 0.166.0",
+   "modelle": [
+    {
+     "id": "gpt-6.1-sol",
+     "name": "GPT-6.1-Sol",
+     "sichtbar": true,
+     "rang": 1,
+     "aufwand": [
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max",
+      "ultra"
+     ],
+     "aufwand_vorgabe": "low"
+    },
+    {
+     "id": "gpt-6-astra",
+     "name": "GPT-6-Astra",
+     "sichtbar": true,
+     "rang": 2,
+     "aufwand": [
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max",
+      "ultra"
+     ],
+     "aufwand_vorgabe": "medium"
+    },
+    {
+     "id": "gpt-6.1-terra",
+     "name": "GPT-6.1 Terra",
+     "sichtbar": true,
+     "rang": 3,
+     "aufwand": [
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max",
+      "ultra"
+     ],
+     "aufwand_vorgabe": "low"
+    },
+    {
+     "id": "gpt-6-sol",
+     "name": "GPT-6-Sol",
+     "sichtbar": true,
+     "rang": 4,
+     "aufwand": [
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max",
+      "ultra"
+     ],
+     "aufwand_vorgabe": "medium"
+    },
+    {
+     "id": "gpt-reserve",
+     "name": "GPT-Reserve",
+     "sichtbar": false,
+     "rang": 4,
+     "aufwand": [
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max"
+     ],
+     "aufwand_vorgabe": "medium"
+    },
+    {
+     "id": "gpt-6-luna",
+     "name": "GPT-6-Luna",
+     "sichtbar": true,
+     "rang": 5,
+     "aufwand": [
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max"
+     ],
+     "aufwand_vorgabe": "medium"
+    },
+    {
+     "id": "gpt-5.6-sol",
+     "name": "GPT-5.6-Sol",
+     "sichtbar": true,
+     "rang": 6,
+     "aufwand": [
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max",
+      "ultra"
+     ],
+     "aufwand_vorgabe": "low"
+    },
+    {
+     "id": "gpt-5.6-terra",
+     "name": "GPT-5.6-Terra",
+     "sichtbar": true,
+     "rang": 8,
+     "aufwand": [
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max",
+      "ultra"
+     ],
+     "aufwand_vorgabe": "medium"
+    },
+    {
+     "id": "gpt-5.6-luna",
+     "name": "GPT-5.6-Luna",
+     "sichtbar": true,
+     "rang": 9,
+     "aufwand": [
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max"
+     ],
+     "aufwand_vorgabe": "medium"
+    },
+    {
+     "id": "codex-auto-review",
+     "name": "Codex Auto Review",
+     "sichtbar": false,
+     "rang": 43,
+     "aufwand": [
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max"
+     ],
+     "aufwand_vorgabe": "medium"
+    }
+   ]
+  },
+  "agy": {
+   "binaer": "/home/alex/.local/bin/agy",
+   "fassung": "1.4.11",
+   "modelle": [
+    {
+     "id": "gemini-4-argon-medium",
+     "name": "Gemini 4 Argon (Medium)"
+    },
+    {
+     "id": "gemini-4-argon-high",
+     "name": "Gemini 4 Argon (High)"
+    },
+    {
+     "id": "gemini-4-argon-low",
+     "name": "Gemini 4 Argon (Low)"
+    },
+    {
+     "id": "gemini-3.8-flash-high",
+     "name": "Gemini 3.8 Flash (High)"
+    },
+    {
+     "id": "gemini-3.8-flash-medium",
+     "name": "Gemini 3.8 Flash (Medium)"
+    },
+    {
+     "id": "gemini-3.8-flash-low",
+     "name": "Gemini 3.8 Flash (Low)"
+    },
+    {
+     "id": "claude-opus-5-5-low",
+     "name": "Claude Opus 5.5 (Low)"
+    },
+    {
+     "id": "claude-opus-5-5-medium",
+     "name": "Claude Opus 5.5 (Medium)"
+    },
+    {
+     "id": "claude-opus-5-5-high",
+     "name": "Claude Opus 5.5 (High)"
+    },
+    {
+     "id": "claude-sonnet-5-5-low",
+     "name": "Claude Sonnet 5.5 (Low)"
+    },
+    {
+     "id": "claude-sonnet-5-5-medium",
+     "name": "Claude Sonnet 5.5 (Medium)"
+    },
+    {
+     "id": "claude-sonnet-5-5-high",
+     "name": "Claude Sonnet 5.5 (High)"
+    },
+    {
+     "id": "gpt-oss-120b-medium",
+     "name": "GPT-OSS 120B (Medium)"
+    }
+   ]
+  },
+  "claude": {
+   "binaer": "/home/alex/.local/bin/claude",
+   "fassung": "2.1.314 (Claude Code)",
+   "modelle": [
+    {
+     "id": "fable",
+     "name": "fable"
+    },
+    {
+     "id": "opus",
+     "name": "opus"
+    },
+    {
+     "id": "sonnet",
+     "name": "sonnet"
+    },
+    {
+     "id": "haiku",
+     "name": "haiku"
+    }
+   ]
+  }
+ }
+}
