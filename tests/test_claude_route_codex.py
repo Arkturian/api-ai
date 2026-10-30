@@ -31,7 +31,7 @@ def codex(monkeypatch, tmp_path):
 
 @pytest.mark.parametrize("modell,ziel", [
     (None, None), ("sonnet", None), ("opus", "gpt-6.1-sol"), ("claude-fable-5-1", "gpt-6.1-sol"),
-    ("haiku", "gpt-6-luna")])
+    ("haiku", None)])  # None = Codex-Vorgabe gpt-6.1-terra (Alex, 30.10.)
 def test_modellabbildung_und_markierung(codex, modell, ziel):
     body = {"prompt": "ok", "effort": "high"}
     if modell:

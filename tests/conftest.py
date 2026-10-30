@@ -56,3 +56,18 @@ def pytest_configure(config):
         "markers",
         "ohne_kundendaten: prueft den fail-closed-Pfad ohne Marken/Kategorien",
     )
+
+
+@pytest.fixture(autouse=True)
+def _kein_echter_codex_katalog():
+    """Seit 30.10. setzt /ai/chatgpt ohne Modellangabe gpt-6.1-terra ein und
+    prueft dessen Effort gegen den Katalog. Tests sollen dafuer nie die
+    echte `codex debug models` starten: leerer Katalog im Cache (= nicht
+    blocken). Tests, die den Katalog pruefen, setzen den Cache selbst."""
+    import time as _time
+    from ai.routes import text_ai_routes as _t
+    alt = dict(_t._codex_katalog_cache)
+    _t._codex_katalog_cache.update({"at": _time.monotonic(), "katalog": {}})
+    yield
+    _t._codex_katalog_cache.clear()
+    _t._codex_katalog_cache.update(alt)

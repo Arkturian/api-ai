@@ -124,11 +124,20 @@ def test_optin_gilt_auch_fuer_gestrichenes_modell_ohne_katalogtreffer(monkeypatc
     assert len(laeufe) == 2                                # Versuch + Nachsetzen
 
 
-def test_ohne_modell_bleibt_alles_wie_bisher(monkeypatch):
+def test_ohne_modell_terra_mit_low_und_aufgeloestem_namen(monkeypatch):
+    """Vorgabe Alex 30.10.2026: ohne Modellangabe gpt-6.1-terra mit low; in
+    `model` steht das tatsaechliche Modell, nicht "codex-default"."""
     laeufe = _verdrahten(monkeypatch, ablehnen_bei_model=False)
     r = _aufruf(t.Prompt(prompt="hi"), None)
-    assert r.model == "codex-default" and r.model_fallback is False and r.model_requested is None
-    assert len(laeufe) == 1 and "--model" not in laeufe[0]
+    assert r.model == "gpt-6.1-terra" and r.model_fallback is False and r.model_requested is None
+    assert len(laeufe) == 1 and laeufe[0][laeufe[0].index("--model") + 1] == "gpt-6.1-terra"
+    assert "model_reasoning_effort=low" in laeufe[0]
+
+
+def test_ohne_modell_aufwand_des_aufrufers_gilt(monkeypatch):
+    laeufe = _verdrahten(monkeypatch, ablehnen_bei_model=False)
+    _aufruf(t.Prompt(prompt="hi", effort="high"), None)
+    assert "model_reasoning_effort=high" in laeufe[0] and "model_reasoning_effort=low" not in laeufe[0]
 
 
 def test_servervorgabe_fuer_bilder_darf_zurueckfallen_und_sagt_es(monkeypatch, tmp_path):

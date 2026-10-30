@@ -837,16 +837,15 @@ def _claude_konto_pruefen(meldung) -> None:
 # Codex-Weg weiter, damit kein Aufrufer einzeln umgebaut werden muss. Die
 # Antwort sagt es (routed_to, model, model_requested); wer Claude selbst
 # braucht, schickt require_provider="claude" und bekommt 503.
-_CLAUDE_ZU_CODEX = {"stark": ("opus", "fable"), "leicht": ("haiku",)}
+_CLAUDE_ZU_CODEX = {"stark": ("opus", "fable")}
 
 
 def _codex_modell_fuer(claude_modell: Optional[str]) -> Optional[str]:
     m = (claude_modell or "").lower()
     if any(k in m for k in _CLAUDE_ZU_CODEX["stark"]):
         return os.getenv("CLAUDE_ROUTE_MODEL_STARK", "gpt-6.1-sol")
-    if any(k in m for k in _CLAUDE_ZU_CODEX["leicht"]):
-        return os.getenv("CLAUDE_ROUTE_MODEL_LEICHT", "gpt-6-luna")
-    return os.getenv("CLAUDE_ROUTE_MODEL_STANDARD") or None  # None = Codex-Vorgabe
+    # haiku, sonnet und ohne Angabe: Codex-Vorgabe (gpt-6.1-terra, low).
+    return None
 
 
 def _claude_route_503(grund: str, text: str) -> HTTPException:
@@ -1258,6 +1257,15 @@ def _codex_katalog() -> Optional[dict]:
     return katalog
 
 
+def _codex_vorgabe_modell() -> str:
+    """Modell fuer Aufrufe ohne Modellangabe. Vorgabe Alex (30.10.2026):
+    "Einfache Dinge laufen ueber gpt-6.1-terra" (Vorgabeaufwand low, auf
+    arkserver und arkturian in `codex debug models` sichtbar). Vorher
+    entschied die config.toml (gpt-5.6-sol, effort high) und die Antwort
+    meldete nur "codex-default"."""
+    return (os.getenv("CODEX_DEFAULT_MODEL") or "gpt-6.1-terra").strip()
+
+
 def _codex_modell_pruefen(katalog: Optional[dict], model: Optional[str]) -> tuple:
     """-> (ok, available). Fail-closed gegen STILLE Degradation, dieselbe
     Quelle wie die Effort-Pruefung: ein angefordertes Modell, das
@@ -1503,6 +1511,11 @@ async def _chatgpt_einmal(
         # CODEX_VISION_MODEL=codex-default wirklich "kein --model" heisst.
         if image_paths and not selected_model:
             selected_model = _codex_vision_model()
+        if not selected_model:
+            selected_model = _codex_vorgabe_modell()
+            if not prompt.effort:
+                # Ohne Angabe: low (Alex, 30.10.), nicht die config.toml (high).
+                prompt = prompt.model_copy(update={"effort": os.getenv("CODEX_DEFAULT_EFFORT", "low")})
         if selected_model:
             cmd.extend(["--model", selected_model])
 

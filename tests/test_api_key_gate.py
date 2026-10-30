@@ -147,6 +147,11 @@ def test_cli_pfad_bleibt_auch_scharf_ohne_schluessel_offen(monkeypatch):
     gesetztem Schluessel muss /ai/chatgpt ohne Kopf weiter durchkommen.
     Nicht-401 heisst hier nicht 'erfolgreich' — der Endpunkt darf danach
     an der Kostenbremse oder am CLI scheitern."""
+    from ai.routes import text_ai_routes as _t
+
+    class _R:  # nie die echte codex-CLI starten (kostet Kontingent, bis 300 s)
+        returncode, stdout, stderr = 1, "", "test"
+    monkeypatch.setattr(_t, "_run_cli_with_pgid", lambda *a, **k: _R())
     c = _client(monkeypatch, "geheim-test")
     r = c.post("/ai/chatgpt", json={"prompt": "x"})
     if r.status_code == 401:
