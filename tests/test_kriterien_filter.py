@@ -18,7 +18,8 @@ from ai.routes import realtime_routes as rr  # noqa: E402
 def test_die_liste_kommt_aus_dem_schema():
     """Keine zweite, handgepflegte Aufzaehlung — die driftet."""
     schema = rr._product_finder_tools(None)[0]["parameters"]
-    aus_schema = set(schema["properties"]) - rr.PRODUCT_SERVER_CONTROLLED
+    aus_schema = (set(schema["properties"]) - rr.PRODUCT_SERVER_CONTROLLED
+                  - rr.PRODUCT_DISPLAY_ONLY)
     assert rr._product_finder_kriterien_felder() == aus_schema
 
 

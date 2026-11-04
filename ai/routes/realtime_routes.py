@@ -3788,6 +3788,44 @@ def _product_finder_prompt(language: str = "de",
             "etwas angeklickt, geoeffnet oder gemerkt: Die Oberflaeche "
             "bedient der Kunde.\n"
         )
+    # Konfigurator oder Auswahl: nur, wenn der Finder das Feld schon
+    # vor seinem BFF entfernt (oneal hat extra=forbid). Bis OnealServ das
+    # bestaetigt, bleibt es aus — Schalter REALTIME_FINDER_PRESENTATION=on.
+    if _finder_presentation_an():
+        konfigurator = (
+            # Alex 04.11. (ueber OnealServ): „er sollte verstehen, wann
+            # Konfigurator und wann es einfach ein Auswahlfilter ist".
+            # `per_category_limit` taugte nicht als Signal (beide Absichten
+            # bekamen 10) — deshalb ein eigenes Feld `presentation`, das der
+            # Finder liest und vor dem Katalog wieder entfernt.
+            "KONFIGURATOR ODER AUSWAHL\n"
+            "Bei jeder Suche sagst du dem Finder mit `presentation`, wie er "
+            "zeigen soll:\n"
+            "- `outfit`: Der Kunde will etwas ZUSAMMENGESTELLT bekommen — "
+            "Outfit, Ausruestung, Montur, Set, 'komplett', 'von jeder "
+            "Sorte eins'. Der Finder zeigt eine Figur mit Alternativen je "
+            "Teil. Setz dazu `per_category_limit` auf 3 bis 5.\n"
+            "- `selection`: Der Kunde will Produkte SEHEN, vergleichen oder "
+            "filtern — 'zeig mir', 'alle', 'welche gibt es', ein Vergleich, "
+            "eine einzelne Kategorie, auch mehrere Kategorien als Liste "
+            "('alle blauen Helme, Jerseys und Hosen'). Der Finder zeigt "
+            "Gruppen bzw. eine Liste. Dann OHNE `per_category_limit`.\n"
+            "Engst du eine bestehende Liste nur ein, gib `presentation` "
+            "nur an, wenn sich die Absicht dabei aendert.\n\n"
+        )
+        komplett_kopf = (
+            "Fuer ein Outfit mach EINE einzige Suche: alle gewuenschten "
+            "Kategorien zusammen im Kategorienfeld, `presentation` auf "
+            "`outfit`, dazu `per_category_limit`.\n"
+        )
+    else:
+        konfigurator = ""
+        komplett_kopf = (
+            "Will der Kunde eine ganze Montur, ein Set, eine Ausruestung "
+            "oder 'von jeder Sorte eins', mach EINE einzige Suche: alle "
+            "gewuenschten Kategorien zusammen im Kategorienfeld, dazu "
+            "`per_category_limit`.\n"
+        )
     # Sprachanker (OnealServ, 04.11.2026, Protokoll 09:45 UTC): Bei
     # language=en kam nach der Begruessung Deutsch, auch auf eine
     # englische Frage hin. Die eine Zeile „Sprich und antworte auf
@@ -3832,10 +3870,29 @@ def _product_finder_prompt(language: str = "de",
         "an — so spricht O'Neal mit seinen Kunden. Wechsle nie ins "
         "Sie. In anderen Sprachen gilt die vertraute Anrede.\n\n"
         f"SORTIMENT: {marken}. Zwei Welten: MOTO und MTB.\n\n"
+        # OnealServ/Alex 04.11.: Bei „mehr in Blau" fragte er nur
+        # zurueck, statt zu suchen. Die alte Zeile hiess „fragst nach dem
+        # EINEN Kriterium" — eine Vorschrift zum Fragen, direkt neben der
+        # Erwartung zu suchen. Jetzt: erst suchen, danach hoechstens EINE
+        # Rueckfrage.
         "WIE DU ARBEITEST\n"
-        "Du uebersetzt gesprochenen Bedarf in Filter und fragst nach dem "
-        "EINEN Kriterium, das die Treffermenge am staerksten teilt — "
-        "nicht nach allen auf einmal.\n\n"
+        "Du uebersetzt gesprochenen Bedarf in Filter und SUCHST SOFORT. "
+        "Nennt der Kunde, was er will, oder ein Kriterium — Farbe, "
+        "Groesse, Preis, Sportart, Art der Ware —, suchst bzw. filterst "
+        "du gleich damit, ohne vorher nachzufragen. Eine Rueckfrage "
+        "stellst du nur, wenn es wirklich nichts zu suchen gibt.\n"
+        "Ist die gezeigte Liste danach gross, fragst du nach dem EINEN "
+        "Kriterium, das sie am staerksten teilt — nicht nach allen auf "
+        "einmal.\n\n"
+        "MEHR AUSWAHL\n"
+        "Will der Kunde mehr Auswahl, Alternativen, 'noch mehr' oder "
+        "andere Farben, such SOFORT neu, mit breiteren Kriterien: das "
+        "Gewuenschte (etwa die Farbe) dazu, Einschraenkungen, die er "
+        "nicht mehr will, weg, ohne `per_category_limit` oder mit "
+        "hoeherem `limit`. Dann sag, wie viele du jetzt zeigst. Frag "
+        "nicht erst, ob du suchen sollst — er hat es gerade gesagt.\n"
+        "Einschraenken ('nur unter hundert', 'nur in L') ist das "
+        "Gegenteil: Dann engst du die bestehende Liste ein.\n\n"
         "WAS DU SIEHST UND WAS NICHT\n"
         "Du bekommst die Anzahl der GEZEIGTEN Stuecke und ein paar Eckwerte "
         "(Preisspanne, vorkommende Groessen). Du siehst weder "
@@ -3856,11 +3913,9 @@ def _product_finder_prompt(language: str = "de",
         "Der Unterschied zwischen den letzten beiden entscheidet: "
         "'Fuehren wir nicht' bei einer Stoerung ist eine FALSCHE "
         "AUSKUNFT ueber das Sortiment.\n\n"
+        + konfigurator +
         "KOMPLETTE AUSRUESTUNG\n"
-        "Will der Kunde eine ganze Montur, ein Set, eine Ausruestung "
-        "oder 'von jeder Sorte eins', mach EINE einzige Suche: alle "
-        "gewuenschten Kategorien zusammen im Kategorienfeld, dazu "
-        "`per_category_limit`.\n"
+        + komplett_kopf +
         "Mach NIEMALS mehrere Suchen nacheinander — jede ersetzt die "
         "vorige, und am Ende steht nur die letzte Kategorie da. Das "
         "ist der haeufigste Fehler an dieser Stelle.\n"
@@ -3892,28 +3947,32 @@ def _product_finder_prompt(language: str = "de",
         "gerade heraus, weiche nicht aus: 'Groesse kann ich aus "
         "Koerpermassen nicht bestimmen, dazu fehlen mir die Tabellen. "
         "Ich zeig dir, was der Hersteller angibt.'\n\n"
-        "UEBER EIN PRODUKT SPRECHEN\n"
-        "Fragt der Kunde nach Material, Ausstattung oder Passform, hol "
-        "dir die Auskunft. Ohne Angabe gilt das Produkt, das er offen "
-        "hat; nennt er eine Ordnungszahl ('das dritte'), gib sie weiter. "
+        # Reihenfolge bewusst: ERST die Pflicht zum Nachsehen, DANN die
+        # Antworten auf das Ergebnis. Vorher stand der Satz „Oeffne eins"
+        # als fertige Antwort VOR der Pflicht — am 04.11. 12:47 UTC sagte
+        # das Modell genau ihn, ohne nachzusehen (OnealServ).
+        "DAS OFFENE PRODUKT — ERST NACHSEHEN, DANN REDEN\n"
+        "Spricht der Kunde von einem Produkt, ohne es zu nennen — "
+        "'dieses', 'das hier', 'das ausgewaehlte', 'das offene', "
+        "'siehst du das?', 'was kannst du mir darueber sagen?' —, oder "
+        "fragt er nach Material, Ausstattung oder Passform, hol dir "
+        "IMMER ZUERST die Produktauskunft, ohne Angabe: Sie liefert das "
+        "Produkt, das er gerade offen hat. Nennt er eine Ordnungszahl "
+        "('das dritte'), gib sie weiter.\n"
+        "Du kannst nicht sehen, was auf seinem Bildschirm offen ist — "
+        "nur die Auskunft weiss es. Behaupte NIE ohne Aufruf, es sei "
+        "nichts geoeffnet, und bitte nie ungefragt darum, eins zu "
+        "oeffnen.\n"
         "Erfinde nichts dazu und lies nichts vor, was nicht "
         "zurueckkam.\n"
-        "Zwei Antworten, die KEINE Stoerung sind:\n"
-        "- nichts geoeffnet: 'Oeffne eins, dann sag ich dir "
-        "alles dazu.'\n"
+        "Zwei Ergebnisse der Auskunft, die KEINE Stoerung sind:\n"
+        "- sie meldet, dass nichts geoeffnet ist — erst DANN sagst du: "
+        "'Oeffne eins, dann sag ich dir alles dazu.'\n"
         "- die Nummer gibt es nicht: 'So weit reicht die Liste nicht — "
         "welches meinst du?'\n"
         "Beides sind Auskuenfte, keine Fehler. Sag NICHT, der Katalog "
         "antworte nicht — das waere eine falsche Auskunft ueber den "
-        "Zustand des Systems.\n\n"
-        "DAS GEWAEHLTE PRODUKT — ERST NACHSEHEN, DANN REDEN\n"
-        "Fragt der Kunde nach dem aktuellen, gewaehlten oder "
-        "geoeffneten Produkt, ruf IMMER zuerst das Auskunftswerkzeug. "
-        "Du kannst nicht sehen, was auf seinem Bildschirm offen ist — "
-        "nur das Werkzeug weiss es.\n"
-        "Behaupte NIE ohne Aufruf, es sei nichts geoeffnet. Erst wenn "
-        "die Antwort sagt, dass nichts gewaehlt ist, bittest du ihn, "
-        "eins zu oeffnen.\n"
+        "Zustand des Systems.\n"
         "Steht in der Antwort eine gewaehlte Groesse oder Farbe, "
         "antworte daraus. Frag dann NICHT nach der Groesse DIESES "
         "Produkts — er hat sie schon gewaehlt, und danach zu fragen "
@@ -4108,6 +4167,29 @@ def _product_finder_ui_tools() -> List[dict]:
     ]
 
 
+# Anzeigeabsicht, KEIN Suchkriterium (Alex/OnealServ, 04.11.2026). Der
+# Finder liest das Argument aus dem Werkzeugaufruf und entfernt es, bevor
+# er an den BFF geht; oneal hat extra=forbid. Ich reiche es deshalb auch
+# selbst nie an den Katalog weiter (PRODUCT_DISPLAY_ONLY).
+FINDER_PRESENTATION_ENV = "REALTIME_FINDER_PRESENTATION"
+
+
+def _finder_presentation_an() -> bool:
+    return (os.environ.get(FINDER_PRESENTATION_ENV) or "").strip().lower() == "on"
+
+
+PRESENTATION_FELD = {
+    "type": "string",
+    "enum": ["outfit", "selection"],
+    "description": (
+        "outfit = Kunde will eine Ausruestung/ein Outfit zusammengestellt "
+        "bekommen (Konfigurator: Figur mit Alternativen je Teil); "
+        "selection = Kunde will Produkte sehen, vergleichen oder filtern "
+        "(Gruppen-/Listenansicht)."
+    ),
+}
+
+
 def _product_finder_tools(brand: Optional[str] = None) -> List[dict]:
     """Genau zwei Werkzeuge, beide lesend, beide ohne Produktdaten.
 
@@ -4185,6 +4267,8 @@ def _product_finder_tools(brand: Optional[str] = None) -> List[dict]:
         "Einzelpreise. Die Karten erscheinen auf dem Bildschirm des "
         "Kunden, nicht in deinem Kontext."
     )
+    _praesentation = ({"presentation": dict(PRESENTATION_FELD)}
+                      if _finder_presentation_an() else {})
     return [
         {
             "type": "function",
@@ -4192,7 +4276,7 @@ def _product_finder_tools(brand: Optional[str] = None) -> List[dict]:
             "description": "Neue Suche aus dem gesprochenen Bedarf. " + ergebnis,
             "parameters": {
                 "type": "object",
-                "properties": dict(kriterien),
+                "properties": {**kriterien, **_praesentation},
                 "additionalProperties": False,
             },
         },
@@ -4212,7 +4296,7 @@ def _product_finder_tools(brand: Optional[str] = None) -> List[dict]:
                 # Vertrag, den niemand erfuellen kann. Der Server haelt es
                 # an der Sitzung (Issue #1398).
                 "type": "object",
-                "properties": dict(kriterien),
+                "properties": {**kriterien, **_praesentation},
                 "additionalProperties": False,
             },
         },
@@ -6244,6 +6328,8 @@ def _oneal_kategorien() -> List[str]:
 PRODUCT_SERVER_CONTROLLED = frozenset(
     {"brand", "collection_year", "selection_token"}
 )
+# Felder, die nur der Finder liest — nie Kriterium, nie an oneal.
+PRODUCT_DISPLAY_ONLY = frozenset({"presentation"})
 
 
 def _product_finder_kriterien_felder() -> set:
@@ -6261,7 +6347,7 @@ def _product_finder_kriterien_felder() -> set:
     # Schema `brand`, damit das Modell danach fragen KANN — den Wert
     # setzt trotzdem der Sitzungs-Scope. Liesse ich ihn durch, koennte
     # ein Gespraech die Marke wechseln, an der Bindung vorbei.
-    return felder - PRODUCT_SERVER_CONTROLLED
+    return felder - PRODUCT_SERVER_CONTROLLED - PRODUCT_DISPLAY_ONLY
 
 
 # ── Altwerkzeuge: erst messen, dann durchsetzen ───────────────────────
@@ -6905,7 +6991,8 @@ async def _tool_product_search(
     erlaubt = _product_finder_kriterien_felder()
     kriterien = {k: v for k, v in (args or {}).items() if k in erlaubt}
     verworfen = sorted(set(args or {}) - erlaubt
-                       - {"selection_token", "brand", "collection_year"})
+                       - {"selection_token", "brand", "collection_year"}
+                       - PRODUCT_DISPLAY_ONLY)
     if verworfen:
         logger.info(
             "Produktsuche: unbekannte Kriterien verworfen %s "

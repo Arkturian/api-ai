@@ -372,3 +372,25 @@ def test_persona_erklaert_die_finder_funktionen_ohne_sie_zu_bedienen():
     for name in ("set_grouping", "toggle_favorite", "open_my_selection",
                  "show_outfit_image"):
         assert name not in text
+
+
+# ───── 04.11.2026, OnealServ: geraten statt nachgesehen, gefragt statt gesucht
+
+def test_nachsehen_steht_vor_der_fertigen_antwort():
+    """12:47 UTC: offenes Produkt, kein Aufruf, „Oeffne am besten eins".
+    Der Satz stand als fertige Antwort VOR der Pflicht zum Nachsehen."""
+    t = rr._product_finder_prompt("de", "O'Neal", ui_tools=True)
+    assert t.index("ERST NACHSEHEN") < t.index("Oeffne eins")
+    assert t.count("Oeffne eins") == 1
+    for wort in ("'dieses'", "'das hier'", "'das ausgewaehlte'", "'siehst du das?'"):
+        assert wort in t
+
+
+def test_kein_fragen_vor_dem_suchen():
+    """„Mehr in Blau" → nur Rueckfrage. Die alte Zeile schrieb das Fragen vor."""
+    t = rr._product_finder_prompt("de", "O'Neal", ui_tools=True)
+    i = t.index("WIE DU ARBEITEST")
+    abschnitt = t[i:t.index("WAS DU SIEHST")]
+    assert "SUCHST SOFORT" in abschnitt
+    assert abschnitt.index("SUCHST SOFORT") < abschnitt.index("EINEN")
+    assert "MEHR AUSWAHL" in t and "such SOFORT neu" in t
