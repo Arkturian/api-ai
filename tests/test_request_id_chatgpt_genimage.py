@@ -169,3 +169,61 @@ def test_genimage_models_bleibt_erreichbar():
     with pytest.raises(HTTPException) as e:
         asyncio.run(g.genimage_status("models"))
     assert e.value.status_code == 404
+
+
+# ------------------------------- signierte Referenzen (Content #5764, 04.11.)
+
+_S = "https://api-storage.arkturian.com/storage/media/"
+
+
+def _refs(sig=None, ids=(128981, 128982)):
+    q = f"?exp={sig}&kid=k1&sig=abc{sig}" if sig else ""
+    return [f"{_S}{i}{q}" for i in ids]
+
+
+@pytest.mark.asyncio
+async def test_genimage_signierte_referenzen_gleiche_kennung_darf_neu(monkeypatch):
+    """Echter Ablauf vom 04.11.: erster Lauf mit unsignierten Links ->
+    422 vor dem Anbieter; Neuanlauf derselben request_id mit frisch
+    signierten Links muss laufen (nicht request_id_payload_mismatch), und
+    beim Anbieter kommen die SIGNIERTEN Links an, nicht die gekuerzten."""
+    monkeypatch.delenv("STORAGE_API_URL", raising=False)
+    gesehen = []
+    async def lauf(r):
+        gesehen.append(list(r.reference_image_urls))
+        if len(gesehen) == 1:
+            raise HTTPException(status_code=422, detail={"error": "reference_image_fetch_failed"})
+        return {"id": 9, "image_url": "u", "file_url": "u"}
+    _bild_stub(monkeypatch, lauf)
+    rid = "arkturian-daily-test-bild"
+    mk = lambda refs: g.ImageGenRequest(prompt="x", model="gpt-image-2", confirm_api_billing=True,
+                                        request_id=rid, reference_image_urls=refs)
+    with pytest.raises(HTTPException):
+        await g.generate_image_endpoint(mk(_refs()), "x")
+    out = await g.generate_image_endpoint(mk(_refs(1000)), "x")
+    assert out["id"] == 9 and gesehen[1] == _refs(1000)
+    # spaeterer Lauf mit neuer Signatur: Replay, kein zweites Bild
+    again = await g.generate_image_endpoint(mk(_refs(2000)), "x")
+    assert again["replayed"] is True and len(gesehen) == 2
+
+
+@pytest.mark.asyncio
+async def test_genimage_andere_referenz_bleibt_mismatch(monkeypatch):
+    monkeypatch.delenv("STORAGE_API_URL", raising=False)
+    async def ok(r):
+        return {"id": 1, "image_url": "u", "file_url": "u"}
+    _bild_stub(monkeypatch, ok)
+    rid = "arkturian-daily-test2-bild"
+    await g.generate_image_endpoint(g.ImageGenRequest(prompt="x", request_id=rid, reference_image_urls=_refs(1)), "x")
+    for refs in (_refs(1, ids=(128981, 128999)),                       # anderes Objekt
+                 [_S + "128981?v=neu&exp=1&kid=k1&sig=a", _S + "128982?exp=1&kid=k1&sig=a"],  # anderer Inhalt
+                 ["https://fremd.example/storage/media/128981", _S + "128982"]):            # fremder Host
+        with pytest.raises(HTTPException) as e:
+            await g.generate_image_endpoint(g.ImageGenRequest(prompt="x", request_id=rid, reference_image_urls=refs), "x")
+        assert e.value.detail["error"] == "request_id_payload_mismatch"
+
+
+def test_ohne_signatur_nur_storage_und_nur_die_drei():
+    assert g._ohne_signatur(_S + "1?v=c&exp=9&kid=k&sig=s") == _S + "1?v=c"
+    fremd = "https://fremd.example/x?exp=9&sig=s"
+    assert g._ohne_signatur(fremd) == fremd

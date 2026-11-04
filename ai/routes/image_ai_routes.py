@@ -343,6 +343,39 @@ async def _hole_referenz(client, url: str, storage_key: str, max_spruenge: int =
     )
 
 
+_SIGNATUR_PARAMS = frozenset({"exp", "kid", "sig"})
+
+
+def _ohne_signatur(url: str) -> str:
+    """Storage-Link ohne die Signatur aus `POST /storage/sign`
+    (`exp`, `kid`, `sig`). Nur fuer Storage-Urspruenge; alle anderen
+    Query-Teile (etwa `v=<checksum>`, `variant`) bleiben, denn sie
+    bestimmen, welches Bild kommt."""
+    from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
+    if not isinstance(url, str) or _ursprung(url) not in _storage_urspruenge():
+        return url
+    p = urlparse(url)
+    paare = parse_qsl(p.query, keep_blank_values=True)
+    if not any(k in _SIGNATUR_PARAMS for k, _ in paare):
+        return url  # unveraendert: alte Eintraege behalten ihren Hash byte-genau
+    rest = [(k, v) for k, v in paare if k not in _SIGNATUR_PARAMS]
+    return urlunparse(p._replace(query=urlencode(rest)))
+
+
+def _nutzlast_fuer_hash(d: dict) -> dict:
+    """Signierte Referenzen gelten hoechstens 900 s und muessen je Lauf neu
+    geholt werden (Content #5764, 04.11.). Ohne diese Normalisierung waere
+    jeder Neuanlauf derselben request_id ein `request_id_payload_mismatch`,
+    und ein fertiges Bild liesse sich nicht mehr abholen. Gehasht wird das
+    Objekt, nicht seine Eintrittskarte; ein unsignierter Link hasht gleich."""
+    refs = d.get("reference_image_urls")
+    if not refs:
+        return d
+    d = dict(d)
+    d["reference_image_urls"] = [_ohne_signatur(u) for u in refs]
+    return d
+
+
 async def _download_reference_images(urls: List[str]) -> List[tuple]:
     """Fetch reference image bytes for OpenAI /v1/images/edits multipart upload.
 
@@ -1065,7 +1098,7 @@ async def generate_image_endpoint(
     rid = request.request_id
     if not rid:
         return await _generate_image_einmal(request, api_key)
-    replay = nj.vorab(rid, "image", request.model_dump())
+    replay = nj.vorab(rid, "image", _nutzlast_fuer_hash(request.model_dump()))
     if replay:
         return replay
     try:
