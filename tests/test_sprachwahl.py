@@ -42,7 +42,7 @@ def test_die_sprache_steht_ganz_vorn():
     """Weit hinten in einer langen Anweisung wird sie überlesen — vom
     Modell wie vom Menschen."""
     t = rr._product_finder_prompt("es", "O'Neal")
-    assert t.index("SPRACHE") < 200
+    assert t.index("LANGUAGE: Spanish") < 200
 
 
 def test_unbekannte_sprache_faellt_auf_deutsch():
@@ -86,3 +86,37 @@ def test_parameter_wird_wirklich_benutzt():
     a = rr._product_finder_prompt("de", "O'Neal")
     b = rr._product_finder_prompt("es", "O'Neal")
     assert a != b
+
+
+# ---- Sprachanker (OnealServ 04.11.2026, Protokoll 09:45 UTC) ----------
+# language=en im Mint, Begruessung englisch (vom Client erzwungen), danach
+# Deutsch, auch auf „Show me all the blue kits you have". Die eine Zeile
+# Sprachregel stand in ~9 000 Zeichen deutscher Anweisung.
+
+@pytest.mark.parametrize("ui", [False, True])
+def test_englisch_ist_vorn_und_hinten_verankert(ui):
+    t = rr._product_finder_prompt("en", "O'Neal", ui_tools=ui)
+    assert t.index("LANGUAGE: English, for the whole session") < 200
+    assert t.rstrip().endswith("answer only in English, also when the tool data is German.")
+
+
+def test_anker_deckt_beispielsaetze_und_werkzeugdaten():
+    t = rr._product_finder_prompt("en", "O'Neal")
+    vorn = t.split("SPRACHE")[0]
+    assert "example sentences are German" in vorn
+    assert "Tool results" in vorn and "in German" in vorn
+    assert "names stay as they are" in vorn
+
+
+def test_deutsch_bleibt_unveraendert_ohne_anker():
+    """Fuer de aendert sich nichts: kein englischer Satz in der Persona."""
+    for ui in (False, True):
+        t = rr._product_finder_prompt("de", "O'Neal", ui_tools=ui)
+        assert "LANGUAGE" not in t
+        assert t.startswith("Du bist die Stimme im O'Neal-Produktfinder")
+
+
+@pytest.mark.parametrize("code,name", [("sl", "Slovenian"), ("it", "Italian"), ("es", "Spanish")])
+def test_anker_fuer_jede_andere_sprache(code, name):
+    t = rr._product_finder_prompt(code, "O'Neal")
+    assert f"LANGUAGE: {name}" in t and t.rstrip().endswith(f"answer only in {name}, also when the tool data is German.")

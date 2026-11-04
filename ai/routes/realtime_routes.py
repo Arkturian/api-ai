@@ -3788,9 +3788,39 @@ def _product_finder_prompt(language: str = "de",
             "etwas angeklickt, geoeffnet oder gemerkt: Die Oberflaeche "
             "bedient der Kunde.\n"
         )
+    # Sprachanker (OnealServ, 04.11.2026, Protokoll 09:45 UTC): Bei
+    # language=en kam nach der Begruessung Deutsch, auch auf eine
+    # englische Frage hin. Die eine Zeile „Sprich und antworte auf
+    # English" stand in rund 9 000 Zeichen deutscher Anweisung mit
+    # deutschen Beispielsaetzen, dazu kommen deutsche Werkzeugdaten
+    # (Kategorien, Produkttexte). Das Modell folgt der Sprache, die es
+    # am meisten liest. Deshalb fuer jede andere Sprache als Deutsch:
+    # die Regel auf Englisch (das Modell liest es sicher), ganz
+    # vorn und noch einmal ganz hinten, und ausdruecklich fuer
+    # Beispielsaetze und Werkzeugdaten.
+    if sprache == "German":
+        sprachanker_vorn, sprachanker_hinten = "", ""
+    else:
+        sprachanker_vorn = (
+            f"LANGUAGE: {sprache}, for the whole session. Every sentence "
+            f"you say is in {sprache}: the greeting, every answer, every "
+            "follow-up question, every error message. These instructions "
+            "are written in German and their example sentences are "
+            "German. They tell you WHAT to say, not which language: say "
+            f"them in {sprache}. Tool results (categories, product lines, "
+            "colours, materials, product descriptions) can come back in "
+            f"German. Say them in {sprache} as well; brand, product line "
+            "and model names stay as they are. Switch language only if "
+            "the customer himself keeps speaking another language.\n\n"
+        )
+        sprachanker_hinten = (
+            f"\n\nLANGUAGE, once more: answer only in {sprache}, also "
+            "when the tool data is German."
+        )
     return (
         "Du bist die Stimme im O'Neal-Produktfinder und beraetst den "
         "Aussendienst beim Kunden.\n\n"
+        + sprachanker_vorn +
         f"SPRACHE\nSprich und antworte auf {sprache}. Der Kunde hat "
         "diese Sprache im Finder gewaehlt. Wechselt er im Gespraech in "
         "eine andere, folge ihm — aber beginne nicht von dir aus in "
@@ -3956,6 +3986,7 @@ def _product_finder_prompt(language: str = "de",
         "Kurze Saetze. Der Kunde steht daneben und schaut auf den "
         "Bildschirm; du bist der Kollege, der die Zahlen kennt — nicht "
         "der Katalog, der sich selbst vorliest."
+        + sprachanker_hinten
     )
 
 
