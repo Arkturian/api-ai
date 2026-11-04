@@ -2,7 +2,7 @@
 
 set -euo pipefail
 
-REPO_ROOT="/Volumes/DatenAP/Code/api-ai"
+REPO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 SCRIPTS_DIR="$REPO_ROOT/.devops/scripts"
 
 usage() {
@@ -13,7 +13,8 @@ Commands:
   checkout <branch>     Checkout via .devops/scripts/checkout-branch.sh
   push "message"        Run push-dev.sh with the given commit message
   build [--clean]       Run build-local.sh
-  release [options]     Run release.sh
+  release [--dry-run]   Gates + fast-forward origin/main to dev (deploys all hosts)
+  deploy <host>         Redeploy released main to one host: arkturian | aiserver | arkserver
   update [options]      Sync DevOps templates (update-devops.sh)
   rollback              Launch rollback.sh (interactive)
 
@@ -46,8 +47,14 @@ case "$cmd" in
   release)
     "$SCRIPTS_DIR/release.sh" "$@"
     ;;
-  syncdev)
-    "$SCRIPTS_DIR/sync-dev.sh" "$@"
+  deploy)
+    case "${1:-}" in
+      arkturian) gh workflow run deploy.yml --ref main -f deploy_arkturian=true -f deploy_aiserver=false ;;
+      aiserver)  gh workflow run deploy.yml --ref main -f deploy_arkturian=false -f deploy_aiserver=true ;;
+      arkserver) gh workflow run deploy-arkserver.yml --ref main ;;
+      *) echo "Usage: ./devops deploy <arkturian|aiserver|arkserver>" >&2; exit 1 ;;
+    esac
+    echo "Triggered. Follow with: gh run list -L 3"
     ;;
 
   update)

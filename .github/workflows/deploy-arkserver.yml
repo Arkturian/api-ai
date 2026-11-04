@@ -8,18 +8,9 @@ on:
 
 jobs:
   validate-syntax:
-    runs-on: ${{ vars.RUNNER_LABEL || 'ubuntu-latest' }}
+    runs-on: [self-hosted, Linux, arkserver]
     steps:
       - uses: actions/checkout@v4
-      # Self-hosted Runner (arkserver, Debian 12, Alex 04.09.): setup-python
-      # kennt Debian nicht ("version '3.11' ... not found for Debian 12") und
-      # blockierte JEDEN Deploy. Dort ist python3 = 3.11.2 = Produktion;
-      # setup-python nur noch auf GitHub-gehosteten Runnern.
-      - name: Setup Python (nur GitHub-hosted)
-        if: ${{ !vars.RUNNER_LABEL }}
-        uses: actions/setup-python@v4
-        with:
-          python-version: '3.11'
       - name: Recursive compileall (fail on SyntaxError)
         run: |
           # Gate the deploy on Python compilability. PR #56 (U+201E
@@ -29,7 +20,7 @@ jobs:
           python3 -m compileall -q -q .
 
   build-archive:
-    runs-on: ${{ vars.RUNNER_LABEL || 'ubuntu-latest' }}
+    runs-on: [self-hosted, Linux, arkserver]
     needs: validate-syntax
     outputs:
       artifact-name: deploy-archive-arkserver
@@ -70,7 +61,7 @@ jobs:
     if: |
       vars.ENABLE_ARKSERVER_DEPLOY == 'true' &&
       github.ref == 'refs/heads/main'
-    runs-on: ${{ vars.RUNNER_LABEL || 'ubuntu-latest' }}
+    runs-on: [self-hosted, Linux, arkserver]
     environment:
       name: arkserver
       url: https://api-ai.arkserver.arkturian.com
@@ -87,8 +78,8 @@ jobs:
           # Self-hosted Runner LAEUFT auf arkserver: die oeffentliche IP ist
           # von innen nicht erreichbar (Router ohne Hairpin, i/o timeout
           # 04.09.), die LAN-Adresse schon — auch aus dem Docker-Container
-          # der scp/ssh-Action (gemessen). GitHub-hosted nimmt das Secret.
-          host: ${{ vars.RUNNER_LABEL && '10.192.26.50' || secrets.DEPLOY_HOST_ARKSERVER }}
+          # der scp/ssh-Action (gemessen). Es gibt nur diesen Runner (#2642).
+          host: 10.192.26.50
           username: ${{ secrets.DEPLOY_USER_ARKSERVER }}
           key: ${{ secrets.DEPLOY_SSH_KEY_ARKSERVER }}
           port: ${{ secrets.DEPLOY_PORT_ARKSERVER || 22 }}
@@ -96,15 +87,6 @@ jobs:
           target: "/tmp/"
           timeout: 120s
 
-      - name: Guard - private DEPLOY_HOST braucht self-hosted Runner
-        run: |
-          case "${{ secrets.DEPLOY_HOST }}" in
-            10.*|192.168.*|172.1[6-9].*|172.2[0-9].*|172.3[01].*)
-              if [ -z "${{ vars.RUNNER_LABEL }}" ]; then
-                echo "::error::DEPLOY_HOST ist privat (${{ secrets.DEPLOY_HOST }}), RUNNER_LABEL aber leer - SSH wuerde in einen NAT-Timeout laufen."
-                exit 1
-              fi ;;
-          esac
 
       - name: Deploy to arkserver
         uses: appleboy/ssh-action@v1.0.3
@@ -112,8 +94,8 @@ jobs:
           # Self-hosted Runner LAEUFT auf arkserver: die oeffentliche IP ist
           # von innen nicht erreichbar (Router ohne Hairpin, i/o timeout
           # 04.09.), die LAN-Adresse schon — auch aus dem Docker-Container
-          # der scp/ssh-Action (gemessen). GitHub-hosted nimmt das Secret.
-          host: ${{ vars.RUNNER_LABEL && '10.192.26.50' || secrets.DEPLOY_HOST_ARKSERVER }}
+          # der scp/ssh-Action (gemessen). Es gibt nur diesen Runner (#2642).
+          host: 10.192.26.50
           username: ${{ secrets.DEPLOY_USER_ARKSERVER }}
           key: ${{ secrets.DEPLOY_SSH_KEY_ARKSERVER }}
           port: ${{ secrets.DEPLOY_PORT_ARKSERVER || 22 }}

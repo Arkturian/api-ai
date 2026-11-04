@@ -10,20 +10,11 @@ on:
 
 jobs:
   test:
-    runs-on: ${{ vars.RUNNER_LABEL || 'ubuntu-latest' }}
+    runs-on: [self-hosted, Linux, arkserver]
 
     steps:
       - uses: actions/checkout@v4
 
-      # Self-hosted Runner (arkserver, Debian 12, Alex 04.09.): setup-python
-      # kennt Debian nicht; dort System-Python 3.11.2 + eigenes venv, damit
-      # nichts in die Benutzerumgebung des Runners installiert wird.
-      - name: Setup Python (nur GitHub-hosted)
-        if: ${{ !vars.RUNNER_LABEL }}
-        uses: actions/setup-python@v4
-        with:
-          python-version: '3.11'
-          cache: 'pip'
 
       - name: Install dependencies
         run: |

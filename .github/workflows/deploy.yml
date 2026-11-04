@@ -22,18 +22,9 @@ jobs:
   # quotes) slipped past CI because the old check used `|| echo`.
   # ============================================================================
   validate-syntax:
-    runs-on: ${{ vars.RUNNER_LABEL || 'ubuntu-latest' }}
+    runs-on: [self-hosted, Linux, arkserver]
     steps:
       - uses: actions/checkout@v4
-      # Self-hosted Runner (arkserver, Debian 12, Alex 04.09.): setup-python
-      # kennt Debian nicht ("version '3.11' ... not found for Debian 12") und
-      # blockierte JEDEN Deploy. Dort ist python3 = 3.11.2 = Produktion;
-      # setup-python nur noch auf GitHub-gehosteten Runnern.
-      - name: Setup Python (nur GitHub-hosted)
-        if: ${{ !vars.RUNNER_LABEL }}
-        uses: actions/setup-python@v4
-        with:
-          python-version: '3.11'
       - name: Recursive compileall (fail on SyntaxError)
         run: python3 -m compileall -q -q .
 
@@ -41,7 +32,7 @@ jobs:
   # Build archive (shared by all deployments)
   # ============================================================================
   build-archive:
-    runs-on: ${{ vars.RUNNER_LABEL || 'ubuntu-latest' }}
+    runs-on: [self-hosted, Linux, arkserver]
     needs: validate-syntax
     outputs:
       artifact-name: deploy-archive
@@ -87,7 +78,7 @@ jobs:
       github.ref == 'refs/heads/main' &&
       (github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
       (github.event_name != 'workflow_dispatch' || inputs.deploy_arkturian)
-    runs-on: ${{ vars.RUNNER_LABEL || 'ubuntu-latest' }}
+    runs-on: [self-hosted, Linux, arkserver]
     environment:
       name: production
       url: https://api-ai.arkturian.com
@@ -108,15 +99,6 @@ jobs:
           source: "deploy.tar.gz"
           target: "/tmp/"
 
-      - name: Guard - private DEPLOY_HOST braucht self-hosted Runner
-        run: |
-          case "${{ secrets.DEPLOY_HOST }}" in
-            10.*|192.168.*|172.1[6-9].*|172.2[0-9].*|172.3[01].*)
-              if [ -z "${{ vars.RUNNER_LABEL }}" ]; then
-                echo "::error::DEPLOY_HOST ist privat (${{ secrets.DEPLOY_HOST }}), RUNNER_LABEL aber leer - SSH wuerde in einen NAT-Timeout laufen."
-                exit 1
-              fi ;;
-          esac
 
       - name: Deploy to arkturian.com
         uses: appleboy/ssh-action@v1.0.3
@@ -224,7 +206,7 @@ jobs:
       github.ref == 'refs/heads/main' &&
       (github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
       (github.event_name != 'workflow_dispatch' || inputs.deploy_aiserver)
-    runs-on: ${{ vars.RUNNER_LABEL || 'ubuntu-latest' }}
+    runs-on: [self-hosted, Linux, arkserver]
     environment:
       name: oneal
       url: https://gsgbot.arkturian.com
@@ -310,7 +292,7 @@ jobs:
       always() &&
       github.ref == 'refs/heads/main' &&
       (needs.deploy-arkturian.result == 'success' || needs.deploy-aiserver.result == 'success')
-    runs-on: ${{ vars.RUNNER_LABEL || 'ubuntu-latest' }}
+    runs-on: [self-hosted, Linux, arkserver]
 
     steps:
       - name: Trigger TypeScript SDK regeneration
