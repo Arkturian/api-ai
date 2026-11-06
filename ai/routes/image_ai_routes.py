@@ -86,7 +86,8 @@ class ImageGenRequest(BaseModel):
     # Reference images for style-transfer / image-to-image. Currently only
     # supported by the OpenAI gpt-image-* family (routed via /v1/images/edits
     # multipart). HTTP(S) URLs allowed; storage-api URLs are fetched with
-    # X-API-KEY so private/quarantined assets work too. Max 16 references
+    # X-API-KEY so quarantined assets work. Private assets need a signed
+    # URL (the key does not read them, Post 5782). Max 16 references
     # (OpenAI hard limit). dall-e-3 does NOT support edits — rejected at
     # dispatch. Non-OpenAI models reject too with a 400 pointing at gpt-image-2.
     reference_image_urls: Optional[List[str]] = Field(
@@ -233,85 +234,13 @@ def prompt_mit_negativ(prompt: str, negative_prompt: Optional[str]) -> str:
     return f"{prompt.rstrip()}\n\nDo not include: {neg}."
 
 
-def _ursprung(url: str):
-    """(Host, effektiver Port) einer https-Adresse — oder None.
-
-    Der Port gehoert zum Ursprung. `api-storage.arkturian.com:8443` ist
-    ein anderer Dienst als `api-storage.arkturian.com`, auch wenn der
-    Hostname gleich lautet (Story-Codex, #1794 Restfall: die erste
-    Fassung verglich nur den Hostnamen und gab dem fremden Port den
-    Schluessel).
-    """
-    from urllib.parse import urlparse
-
-    p = urlparse(url or "")
-    host = (p.hostname or "").lower()
-    if not host:
-        return None
-    # http nur auf der Schleife: dort verlaesst der Schluessel den Rechner
-    # nicht, das Leitungs-Argument greift nicht. oneal spricht seinen
-    # eigenen Storage als http://127.0.0.1:8001 an — mit reiner
-    # https-Pflicht haette die Instanz ihre eigenen privaten Referenzen
-    # anonym geholt und waere daran gescheitert (gelesen am 12.09.).
-    schleife = host in ("127.0.0.1", "localhost", "::1")
-    if p.scheme == "https":
-        vorgabe = 443
-    elif p.scheme == "http" and schleife:
-        vorgabe = 80
-    else:
-        return None
-    try:
-        port = p.port or vorgabe
-    except ValueError:
-        return None
-    return (host, port)
-
-
-def _storage_urspruenge() -> set:
-    """Urspruenge (Host, Port), die den Storage-Schluessel sehen duerfen.
-
-    Quelle ist die konfigurierte Storage-Adresse; weitere nur
-    ausdruecklich ueber STORAGE_EXTRA_HOSTS (Komma-Liste, mit oder ohne
-    Schema/Port). Eine Instanz mit eigenem Storage (oneal) traegt ihren
-    dort ein.
-    """
-    import os
-
-    roh = [os.getenv("STORAGE_API_URL", "https://api-storage.arkturian.com")]
-    roh += [t for t in (os.getenv("STORAGE_EXTRA_HOSTS", "") or "").split(",") if t.strip()]
-    urspruenge = set()
-    for eintrag in roh:
-        eintrag = eintrag.strip()
-        if not eintrag:
-            continue
-        if "//" not in eintrag:
-            eintrag = "https://" + eintrag
-        u = _ursprung(eintrag)
-        if u:
-            urspruenge.add(u)
-    return urspruenge
-
-
-def _darf_schluessel_sehen(url: str) -> bool:
-    """Darf DIESE Adresse den Storage-Schluessel bekommen?
-
-    Geprueft wird der URSPRUNG (https, Host, effektiver Port), nicht ein
-    Teilstueck des Pfades. Der fruehere Test ``"/storage/media/" in url``
-    traf jede fremde Adresse, die diesen Pfad nur nachbaut —
-    `https://fremder-host/storage/media/1` bekam den Schluessel (Issue
-    #1794, beim Story-Abnahme-Review isoliert nachgestellt).
-
-    https ist Pflicht — ausser auf der Schleife (127.0.0.1, localhost,
-    ::1), wo nichts auf die Leitung geht. Ueber http nach draussen waere
-    der Schluessel lesbar, und ein erzwungener Rueckfall auf http ist der
-    billigste Weg, ihn abzugreifen.
-    """
-    from urllib.parse import urlparse
-
-    u = _ursprung(url)
-    if u is None or u not in _storage_urspruenge():
-        return False
-    return "/storage/" in (urlparse(url).path or "")
+from ai.clients.storage_abruf import (  # noqa: E402
+    _storage_urspruenge,
+    _ursprung,
+    darf_schluessel_sehen as _darf_schluessel_sehen,
+    ist_private_antwort,
+    private_media_detail,
+)
 
 
 async def _hole_referenz(client, url: str, storage_key: str, max_spruenge: int = 3):
@@ -380,8 +309,9 @@ async def _download_reference_images(urls: List[str]) -> List[tuple]:
     """Fetch reference image bytes for OpenAI /v1/images/edits multipart upload.
 
     Returns [(filename, bytes, mime_type), ...] suitable for httpx files-param.
-    Storage-api URLs are fetched with X-API-KEY so quarantined/private assets
-    work; other URLs are fetched anonymously. Fail fast — if any URL 404s we
+    Storage-api URLs are fetched with X-API-KEY so quarantined assets work;
+    private assets need a signed URL (the key does not read them). Other
+    URLs are fetched anonymously. Fail fast — if any URL 404s we
     raise 422 with the bad URL, so the caller sees which reference was wrong
     instead of getting a confidently wrong generated image.
     """
@@ -398,6 +328,19 @@ async def _download_reference_images(urls: List[str]) -> List[tuple]:
         for i, url in enumerate(urls):
             try:
                 r = await _hole_referenz(client, url, storage_key)
+                if ist_private_antwort(r):
+                    # Status und error bleiben: narrate_jobs und Aufrufer
+                    # verzweigen darauf. code/hint nennen den richtigen Weg.
+                    d = private_media_detail(url)
+                    raise HTTPException(
+                        status_code=422,
+                        detail={
+                            "error": "reference_image_fetch_failed",
+                            "code": d["error"],
+                            "url": d["url"],
+                            "hint": d["hint"],
+                        },
+                    )
                 r.raise_for_status()
             except httpx.HTTPError as e:
                 raise HTTPException(

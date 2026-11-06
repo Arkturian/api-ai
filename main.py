@@ -35,6 +35,8 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+from ai.clients.storage_abruf import AnfrageAusProtokoll  # noqa: E402
+logging.getLogger("httpx").addFilter(AnfrageAusProtokoll())
 
 # Create FastAPI app
 app = FastAPI(

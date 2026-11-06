@@ -379,23 +379,23 @@ async def _fetch_audio_from_url(url: str) -> UploadFile:
     Issue #314: URL-based callers (frontend proxies passing storage media
     URLs) previously had to download + re-upload as multipart. Streams with
     a size cap (same defense as the vision image path — a mislabeled huge
-    ref must not balloon RSS), sends X-API-KEY for storage-media URLs
-    (quarantine bypass), and derives a filename from the URL path so the
+    ref must not balloon RSS) and derives a filename from the URL path so the
     downstream ffprobe/extension logic keeps working.
+
+    Der Storage-Schluessel geht nur an den eigenen Ursprung (quarantine
+    bypass, #1794/#2654). Private Dateien liest er nicht: Der Aufrufer muss
+    eine signierte Adresse uebergeben, sonst 403 ``private_media``.
     """
     import httpx
     from urllib.parse import urlparse, parse_qs
+    from ai.clients.storage_abruf import PrivateDatei, oeffne, ohne_anfrage, private_media_detail
 
     max_bytes = int(os.getenv("TRANSCRIBE_URL_MAX_MB", "100")) * 1024 * 1024
-    headers = {}
-    if "/storage/media/" in url:
-        headers["X-API-KEY"] = storage_api_key()
     buf = io.BytesIO()
     total = 0
     try:
-        async with httpx.AsyncClient(timeout=60.0, follow_redirects=True) as client:
-            async with client.stream("GET", url, headers=headers) as r:
-                r.raise_for_status()
+        async with httpx.AsyncClient(timeout=60.0, follow_redirects=False) as client:
+            async with oeffne(client, url) as r:
                 clen = r.headers.get("content-length")
                 if clen and int(clen) > max_bytes:
                     raise HTTPException(
@@ -412,8 +412,11 @@ async def _fetch_audio_from_url(url: str) -> UploadFile:
                     buf.write(chunk)
     except HTTPException:
         raise
+    except PrivateDatei:
+        raise HTTPException(status_code=403, detail=private_media_detail(url))
     except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Failed to fetch file_url: {e}")
+        grund = str(e).replace(url, ohne_anfrage(url))
+        raise HTTPException(status_code=502, detail=f"Failed to fetch file_url: {grund}")
     if total == 0:
         raise HTTPException(status_code=502, detail="file_url returned an empty body")
     buf.seek(0)
@@ -481,8 +484,9 @@ async def transcribe_audio(
     Input (one of, checked in this order):
     - `file`: multipart upload (classic path)
     - `file_url`: URL to fetch server-side — as form field or query param
-      (?file_url=...). Streams with a size cap; storage-media URLs get the
-      X-API-KEY quarantine bypass. (Issue #314)
+      (?file_url=...). Streams with a size cap; URLs of the own storage get the
+      X-API-KEY quarantine bypass (Issue #314). Private files need a signed
+      URL, otherwise 403 private_media (Post 5782).
     """
     try:
         if file is None:

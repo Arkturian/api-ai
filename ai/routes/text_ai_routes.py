@@ -274,7 +274,9 @@ def _download_storage_images(prompt_text):
     # Scan the prompt for storage media URLs, download each to a HOME-rooted
     # vision-tmp dir; return [(url, local_path)]. Lets the CLI read a LOCAL
     # file instead of WebFetching the URL -> deterministic for codex/gemini.
-    # X-API-KEY bypasses the storage quarantine gate (re-scan of flagged imgs).
+    # X-API-KEY bypasses the storage quarantine gate (re-scan of flagged imgs),
+    # only for the own origin (#1794/#2654). Private files need a signed URL:
+    # 403 private_media instead of an answer from a model that saw no image.
     # Caller MUST delete the local files after the CLI call.
     #
     # Path-under-cwd, NOT /tmp and NOT just under $HOME: gemini-cli v0.46+
@@ -292,6 +294,7 @@ def _download_storage_images(prompt_text):
         import httpx
     except Exception:
         return []
+    from ai.clients.storage_abruf import PrivateDatei, oeffne_sync, ohne_anfrage, private_media_detail
     urls = [u.rstrip('.,;:)]}>') for u in re.findall(r'https?://\S+', prompt_text or '') if '/storage/media/' in u]
     out = []
     cli_home = os.getenv("CLI_HOME") or pwd.getpwuid(os.getuid()).pw_dir
@@ -311,12 +314,11 @@ def _download_storage_images(prompt_text):
     for url in dict.fromkeys(urls):
         p = None
         try:
-            with httpx.Client(timeout=30.0, follow_redirects=True) as c:
-                with c.stream("GET", url, headers={"X-API-KEY": storage_api_key()}) as r:
-                    r.raise_for_status()
+            with httpx.Client(timeout=30.0, follow_redirects=False) as c:
+                with oeffne_sync(c, url) as r:
                     clen = r.headers.get('content-length')
                     if clen and int(clen) > max_bytes:
-                        logger.warning('localize: skip oversized ref %s (%s bytes > cap)' % (url, clen))
+                        logger.warning('localize: skip oversized ref %s (%s bytes > cap)' % (ohne_anfrage(url), clen))
                         continue
                     ct = r.headers.get('content-type', '')
                     ext = 'png' if 'png' in ct else ('webp' if 'webp' in ct else 'jpg')
@@ -330,13 +332,20 @@ def _download_storage_images(prompt_text):
                             fh.write(chunk)
             out.append((url, p))
             logger.info('localized storage image -> ' + p)
+        except PrivateDatei:
+            for _u, _p in out:  # schon geholte Bilder nicht liegen lassen
+                try:
+                    os.remove(_p)
+                except OSError:
+                    pass
+            raise HTTPException(status_code=403, detail=private_media_detail(url))
         except Exception as e:
             if p:  # drop any partial file so the CLI never reads a truncated/oversized image
                 try:
                     os.remove(p)
                 except OSError:
                     pass
-            logger.warning('localize: download failed/skipped for ' + url + ': ' + str(e))
+            logger.warning('localize: download failed/skipped for ' + ohne_anfrage(url) + ': ' + str(e).replace(url, ohne_anfrage(url)))
     return out
 
 
