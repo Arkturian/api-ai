@@ -294,8 +294,11 @@ def _download_storage_images(prompt_text):
         import httpx
     except Exception:
         return []
-    from ai.clients.storage_abruf import PrivateDatei, oeffne_sync, ohne_anfrage, private_media_detail
-    urls = [u.rstrip('.,;:)]}>') for u in re.findall(r'https?://\S+', prompt_text or '') if '/storage/media/' in u]
+    from ai.clients.storage_abruf import (
+        GesperrteDatei, PrivateDatei, gesperrt_detail, medien_adressen, oeffne_sync, ohne_anfrage,
+        private_media_detail,
+    )
+    urls = medien_adressen(prompt_text)
     out = []
     cli_home = os.getenv("CLI_HOME") or pwd.getpwuid(os.getuid()).pw_dir
     img_dir = os.path.join(cli_home, ".aiapi-neutral", ".vision")
@@ -332,12 +335,14 @@ def _download_storage_images(prompt_text):
                             fh.write(chunk)
             out.append((url, p))
             logger.info('localized storage image -> ' + p)
-        except PrivateDatei:
+        except (PrivateDatei, GesperrteDatei) as e:
             for _u, _p in out:  # schon geholte Bilder nicht liegen lassen
                 try:
                     os.remove(_p)
                 except OSError:
                     pass
+            if isinstance(e, GesperrteDatei):
+                raise HTTPException(status_code=451, detail=gesperrt_detail(url))
             raise HTTPException(status_code=403, detail=private_media_detail(url))
         except Exception as e:
             if p:  # drop any partial file so the CLI never reads a truncated/oversized image

@@ -175,6 +175,62 @@ def test_vision_private_datei_bricht_ab_und_raeumt_auf(monkeypatch, _vision_ordn
     assert list(_vision_ordner.iterdir()) == []
 
 
+def test_vision_sperre_ist_451_nicht_stilles_weiterlaufen(monkeypatch, _vision_ordner):
+    _netz(monkeypatch, lambda r: httpx.Response(451, json={"detail": "blocked"}))
+    with pytest.raises(HTTPException) as e:
+        t._download_storage_images(f"Was zeigt {SIGNIERT} ?")
+    assert e.value.status_code == 451 and e.value.detail["error"] == "quarantined"
+
+
+@pytest.mark.asyncio
+async def test_transcribe_sperre_ist_451(monkeypatch):
+    _netz(monkeypatch, lambda r: httpx.Response(451, json={"detail": "blocked"}))
+    with pytest.raises(HTTPException) as e:
+        await a._fetch_audio_from_url(SIGNIERT)
+    assert e.value.status_code == 451
+
+
+# ---------------------------------------------------- Adressen aus dem Prompt
+# Post 5782: Das JSON aus assets_download stand im Prompt, der Treffer lief bis
+# zum naechsten Leerzeichen und zerstoerte die Signatur.
+
+def test_json_beendet_die_adresse_und_die_signatur_bleibt_heil():
+    prompt = json.dumps({"id": 133118, "url": SIGNIERT, "expires_at": "2026-11-06T10:46:49Z"})
+    assert s.medien_adressen(f"Was zeigt {prompt}") == [SIGNIERT]
+
+
+def test_ohne_leerzeichen_im_json_ebenso():
+    prompt = json.dumps({"url": SIGNIERT, "filename": "a.png"}, separators=(",", ":"))
+    assert s.medien_adressen(prompt) == [SIGNIERT]
+
+
+def test_escaptes_json_ebenso():
+    prompt = json.dumps({"inner": json.dumps({"url": SIGNIERT})})
+    assert s.medien_adressen(prompt) == [SIGNIERT]
+
+
+def test_signierte_adresse_verdraengt_unsignierte_desselben_objekts():
+    prompt = json.dumps({"file_url": EIGEN + "?v=abc", "thumbnail_url": EIGEN + "?variant=thumbnail&v=abc",
+                         "url": SIGNIERT})
+    assert s.medien_adressen(prompt) == [SIGNIERT]
+
+
+def test_andere_objekte_bleiben_und_fremde_adressen_fallen_weg():
+    zweite = EIGEN.replace("133118", "2")
+    assert s.medien_adressen(f"{SIGNIERT} und {zweite}. Siehe https://example.com/x") == [SIGNIERT, zweite]
+
+
+def test_satzzeichen_am_ende_gehoeren_nicht_zur_adresse():
+    assert s.medien_adressen(f"Bild ({EIGEN}), bitte.") == [EIGEN]
+
+
+def test_vision_prompt_mit_werkzeug_json_holt_nur_die_signierte(monkeypatch, _vision_ordner):
+    gesehen = _netz(monkeypatch, _bild)
+    prompt = json.dumps({"file_url": EIGEN + "?v=abc", "url": SIGNIERT})
+    t._download_storage_images(prompt)
+    assert gesehen == [(SIGNIERT, None)]
+
+
 # ---------------------------------------------------- Protokoll
 
 def test_signatur_steht_nicht_im_protokoll():

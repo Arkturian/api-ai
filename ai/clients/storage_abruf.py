@@ -15,12 +15,12 @@ Drei Regeln, je Sprung neu geprueft:
 import json
 import logging
 import os
-from contextlib import contextmanager
-from typing import Optional
+import re
+from contextlib import asynccontextmanager, contextmanager
+from typing import List, Optional
 from urllib.parse import parse_qs, urljoin, urlsplit, urlunsplit
 
 import httpx
-from contextlib import asynccontextmanager
 
 from ai.clients.storage_client import storage_api_key
 
@@ -43,6 +43,16 @@ class PrivateDatei(Exception):
     def __init__(self, url: str):
         self.url = url
         super().__init__(f"private_media: {ohne_anfrage(url)}")
+
+
+class GesperrteDatei(Exception):
+    """Storage verweigert die Datei wegen des Safety-Urteils (451).
+
+    Die Signatur hebt nur die Zugriffspruefung auf, nicht das Urteil."""
+
+    def __init__(self, url: str):
+        self.url = url
+        super().__init__(f"quarantined: {ohne_anfrage(url)}")
 
 
 def _ursprung(url: str):
@@ -149,6 +159,28 @@ def private_media_detail(url: str) -> dict:
     return {"error": "private_media", "url": ohne_anfrage(url), "hint": PRIVATE_MEDIA_HINWEIS}
 
 
+def gesperrt_detail(url: str) -> dict:
+    """Antwortkoerper fuer den 451 an den Aufrufer."""
+    return {"error": "quarantined", "url": ohne_anfrage(url),
+            "hint": "Storage hat die Datei wegen des Safety-Urteils gesperrt."}
+
+
+def medien_adressen(text: str) -> List[str]:
+    """Storage-Adressen aus freiem Text, je Objekt die brauchbarste.
+
+    Der Text ist oft eine eingefuegte Werkzeug-Antwort (JSON). Anfuehrungszeichen
+    und Backslashes beenden deshalb die Adresse: Vorher lief der Treffer bis zum
+    naechsten Leerzeichen weiter und zerstoerte die Signatur (Post 5782, 132824
+    und 133117). Steht zu einem Objekt eine signierte Adresse da, fallen die
+    unsignierten weg: Sie koennen bei privaten Dateien nur scheitern.
+    """
+    treffer = [u.rstrip(".,;:)]}>") for u in re.findall(r"""https?://[^\s"'`<>\\]+""", text or "")
+               if "/storage/media/" in u]
+    treffer = list(dict.fromkeys(treffer))
+    signierte = {urlsplit(u).path for u in treffer if ist_signiert(u)}
+    return [u for u in treffer if ist_signiert(u) or urlsplit(u).path not in signierte]
+
+
 def _kopf(ziel: str) -> dict:
     return {"X-API-KEY": storage_api_key()} if darf_schluessel_sehen(ziel) else {}
 
@@ -158,7 +190,7 @@ async def oeffne(client: httpx.AsyncClient, url: str):
     """Streamt ``url`` und entscheidet je Sprung neu ueber den Schluessel.
 
     Der Client muss ``follow_redirects=False`` haben. Raises PrivateDatei,
-    ZuVieleUmleitungen oder httpx.HTTPStatusError.
+    GesperrteDatei, ZuVieleUmleitungen oder httpx.HTTPStatusError.
     """
     ziel = url
     for _ in range(MAX_SPRUENGE + 1):
@@ -169,6 +201,8 @@ async def oeffne(client: httpx.AsyncClient, url: str):
                 continue
             if r.status_code == 403 and _ist_private_media(403, await r.aread()):
                 raise PrivateDatei(url)
+            if r.status_code == 451:
+                raise GesperrteDatei(url)
             r.raise_for_status()
             yield r
             return
@@ -187,6 +221,8 @@ def oeffne_sync(client: httpx.Client, url: str):
                 continue
             if r.status_code == 403 and _ist_private_media(403, r.read()):
                 raise PrivateDatei(url)
+            if r.status_code == 451:
+                raise GesperrteDatei(url)
             r.raise_for_status()
             yield r
             return
