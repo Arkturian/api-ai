@@ -1,7 +1,10 @@
 """Adressen holen, ohne den Storage-Schluessel herzugeben.
 
 Einziger Ort, der entscheidet, ob eine Adresse den Dienstschluessel sieht.
-Drei Regeln, je Sprung neu geprueft:
+Adressen und IDs vom Aufrufer holt AiApi ohne Schluessel (#2659): Diese Routen
+pruefen keinen Aufrufer, mit Schluessel koennte jeder nicht oeffentliche Dateien
+lesen lassen. Es gehen oeffentliche Dateien und signierte Adressen. Wo der
+Schluessel doch einmal gilt (``mit_schluessel=True``), je Sprung neu geprueft:
 
 - Nur der eigene Ursprung bekommt ihn (Issue #1794, #2654). Ein Teilstueck
   des Pfades reicht nicht, Umleitungen tragen ihn nicht mit.
@@ -186,14 +189,12 @@ def _kopf(ziel: str, kette_eigen: bool) -> dict:
 
 
 @asynccontextmanager
-async def oeffne(client: httpx.AsyncClient, url: str, mit_schluessel: bool = True):
+async def oeffne(client: httpx.AsyncClient, url: str, mit_schluessel: bool = False):
     """Streamt ``url`` und entscheidet je Sprung neu ueber den Schluessel.
 
     Nach einem Sprung ueber einen fremden Host gibt es keinen Schluessel mehr:
     Eine fremde Adresse darf nicht per Umleitung auf den eigenen Storage zeigen
     und so nicht oeffentliche Dateien lesen (Post 5782).
-    ``mit_schluessel=False``: Der Aufrufer ist nicht geprueft, es zaehlen nur
-    oeffentliche Dateien und Signaturen.
 
     Der Client muss ``follow_redirects=False`` haben. Raises PrivateDatei,
     GesperrteDatei, ZuVieleUmleitungen oder httpx.HTTPStatusError.
@@ -218,10 +219,10 @@ async def oeffne(client: httpx.AsyncClient, url: str, mit_schluessel: bool = Tru
 
 
 @contextmanager
-def oeffne_sync(client: httpx.Client, url: str):
+def oeffne_sync(client: httpx.Client, url: str, mit_schluessel: bool = False):
     """Wie ``oeffne``, fuer synchrone Aufrufer."""
     ziel = url
-    eigen = True
+    eigen = mit_schluessel
     for _ in range(MAX_SPRUENGE + 1):
         eigen = eigen and darf_schluessel_sehen(ziel)
         with client.stream("GET", ziel, headers=_kopf(ziel, eigen)) as r:

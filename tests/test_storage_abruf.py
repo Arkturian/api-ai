@@ -185,7 +185,30 @@ def test_vision_fremder_host_im_prompt_bekommt_den_schluessel_nicht(monkeypatch,
 def test_vision_umleitung_traegt_ihn_nicht_nach_draussen(monkeypatch, _vision_ordner):
     gesehen = _netz(monkeypatch, _umleitung_nach_draussen)
     t._download_storage_images(f"Was zeigt {EIGEN} ?")
-    assert gesehen[0][1] == SCHLUESSEL and gesehen[1][1] is None
+    assert [k for _, k in gesehen] == [None, None]
+
+
+def test_vision_eigener_storage_ohne_schluessel(monkeypatch, _vision_ordner):
+    """#2659: Wer die Adresse in den Prompt schreibt, liest nichts Nicht-Oeffentliches."""
+    gesehen = _netz(monkeypatch, _bild)
+    t._download_storage_images(f"Was zeigt {EIGEN} ?")
+    assert gesehen == [(EIGEN, None)]
+
+
+@pytest.mark.asyncio
+async def test_referenzbild_eigener_storage_ohne_schluessel(monkeypatch):
+    from ai.routes import image_ai_routes as g
+    gesehen = _netz(monkeypatch, _bild)
+    await g._download_reference_images([EIGEN])
+    assert gesehen == [(EIGEN, None)]
+
+
+@pytest.mark.asyncio
+async def test_mix_quelle_ohne_schluessel(monkeypatch, tmp_path):
+    from ai.routes import audio_mix_routes as m
+    gesehen = _netz(monkeypatch, _audio)
+    await m._hole_quelle(133118, tmp_path / "q.mp3")
+    assert gesehen[0][1] is None
 
 
 def test_vision_eigenes_bild_wird_lokal(monkeypatch, _vision_ordner):

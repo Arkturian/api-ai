@@ -85,9 +85,8 @@ class ImageGenRequest(BaseModel):
     background: Optional[str] = Field(default=None, description="OpenAI gpt-image-*: transparent | opaque | auto (default auto). transparent = PNG with alpha.")
     # Reference images for style-transfer / image-to-image. Currently only
     # supported by the OpenAI gpt-image-* family (routed via /v1/images/edits
-    # multipart). HTTP(S) URLs allowed; storage-api URLs are fetched with
-    # X-API-KEY so quarantined assets work. Private assets need a signed
-    # URL (the key does not read them, Post 5782). Max 16 references
+    # multipart). HTTP(S) URLs allowed, fetched WITHOUT the storage key (#2659):
+    # public files and signed URLs work. Max 16 references
     # (OpenAI hard limit). dall-e-3 does NOT support edits — rejected at
     # dispatch. Non-OpenAI models reject too with a 400 pointing at gpt-image-2.
     reference_image_urls: Optional[List[str]] = Field(
@@ -257,7 +256,7 @@ async def _hole_referenz(client, url: str, storage_key: str, max_spruenge: int =
     for _ in range(max_spruenge + 1):
         headers = {}
         # Nach einem fremden Sprung kein Schluessel mehr (Post 5782).
-        eigen = eigen and _darf_schluessel_sehen(ziel)
+        eigen = eigen and bool(storage_key) and _darf_schluessel_sehen(ziel)
         if eigen:
             headers["X-API-KEY"] = storage_key
         r = await client.get(ziel, headers=headers)
@@ -312,9 +311,8 @@ async def _download_reference_images(urls: List[str]) -> List[tuple]:
     """Fetch reference image bytes for OpenAI /v1/images/edits multipart upload.
 
     Returns [(filename, bytes, mime_type), ...] suitable for httpx files-param.
-    Storage-api URLs are fetched with X-API-KEY so quarantined assets work;
-    private assets need a signed URL (the key does not read them). Other
-    URLs are fetched anonymously. Fail fast — if any URL 404s we
+    Fetched without the storage key (#2659): public files and signed URLs work,
+    the route does not check its caller. Fail fast — if any URL 404s we
     raise 422 with the bad URL, so the caller sees which reference was wrong
     instead of getting a confidently wrong generated image.
     """
@@ -323,7 +321,7 @@ async def _download_reference_images(urls: List[str]) -> List[tuple]:
     import uuid
 
     out = []
-    storage_key = storage_api_key()
+    storage_key = ""  # Kein Dienstschluessel fuer Adressen vom Aufrufer (#2659).
     # follow_redirects bewusst AUS: die Sprünge werden in
     # ``_hole_referenz`` von Hand verfolgt, damit der Schluessel je Sprung
     # neu entschieden wird.

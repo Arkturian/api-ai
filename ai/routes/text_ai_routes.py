@@ -274,10 +274,10 @@ def _download_storage_images(prompt_text):
     # Scan the prompt for storage media URLs, download each to a HOME-rooted
     # vision-tmp dir; return [(url, local_path)]. Lets the CLI read a LOCAL
     # file instead of WebFetching the URL -> deterministic for codex/gemini.
-    # X-API-KEY bypasses the storage quarantine gate (re-scan of flagged imgs),
-    # only for the own origin (#1794/#2654). Private files need a signed URL.
-    # What cannot be read stays out of the result: _mit_hinweis_unlesbar tells
-    # the model, so it neither invents the image nor fails a pure text task.
+    # Fetched WITHOUT the storage key (#2659): the prompt comes from an unchecked
+    # caller. Public files and signed URLs work. What cannot be read stays out of
+    # the result: _mit_hinweis_unlesbar tells the model, so it neither invents the
+    # image nor fails a pure text task.
     # Caller MUST delete the local files after the CLI call.
     #
     # Path-under-cwd, NOT /tmp and NOT just under $HOME: gemini-cli v0.46+

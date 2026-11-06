@@ -197,14 +197,14 @@ def mischen(pfade: List[Path], tracks: List[MixTrack], sample_rate: int, output_
 
 
 async def _hole_quelle(audio_id: int, ziel: Path) -> int:
-    """Laedt ein Storage-Objekt; Schluessel nur an den eigenen Ursprung."""
-    from ai.clients.storage_client import storage_api_key
+    """Laedt ein Storage-Objekt ohne Schluessel: Die IDs kommen vom Aufrufer, die
+    Route prueft ihn nicht, und das Ergebnis ist standardmaessig oeffentlich (#2659)."""
     from ai.routes.image_ai_routes import _hole_referenz
 
     base = os.getenv("STORAGE_API_URL", "https://api-storage.arkturian.com").rstrip("/")
     url = f"{base}/storage/media/{int(audio_id)}?variant=full"
     async with httpx.AsyncClient(timeout=120.0, follow_redirects=False) as client:
-        r = await _hole_referenz(client, url, storage_api_key())
+        r = await _hole_referenz(client, url, "")
     if r.status_code != 200:
         raise HTTPException(status_code=422, detail={"error": "source_unavailable", "audio_id": audio_id, "status": r.status_code})
     if len(r.content) > MAX_SOURCE_BYTES:

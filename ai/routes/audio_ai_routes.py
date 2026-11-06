@@ -398,7 +398,7 @@ async def _fetch_audio_from_url(url: str) -> UploadFile:
     total = 0
     try:
         async with httpx.AsyncClient(timeout=60.0, follow_redirects=False) as client:
-            async with oeffne(client, url, mit_schluessel=False) as r:
+            async with oeffne(client, url) as r:
                 clen = r.headers.get("content-length")
                 if clen and int(clen) > max_bytes:
                     raise HTTPException(
