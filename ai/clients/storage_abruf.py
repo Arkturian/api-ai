@@ -181,20 +181,28 @@ def medien_adressen(text: str) -> List[str]:
     return [u for u in treffer if ist_signiert(u) or urlsplit(u).path not in signierte]
 
 
-def _kopf(ziel: str) -> dict:
-    return {"X-API-KEY": storage_api_key()} if darf_schluessel_sehen(ziel) else {}
+def _kopf(ziel: str, kette_eigen: bool) -> dict:
+    return {"X-API-KEY": storage_api_key()} if kette_eigen and darf_schluessel_sehen(ziel) else {}
 
 
 @asynccontextmanager
-async def oeffne(client: httpx.AsyncClient, url: str):
+async def oeffne(client: httpx.AsyncClient, url: str, mit_schluessel: bool = True):
     """Streamt ``url`` und entscheidet je Sprung neu ueber den Schluessel.
+
+    Nach einem Sprung ueber einen fremden Host gibt es keinen Schluessel mehr:
+    Eine fremde Adresse darf nicht per Umleitung auf den eigenen Storage zeigen
+    und so nicht oeffentliche Dateien lesen (Post 5782).
+    ``mit_schluessel=False``: Der Aufrufer ist nicht geprueft, es zaehlen nur
+    oeffentliche Dateien und Signaturen.
 
     Der Client muss ``follow_redirects=False`` haben. Raises PrivateDatei,
     GesperrteDatei, ZuVieleUmleitungen oder httpx.HTTPStatusError.
     """
     ziel = url
+    eigen = mit_schluessel
     for _ in range(MAX_SPRUENGE + 1):
-        async with client.stream("GET", ziel, headers=_kopf(ziel)) as r:
+        eigen = eigen and darf_schluessel_sehen(ziel)
+        async with client.stream("GET", ziel, headers=_kopf(ziel, eigen)) as r:
             ort = r.headers.get("location") if r.status_code in UMLEITUNGEN else None
             if ort:
                 ziel = urljoin(ziel, ort)
@@ -213,8 +221,10 @@ async def oeffne(client: httpx.AsyncClient, url: str):
 def oeffne_sync(client: httpx.Client, url: str):
     """Wie ``oeffne``, fuer synchrone Aufrufer."""
     ziel = url
+    eigen = True
     for _ in range(MAX_SPRUENGE + 1):
-        with client.stream("GET", ziel, headers=_kopf(ziel)) as r:
+        eigen = eigen and darf_schluessel_sehen(ziel)
+        with client.stream("GET", ziel, headers=_kopf(ziel, eigen)) as r:
             ort = r.headers.get("location") if r.status_code in UMLEITUNGEN else None
             if ort:
                 ziel = urljoin(ziel, ort)

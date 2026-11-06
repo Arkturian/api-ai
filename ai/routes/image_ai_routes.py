@@ -253,9 +253,12 @@ async def _hole_referenz(client, url: str, storage_key: str, max_spruenge: int =
     Schluessel also dorthin getragen (Issue #1794, zweiter Fall).
     """
     ziel = url
+    eigen = True
     for _ in range(max_spruenge + 1):
         headers = {}
-        if _darf_schluessel_sehen(ziel):
+        # Nach einem fremden Sprung kein Schluessel mehr (Post 5782).
+        eigen = eigen and _darf_schluessel_sehen(ziel)
+        if eigen:
             headers["X-API-KEY"] = storage_key
         r = await client.get(ziel, headers=headers)
         if r.status_code in (301, 302, 303, 307, 308):

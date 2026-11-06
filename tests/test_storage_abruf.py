@@ -64,11 +64,13 @@ def _privat(request):
 # ---------------------------------------------------- /ai/transcribe
 
 @pytest.mark.asyncio
-async def test_transcribe_eigener_storage_bekommt_den_schluessel(monkeypatch):
+async def test_transcribe_nutzt_den_schluessel_nie(monkeypatch):
+    """Post 5782: Die Route prueft keinen Aufrufer. Mit Schluessel liesse sich jede
+    nicht oeffentliche Datei ohne Bindung transkribieren."""
     gesehen = _netz(monkeypatch, _audio)
     f = await a._fetch_audio_from_url(EIGEN)
     assert await f.read() == b"AUDIO"
-    assert gesehen == [(EIGEN, SCHLUESSEL)]
+    assert gesehen == [(EIGEN, None)]
 
 
 @pytest.mark.asyncio
@@ -82,7 +84,7 @@ async def test_transcribe_fremder_host_bekommt_ihn_nicht(monkeypatch):
 async def test_transcribe_umleitung_traegt_ihn_nicht_nach_draussen(monkeypatch):
     gesehen = _netz(monkeypatch, _umleitung_nach_draussen)
     await a._fetch_audio_from_url(EIGEN)
-    assert gesehen[0][1] == SCHLUESSEL
+    assert gesehen[0][1] is None
     assert "abfluss.example" in gesehen[1][0] and gesehen[1][1] is None
 
 
@@ -129,6 +131,37 @@ async def test_transcribe_endlose_umleitung_bricht_ab(monkeypatch):
         await a._fetch_audio_from_url("https://kreis.example/start")
     assert e.value.status_code == 502
     assert len(aufrufe) == s.MAX_SPRUENGE + 1
+
+
+# ---------------------------------------------------- Umleitung auf den eigenen Storage
+# Post 5782: Eine fremde Adresse zeigt per Umleitung auf eine nicht oeffentliche
+# Datei des eigenen Storage und wuerde ihn so dem Fremden vorlesen.
+
+def _umleitung_nach_innen(request):
+    if request.url.host == "fremder-host.example":
+        return httpx.Response(302, headers={"location": EIGEN})
+    return _bild(request)
+
+
+def test_vision_umleitung_von_aussen_auf_den_storage_ohne_schluessel(monkeypatch, tmp_path):
+    monkeypatch.setenv("CLI_HOME", str(tmp_path))
+    gesehen = _netz(monkeypatch, _umleitung_nach_innen)
+    t._download_storage_images(f"Was zeigt {FREMD} ?")
+    assert [k for _, k in gesehen] == [None, None]
+
+
+@pytest.mark.asyncio
+async def test_referenzbild_umleitung_von_aussen_auf_den_storage_ohne_schluessel():
+    from ai.routes import image_ai_routes as g
+    gesehen = []
+
+    def handler(request):
+        gesehen.append(request.headers.get("x-api-key"))
+        return _umleitung_nach_innen(request)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler), follow_redirects=False) as c:
+        await g._hole_referenz(c, FREMD, SCHLUESSEL)
+    assert gesehen == [None, None]
 
 
 # ---------------------------------------------------- Vision

@@ -382,9 +382,10 @@ async def _fetch_audio_from_url(url: str) -> UploadFile:
     ref must not balloon RSS) and derives a filename from the URL path so the
     downstream ffprobe/extension logic keeps working.
 
-    Der Storage-Schluessel geht nur an den eigenen Ursprung (quarantine
-    bypass, #1794/#2654). Private Dateien liest er nicht: Der Aufrufer muss
-    eine signierte Adresse uebergeben, sonst 403 ``private_media``.
+    Ohne Storage-Schluessel: Die Route prueft keinen Aufrufer, mit Schluessel
+    koennte jeder nicht oeffentliche Dateien transkribieren lassen (Post 5782).
+    Es gehen oeffentliche Dateien und signierte Adressen, private sonst 403
+    ``private_media``.
     """
     import httpx
     from urllib.parse import urlparse, parse_qs
@@ -397,7 +398,7 @@ async def _fetch_audio_from_url(url: str) -> UploadFile:
     total = 0
     try:
         async with httpx.AsyncClient(timeout=60.0, follow_redirects=False) as client:
-            async with oeffne(client, url) as r:
+            async with oeffne(client, url, mit_schluessel=False) as r:
                 clen = r.headers.get("content-length")
                 if clen and int(clen) > max_bytes:
                     raise HTTPException(
@@ -488,9 +489,9 @@ async def transcribe_audio(
     Input (one of, checked in this order):
     - `file`: multipart upload (classic path)
     - `file_url`: URL to fetch server-side — as form field or query param
-      (?file_url=...). Streams with a size cap; URLs of the own storage get the
-      X-API-KEY quarantine bypass (Issue #314). Private files need a signed
-      URL, otherwise 403 private_media (Post 5782).
+      (?file_url=...). Streams with a size cap. Public or signed URLs only, the
+      storage key is not used here (Post 5782). Private files without a
+      signature: 403 private_media.
     """
     try:
         if file is None:
