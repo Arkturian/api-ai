@@ -275,8 +275,9 @@ def _download_storage_images(prompt_text):
     # vision-tmp dir; return [(url, local_path)]. Lets the CLI read a LOCAL
     # file instead of WebFetching the URL -> deterministic for codex/gemini.
     # X-API-KEY bypasses the storage quarantine gate (re-scan of flagged imgs),
-    # only for the own origin (#1794/#2654). Private files need a signed URL:
-    # 403 private_media instead of an answer from a model that saw no image.
+    # only for the own origin (#1794/#2654). Private files need a signed URL.
+    # What cannot be read stays out of the result: _mit_hinweis_unlesbar tells
+    # the model, so it neither invents the image nor fails a pure text task.
     # Caller MUST delete the local files after the CLI call.
     #
     # Path-under-cwd, NOT /tmp and NOT just under $HOME: gemini-cli v0.46+
@@ -294,10 +295,7 @@ def _download_storage_images(prompt_text):
         import httpx
     except Exception:
         return []
-    from ai.clients.storage_abruf import (
-        GesperrteDatei, PrivateDatei, gesperrt_detail, medien_adressen, oeffne_sync, ohne_anfrage,
-        private_media_detail,
-    )
+    from ai.clients.storage_abruf import medien_adressen, oeffne_sync, ohne_anfrage
     urls = medien_adressen(prompt_text)
     out = []
     cli_home = os.getenv("CLI_HOME") or pwd.getpwuid(os.getuid()).pw_dir
@@ -335,15 +333,6 @@ def _download_storage_images(prompt_text):
                             fh.write(chunk)
             out.append((url, p))
             logger.info('localized storage image -> ' + p)
-        except (PrivateDatei, GesperrteDatei) as e:
-            for _u, _p in out:  # schon geholte Bilder nicht liegen lassen
-                try:
-                    os.remove(_p)
-                except OSError:
-                    pass
-            if isinstance(e, GesperrteDatei):
-                raise HTTPException(status_code=451, detail=gesperrt_detail(url))
-            raise HTTPException(status_code=403, detail=private_media_detail(url))
         except Exception as e:
             if p:  # drop any partial file so the CLI never reads a truncated/oversized image
                 try:
@@ -352,6 +341,25 @@ def _download_storage_images(prompt_text):
                     pass
             logger.warning('localize: download failed/skipped for ' + ohne_anfrage(url) + ': ' + str(e).replace(url, ohne_anfrage(url)))
     return out
+
+
+def _mit_hinweis_unlesbar(prompt_text, imgs):
+    """Haengt an den Prompt, welche Storage-Adressen nicht gelesen werden konnten.
+
+    Ein Link im Text ist oft kein Auftrag: Das Vorlesen einer Antwort mit privatem
+    Link (Prosa ueber /ai/chatgpt) darf daran nicht scheitern (Post 5782). Eine
+    Bildfrage darf aber auch nicht still ohne Bild beantwortet werden.
+    """
+    from ai.clients.storage_abruf import medien_adressen, ohne_anfrage
+    geholt = {u for u, _p in imgs}
+    fehlend = [ohne_anfrage(u) for u in medien_adressen(prompt_text) if u not in geholt]
+    if not fehlend:
+        return prompt_text
+    fehlend = list(dict.fromkeys(fehlend))
+    return (f"{prompt_text}\n\n[Hinweis des Dienstes: Diese Dateien konnten nicht gelesen werden, "
+            f"du siehst ihren Inhalt nicht: {', '.join(fehlend)}. Beschreibe sie nicht. Braucht die "
+            "Aufgabe ihren Inhalt, sage das ausdruecklich. Private Dateien gehen nur ueber eine "
+            "signierte Adresse (assets_download).]")
 
 
 def _check_minimax_billing_gate(confirmed: Optional[bool], endpoint: str) -> None:
@@ -981,6 +989,7 @@ async def claude_endpoint(
         # root, so we leave the flag off — in -p (print) mode there are
         # no tool calls anyway, so no permission prompts to bypass.
         _imgs = _download_storage_images(prompt_text)
+        prompt_text = _mit_hinweis_unlesbar(prompt_text, _imgs)
         for _u, _p in _imgs:
             prompt_text = prompt_text.replace(_u, _p)
         if _imgs:
@@ -1553,6 +1562,7 @@ async def _chatgpt_einmal(
             cmd.extend(["-c", f"model_reasoning_effort={prompt.effort}"])
 
         _imgs = _download_storage_images(prompt_text)
+        prompt_text = _mit_hinweis_unlesbar(prompt_text, _imgs)
         if _imgs:
             for _u, _p in _imgs:
                 prompt_text = prompt_text.replace(_u, "(siehe angehaengtes Bild)")
@@ -2272,6 +2282,7 @@ async def gemini_endpoint(
                 )
         logger.info("agy cmd model-arg: %r", cmd[cmd.index("--model")+1] if "--model" in cmd else None)
         _imgs = _download_storage_images(prompt_text)
+        prompt_text = _mit_hinweis_unlesbar(prompt_text, _imgs)
         for _u, _p in _imgs:
             prompt_text = prompt_text.replace(_u, "@" + _p)
         if _imgs:

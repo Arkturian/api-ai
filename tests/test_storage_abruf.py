@@ -194,25 +194,40 @@ def test_vision_eigenes_bild_wird_lokal(monkeypatch, _vision_ordner):
     assert url == EIGEN and open(pfad, "rb").read() == b"\x89PNG"
 
 
-def test_vision_private_datei_bricht_ab_und_raeumt_auf(monkeypatch, _vision_ordner):
-    """Vorher: Warnung im Protokoll, das Modell antwortete ohne Bild."""
+def test_vision_private_datei_bricht_nicht_ab_und_der_hinweis_nennt_sie(monkeypatch, _vision_ordner):
+    """Der Prosa-Fall: Eine Antwort mit privatem Link wird vorgelesen. Weder Abbruch
+    noch eine Antwort, die so tut, als haette das Modell die Datei gesehen."""
     zweite = EIGEN.replace("133118", "2")
 
     def antwort(request):
         return _privat(request) if request.url.path.endswith("/2") else _bild(request)
 
     _netz(monkeypatch, antwort)
-    with pytest.raises(HTTPException) as e:
-        t._download_storage_images(f"{EIGEN} und {zweite}")
-    assert e.value.status_code == 403 and e.value.detail["error"] == "private_media"
-    assert list(_vision_ordner.iterdir()) == []
+    prompt = f"{EIGEN} und {zweite}"
+    imgs = t._download_storage_images(prompt)
+    assert [u for u, _ in imgs] == [EIGEN]
+    neu = t._mit_hinweis_unlesbar(prompt, imgs)
+    hinweis = neu[len(prompt):]
+    assert zweite in hinweis and EIGEN not in hinweis and "nicht gelesen" in hinweis
 
 
-def test_vision_sperre_ist_451_nicht_stilles_weiterlaufen(monkeypatch, _vision_ordner):
+def test_vision_sperre_und_abgelaufene_signatur_ebenso(monkeypatch, _vision_ordner):
     _netz(monkeypatch, lambda r: httpx.Response(451, json={"detail": "blocked"}))
-    with pytest.raises(HTTPException) as e:
-        t._download_storage_images(f"Was zeigt {SIGNIERT} ?")
-    assert e.value.status_code == 451 and e.value.detail["error"] == "quarantined"
+    prompt = f"Was zeigt {SIGNIERT} ?"
+    imgs = t._download_storage_images(prompt)
+    assert imgs == []
+    neu = t._mit_hinweis_unlesbar(prompt, imgs)
+    assert EIGEN in neu[len(prompt):] and "sig=" not in neu[len(prompt):]
+
+
+def test_ohne_storage_adresse_bleibt_der_prompt_gleich():
+    assert t._mit_hinweis_unlesbar("Hallo https://example.com/x", []) == "Hallo https://example.com/x"
+
+
+def test_alle_vision_wege_nutzen_den_hinweis():
+    from pathlib import Path
+    q = Path(t.__file__).read_text()
+    assert q.count("_imgs = _download_storage_images(prompt_text)\n        prompt_text = _mit_hinweis_unlesbar(prompt_text, _imgs)") == 3
 
 
 @pytest.mark.asyncio
