@@ -187,6 +187,9 @@ class _OpenAISharedTrackPayload(BaseModel):
 
     model: str
     num_images: int = 1
+    # Aus der usage der OpenAI-Antwort (2.6 rechnet je Token ab, #2699).
+    # Fehlt das Feld (aeltere Gegenstelle), gilt der Satz je Bild.
+    cost_usd: Optional[float] = None
     source_host: Optional[str] = None
 
 
@@ -470,7 +473,8 @@ async def openai_cost_shared_state_track(
     _verify_shared_counter_auth(x_internal_auth)
     from ..services.openai_cost_tracker import openai_cost_tracker
     openai_cost_tracker._track_local(
-        model=payload.model, num_images=payload.num_images
+        model=payload.model, num_images=payload.num_images,
+        cost_usd=payload.cost_usd,
     )
     status = openai_cost_tracker.get_status()
     status["would_block"] = openai_cost_tracker.should_block_request()

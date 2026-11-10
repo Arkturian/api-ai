@@ -12,6 +12,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from typing import List, Optional
 import logging
+import os
 import re
 
 from ai.clients.storage_client import GrantNichtGebunden, storage_api_key
@@ -36,14 +37,18 @@ class ImageGenRequest(BaseModel):
     aspect_ratio: Optional[str] = Field(default="1:1", description="Aspect ratio (1:1, 16:9, 9:16, 1:4, 4:1, 1:8, 8:1)")
     image_size: Optional[str] = Field(default=None, description="Resolution: 1K, 2K, 4K (Nano Banana 2 only)")
     model: Optional[str] = Field(
-        default="gpt-image-2",
+        default="gpt-image-2.6-sunburst",
         description=(
             "Model. SUBSCRIPTION (0 EUR, codex image_gen, no size control, "
             "transparent ok): codex-imagegen (aliases gpt-image-2-abo, imagegen). "
             "WORKING (OpenAI key set, pay-as-you-go -> needs "
-            "confirm_api_billing=true): gpt-image-2 (default), gpt-image-1.5, "
-            "gpt-image-1 (only one with background=transparent), "
-            "gpt-image-1-mini, dall-e-3. "
+            "confirm_api_billing=true): gpt-image-2.6-sunburst (default, "
+            "detail work, up to 4K, background=transparent ok), "
+            "gpt-image-2.6-flare (faster, same limits). Retired names stay as "
+            "aliases and report the real model in actual_model: gpt-image-2 "
+            "(OpenAI shutdown 10.02.2027), gpt-image-1.5 (01.12.2026), "
+            "gpt-image-1 (shut down 23.10.2026) -> sunburst; gpt-image-1-mini "
+            "-> flare. dall-e-3. "
             "MiniMax (payg): minimax-image-01. "
             "DISABLED (Google key removed 2026-05-30 after the GCP cost "
             "incident, calls fail fast with 503): nano-banana-2, "
@@ -88,12 +93,12 @@ class ImageGenRequest(BaseModel):
     # multipart). HTTP(S) URLs allowed, fetched WITHOUT the storage key (#2659):
     # public files and signed URLs work. Max 16 references
     # (OpenAI hard limit). dall-e-3 does NOT support edits — rejected at
-    # dispatch. Non-OpenAI models reject too with a 400 pointing at gpt-image-2.
+    # dispatch. Non-OpenAI models reject too with a 400 pointing at gpt-image-*.
     reference_image_urls: Optional[List[str]] = Field(
         default=None,
         description=(
             "Reference images as visual style/composition anchors. Only "
-            "supported with gpt-image-1 / gpt-image-1.5 / gpt-image-2 — "
+            "supported with the OpenAI gpt-image-* family — "
             "switches dispatch to OpenAI /v1/images/edits. Max 16 URLs."
         ),
     )
@@ -153,10 +158,19 @@ MODEL_MAPPING = {
     "codex-imagegen": "codex-imagegen",
     "gpt-image-2-abo": "codex-imagegen",
     "imagegen": "codex-imagegen",
-    "gpt-image-2": "gpt-image-2",
-    "gpt-image-1": "gpt-image-1",
-    "gpt-image-1.5": "gpt-image-1.5",
-    "gpt-image-1-mini": "gpt-image-1-mini",
+    # Stand 11.11.2026 (#2699, gelesen in GET /v1/models und auf der
+    # Deprecations-Seite): gpt-image-1 ist seit 23.10.2026 abgeschaltet,
+    # gpt-image-1.5 und -1-mini fallen am 01.12.2026, gpt-image-2 am
+    # 10.02.2027. Nachfolger laut OpenAI: gpt-image-2.6-sunburst (Detail,
+    # Edits) und -flare (schnelles Iterieren). Die alten Namen bleiben als
+    # Alias, damit Aufrufer mit festem Modellnamen (Story, SWFME, CloudV2)
+    # nicht brechen; die Antwort nennt das echte Modell in actual_model.
+    "gpt-image-2.6-sunburst": "gpt-image-2.6-sunburst",
+    "gpt-image-2.6-flare": "gpt-image-2.6-flare",
+    "gpt-image-2": "gpt-image-2.6-sunburst",
+    "gpt-image-1.5": "gpt-image-2.6-sunburst",
+    "gpt-image-1": "gpt-image-2.6-sunburst",
+    "gpt-image-1-mini": "gpt-image-2.6-flare",
 
     # Others
     "dall-e-3": "dall-e-3",
@@ -179,6 +193,27 @@ def is_minimax_model(model: str) -> bool:
     """Check if model should use MiniMax provider."""
     minimax_prefixes = ["minimax-image", "image-01"]
     return any(model.startswith(p) for p in minimax_prefixes)
+
+
+OPENAI_BILD_VORGABE = os.getenv("OPENAI_IMAGE_DEFAULT_MODEL", "gpt-image-2.6-sunburst")
+
+# Groessenregeln der 2.6-Familie (OpenAI-Leitfaden, gelesen 11.11.2026, und
+# am selben Tag gegen die Validierung der API gehalten): Kanten Vielfache
+# von 16, keine Kante ueber 3840, Seitenverhaeltnis 1:3 bis 3:1, Pixelzahl
+# 655 360 bis 8 294 400. 3840x3840 weist die API mit "pixel budget" ab.
+_FREIE_GROESSE_MODELLE = ("gpt-image-2.6-sunburst", "gpt-image-2.6-flare")
+
+
+def freie_groesse_zulaessig(model: str, width: Optional[int], height: Optional[int]) -> bool:
+    """Darf (width, height) bei diesem Modell genau so an OpenAI gehen?"""
+    if model not in _FREIE_GROESSE_MODELLE or not width or not height:
+        return False
+    w, h = int(width), int(height)
+    if w % 16 or h % 16 or max(w, h) > 3840:
+        return False
+    if max(w, h) > 3 * min(w, h):
+        return False
+    return 655_360 <= w * h <= 8_294_400
 
 
 def is_openai_image_model(model: str) -> bool:
@@ -209,7 +244,7 @@ def _abo_geeignet(request: "ImageGenRequest") -> tuple:
     Versprechen halten kann: exakte Groesse, keine Referenzbilder."""
     if (request.route or "auto") != "auto":
         return False, "route"
-    modell = MODEL_MAPPING.get(request.model or "gpt-image-2", request.model or "")
+    modell = MODEL_MAPPING.get(request.model or OPENAI_BILD_VORGABE, request.model or "")
     if not is_openai_image_model(modell):
         return False, "model"
     if request.reference_image_urls:
@@ -383,7 +418,7 @@ async def generate_with_openai_image(
     grant_scope: Optional[str] = None,
     ttl_hours: Optional[int] = None,
 ) -> dict:
-    """Generate image via OpenAI Images API (gpt-image-2 / gpt-image-1 / dall-e-3).
+    """Generate image via OpenAI Images API (gpt-image-2.6-* / dall-e-3).
 
     Pay-as-you-go: the route handler enforces ``_check_openai_billing_gate``
     before this is reached. Sizes accepted by the OpenAI Images API:
@@ -417,7 +452,7 @@ async def generate_with_openai_image(
                 "model": model,
                 "hint": (
                     "dall-e-3 does not support /v1/images/edits. Switch to "
-                    "gpt-image-2 (or gpt-image-1 / gpt-image-1.5) to use "
+                    "gpt-image-2.6-sunburst (or -flare) to use "
                     "reference_image_urls as visual style anchors."
                 ),
             },
@@ -440,7 +475,9 @@ async def generate_with_openai_image(
         (1024, 1024), (1536, 1024), (1024, 1536),
         (2048, 2048), (2048, 1152), (3840, 2160), (2160, 3840),
     }
-    if width and height and (width, height) in supported_sizes:
+    if width and height and (
+        (width, height) in supported_sizes or freie_groesse_zulaessig(model, width, height)
+    ):
         size = f"{width}x{height}"
     elif aspect_ratio:
         ar_map = {
@@ -527,10 +564,10 @@ async def generate_with_openai_image(
             "output_format": "png",
             "quality": requested_quality,
         }
-        # background: gpt-image-1 + gpt-image-1.5 support "transparent" (real
-        # alpha, empirically verified 2026-07-21); gpt-image-2 REJECTS it with
-        # 400 "Transparent background is not supported for this model" — only
-        # auto/opaque there. dall-e-3 takes no background param at all.
+        # background: gpt-image-2 lehnte "transparent" ab ("not supported for
+        # this model"). Die 2.6-Familie nimmt es an, auch zusammen mit 4K
+        # (Validierung gemessen 11.11.2026, #2699); verlangt wird nur PNG
+        # oder WebP, und wir senden PNG. dall-e-3 kennt den Parameter nicht.
         if model.startswith("gpt-image-"):
             payload["background"] = background or "auto"
 
@@ -620,7 +657,11 @@ async def generate_with_openai_image(
     # Track AFTER successful save so a half-failed call doesn't bill
     # against the cap. Federation-shared via openai_cost_tracker.
     from ai.services.openai_cost_tracker import openai_cost_tracker
-    openai_cost_tracker.track_image(model=model, num_images=1)
+    from ai.services.openai_cost_tracker import kosten_aus_usage
+    openai_cost_tracker.track_image(
+        model=model, num_images=1,
+        cost_usd=kosten_aus_usage(model, body.get("usage")),
+    )
 
     # Was OpenAI selbst abgerechnet hat, protokollieren — der Zaehler
     # rechnet je Bild mit einem festen Satz und kennt weder Groesse noch
@@ -674,8 +715,8 @@ def _check_openai_billing_gate(confirmed: Optional[bool], endpoint: str) -> None
                 "hint": (
                     "OpenAI Images API is pay-as-you-go billed against "
                     "OPENAI_API_KEY (separate from MiniMax + GCP caps). "
-                    "Approx pricing: gpt-image-2 high-q 2048² ≈ $0.15-0.20, "
-                    "gpt-image-1 medium ≈ $0.05. Send "
+                    "gpt-image-2.6-* is billed per token (image output "
+                    "$30/M); gpt-image-2 high-q 2048² was ≈ $0.15-0.20. Send "
                     "`confirm_api_billing: true` to acknowledge."
                 ),
             },
@@ -915,7 +956,7 @@ async def generate_with_gemini(
                     "deliberately, since the 2026-05-30 GCP cost incident."
                 ),
                 "use_instead": (
-                    "model='gpt-image-2' (or gpt-image-1.5 / gpt-image-1 for "
+                    "model='gpt-image-2.6-sunburst' (also for "
                     "background='transparent') with confirm_api_billing=true"
                 ),
             },
@@ -1105,7 +1146,7 @@ async def _generate_image_einmal(
                         "model": model_name,
                         "hint": (
                             "reference_image_urls is only wired for "
-                            "gpt-image-2 / gpt-image-1 / gpt-image-1.5 "
+                            "gpt-image-2.6-sunburst / -flare (and their aliases) "
                             "(OpenAI /v1/images/edits) and codex-imagegen "
                             "(subscription, max 4). Pick one of those, "
                             "or drop reference_image_urls and use the model "
@@ -1228,7 +1269,7 @@ async def _generate_image_einmal(
                 result = None
 
         if result is None and (is_openai_image_model(model_name) or is_openai_image_model(actual_model)):
-            # OpenAI Images API (gpt-image-2, gpt-image-1, gpt-image-1.5,
+            # OpenAI Images API (gpt-image-2.6-* plus aliases of retired names,
             # dall-e-3) — pay-as-you-go, billed against OPENAI_API_KEY.
             routed_via = "api"
             _check_openai_billing_gate(
@@ -1356,26 +1397,40 @@ async def list_image_models():
                 "billing": "payg"
             },
             {
-                "id": "gpt-image-2",
-                "name": "GPT Image 2 (OpenAI)",
+                "id": "gpt-image-2.6-sunburst",
+                "name": "GPT Image 2.6 Sunburst (OpenAI)",
                 "provider": "OpenAI",
                 "description": (
-                    "OpenAI gpt-image-2 — best for diagrams, photoreal, up to 4K. "
-                    "Pay-as-you-go (~$0.15-0.20/image high-quality 2048²). "
+                    "Default paid image model: detail work and precise edits, "
+                    "up to 4K, background=transparent supported (also at 4K). "
+                    "Billed per token (image output $30/M). "
+                    "Requires confirm_api_billing=true."
+                ),
+                "default_paid": True,
+                "billing": "payg"
+            },
+            {
+                "id": "gpt-image-2.6-flare",
+                "name": "GPT Image 2.6 Flare (OpenAI)",
+                "provider": "OpenAI",
+                "description": (
+                    "Same limits as Sunburst, built for fast iteration. "
                     "Requires confirm_api_billing=true."
                 ),
                 "billing": "payg"
             },
             {
-                "id": "gpt-image-1",
-                "name": "GPT Image 1 (OpenAI, legacy)",
+                "id": "gpt-image-2",
+                "name": "GPT Image 2 (alias)",
                 "provider": "OpenAI",
                 "description": (
-                    "Older gpt-image-1 — cheaper (~$0.05/image medium). "
-                    "Supports native transparent alpha via background=transparent "
-                    "(so does gpt-image-1.5; gpt-image-2 does NOT). "
-                    "Requires confirm_api_billing=true."
+                    "Alias for gpt-image-2.6-sunburst. OpenAI retires "
+                    "gpt-image-2 on 2027-02-10; gpt-image-1.5 (2026-12-01) "
+                    "and gpt-image-1 (retired 2026-10-23) map to Sunburst too, "
+                    "gpt-image-1-mini to Flare. actual_model in the response "
+                    "names the model that ran."
                 ),
+                "alias_of": "gpt-image-2.6-sunburst",
                 "billing": "payg"
             }
         ]

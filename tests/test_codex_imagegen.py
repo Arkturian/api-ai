@@ -93,7 +93,7 @@ def test_4k_wird_abgewiesen():
     with pytest.raises(HTTPException) as exc:
         ci.pruefe_groessenwunsch("4K", 1024, 1024)
     assert exc.value.status_code == 422
-    assert exc.value.detail["paid_alternative"] == "gpt-image-2"
+    assert exc.value.detail["paid_alternative"] == "gpt-image-2.6-sunburst"
 
 
 def test_kante_ueber_2048_wird_abgewiesen():

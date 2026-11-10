@@ -44,7 +44,12 @@ logger = logging.getLogger(__name__)
 # Image API: priced per generated image (size + quality bands).
 # Conservative defaults used here; OpenAI's actual bill rounds per call.
 OPENAI_PRICING = {
-    # gpt-image-2 (current flagship, photo+illustration)
+    # gpt-image-2.6 (Vorgabe seit #2699) rechnet OpenAI je Token ab, siehe
+    # OPENAI_TOKEN_PRICING. per_image gilt nur, wenn die Antwort keine
+    # usage traegt, und liegt bewusst beim alten Durchschnitt (nicht zu tief).
+    "gpt-image-2.6-sunburst": {"per_image": 0.175},
+    "gpt-image-2.6-flare":    {"per_image": 0.175},
+    # gpt-image-2 (abgeschaltet 10.02.2027, bei uns Alias auf sunburst)
     "gpt-image-2":      {"per_image": 0.175},  # ~$0.15-0.20 high-q 2048², avg
     "gpt-image-1.5":    {"per_image": 0.10},
     "gpt-image-1":      {"per_image": 0.05},
@@ -59,6 +64,41 @@ OPENAI_PRICING = {
     # this dict explicitly.
     "default":          {"per_image": 0.175},
 }
+
+# USD je 1 Mio. Token (Modellseiten developers.openai.com, gelesen 11.11.2026).
+OPENAI_TOKEN_PRICING = {
+    "gpt-image-2.6-sunburst": {"text_in": 5.0, "image_in": 8.0, "image_out": 30.0},
+    "gpt-image-2.6-flare":    {"text_in": 5.0, "image_in": 8.0, "image_out": 30.0},
+}
+
+# Obergrenze fuer einen einzelnen Aufruf: ein kaputtes usage-Feld darf den
+# Monatsdeckel nicht auf einen Schlag sprengen (und keine negativen Kosten).
+_MAX_KOSTEN_JE_BILD_USD = 5.0
+
+
+def kosten_aus_usage(model: str, usage: Optional[dict]) -> Optional[float]:
+    """USD aus der usage der Antwort, oder None (dann gilt per_image).
+
+    usage: {input_tokens, output_tokens, input_tokens_details: {text_tokens,
+    image_tokens}}. Fehlen die Details, zaehlt die ganze Eingabe als Text.
+    """
+    preise = OPENAI_TOKEN_PRICING.get(model)
+    if not preise or not isinstance(usage, dict):
+        return None
+    try:
+        aus = float(usage.get("output_tokens") or 0)
+        ein = float(usage.get("input_tokens") or 0)
+        det = usage.get("input_tokens_details") or {}
+        bild_ein = float(det.get("image_tokens") or 0)
+        text_ein = float(det.get("text_tokens") if det.get("text_tokens") is not None else ein - bild_ein)
+    except (TypeError, ValueError):
+        return None
+    if aus <= 0:
+        return None
+    usd = (text_ein * preise["text_in"] + bild_ein * preise["image_in"]
+           + aus * preise["image_out"]) / 1_000_000
+    return min(max(usd, 0.0), _MAX_KOSTEN_JE_BILD_USD)
+
 
 # EUR/USD exchange rate (approximate, matches cost_tracker.py)
 EUR_USD_RATE = 1.05
@@ -167,7 +207,11 @@ class OpenAICostTracker:
 
     # ── Cost calculation per call ─────────────────────────────────────
 
-    def _cost_for_call(self, model: str, num_images: int = 1) -> tuple[float, float]:
+    def _cost_for_call(self, model: str, num_images: int = 1,
+                       cost_usd: Optional[float] = None) -> tuple[float, float]:
+        if cost_usd is not None:
+            cost_usd = min(max(float(cost_usd), 0.0), _MAX_KOSTEN_JE_BILD_USD * max(num_images, 1))
+            return cost_usd, cost_usd / EUR_USD_RATE
         pricing = OPENAI_PRICING.get(model, OPENAI_PRICING["default"])
         cost_usd = pricing.get("per_image", 0.0) * num_images
         cost_eur = cost_usd / EUR_USD_RATE
@@ -175,7 +219,8 @@ class OpenAICostTracker:
 
     # ── Public track method ───────────────────────────────────────────
 
-    def track_image(self, model: str, num_images: int = 1) -> None:
+    def track_image(self, model: str, num_images: int = 1,
+                    cost_usd: Optional[float] = None) -> None:
         """Track an OpenAI Image generation. Routes to master if client,
         otherwise tracks locally. See ``_track_local`` for the actual
         accounting logic.
@@ -184,17 +229,18 @@ class OpenAICostTracker:
             return
         if self.master_url and self.shared_secret:
             try:
-                self._post_to_master(model=model, num_images=num_images)
+                self._post_to_master(model=model, num_images=num_images, cost_usd=cost_usd)
                 return
             except Exception as e:
                 logger.error(
                     f"openai_cost_tracker: master post failed ({e}); "
                     f"falling back to local — cap may temporarily lag"
                 )
-        self._track_local(model, num_images)
+        self._track_local(model, num_images, cost_usd=cost_usd)
 
-    def _track_local(self, model: str, num_images: int = 1) -> None:
-        cost_usd, cost_eur = self._cost_for_call(model, num_images)
+    def _track_local(self, model: str, num_images: int = 1,
+                     cost_usd: Optional[float] = None) -> None:
+        cost_usd, cost_eur = self._cost_for_call(model, num_images, cost_usd)
         if cost_usd <= 0:
             return
         with self._data_lock:
@@ -359,7 +405,8 @@ class OpenAICostTracker:
 
     # ── Federation-shared master/client HTTP plumbing ─────────────────
 
-    def _post_to_master(self, model: str, num_images: int = 1) -> None:
+    def _post_to_master(self, model: str, num_images: int = 1,
+                        cost_usd: Optional[float] = None) -> None:
         url = f"{self.master_url}/internal/openai-cost-shared-state"
         with httpx.Client(timeout=5.0) as client:
             r = client.post(
@@ -367,6 +414,7 @@ class OpenAICostTracker:
                 json={
                     "model": model,
                     "num_images": num_images,
+                    "cost_usd": cost_usd,
                     "source_host": os.environ.get("API_AI_HOST_KEY")
                     or os.uname().nodename.split(".")[0],
                 },

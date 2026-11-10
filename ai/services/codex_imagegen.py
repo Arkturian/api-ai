@@ -63,8 +63,8 @@ def pruefe_groessenwunsch(image_size: Optional[str], width: Optional[int], heigh
                 "error": "size_not_controllable_on_subscription_path",
                 "hint": ("Der Abo-Pfad (codex image_gen) laesst keine Pixelgroesse vorgeben; "
                          "4K verlangt, ~1,6 MP geliefert (gemessen 12.09.). Fuer 4K "
-                         "model=gpt-image-2 mit confirm_api_billing=true nehmen."),
-                "paid_alternative": "gpt-image-2",
+                         "model=gpt-image-2.6-sunburst mit confirm_api_billing=true nehmen."),
+                "paid_alternative": "gpt-image-2.6-sunburst",
             },
         )
     for wert in (width, height):
@@ -75,7 +75,7 @@ def pruefe_groessenwunsch(image_size: Optional[str], width: Optional[int], heigh
                     "error": "size_not_controllable_on_subscription_path",
                     "requested": {"width": width, "height": height},
                     "max_edge_observed": MAX_KANTE_ERWARTBAR,
-                    "paid_alternative": "gpt-image-2",
+                    "paid_alternative": "gpt-image-2.6-sunburst",
                 },
             )
 
