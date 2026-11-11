@@ -821,9 +821,75 @@ CODEX_OHNE_WERKZEUGE = ["-c", "features.shell_tool=false",
                         "-c", "features.plugins=false"]
 
 
+# Reiner Textaufruf (CloudV2, 11.11.): eigene Minimal-Instruktion statt des
+# codex-Systemprompts und ohne Umgebungs-/Rechte-/Apps-Hinweise. Gemessen:
+# Grundkontext 10,6k -> 6,9k Tokens, Ausgabe unveraendert. --ephemeral: keine
+# Sitzungsdateien, der Text-Home bleibt klein.
+CODEX_TEXT_ANWEISUNG = str(Path(__file__).resolve().parents[1] / "data" / "codex_text_anweisung.md")
+CODEX_NUR_TEXT = ["--ephemeral",
+                  "-c", f"model_instructions_file={CODEX_TEXT_ANWEISUNG}",
+                  "-c", "include_environment_context=false",
+                  "-c", "include_permissions_instructions=false",
+                  "-c", "include_apps_instructions=false"]
+
+
 def _codex_werkzeug_args(tools: bool) -> list:
-    """tools=False -> codex ohne Shell, Code-Modus, Apps und Plugins."""
-    return [] if tools else list(CODEX_OHNE_WERKZEUGE)
+    """tools=False -> codex ohne Shell, Code-Modus, Apps und Plugins, mit
+    Minimal-Instruktion und ohne Sitzungsdateien."""
+    return [] if tools else list(CODEX_OHNE_WERKZEUGE) + list(CODEX_NUR_TEXT)
+
+
+def _codex_text_home(haupt: str) -> Optional[str]:
+    """Eigenes, schlankes CODEX_HOME fuer tools=false (CloudV2, 11.11.).
+
+    Anlass: Im gemeinsamen codex-Verzeichnis (6,2 GB Zustand, 2,4 GB Verlauf)
+    legte codex die Sitzung eines Vorlese-Aufrufs erst nach 49 s an; zwei
+    gleichzeitig wartende Prozesse wurden in derselben Sekunde frei.
+
+    Die Anmeldung ist ein LINK auf <haupt>/auth.json, keine Kopie: eine
+    Kopie erneuert ihr Token getrennt, das Refresh-Token rotiert, und eine
+    der beiden Seiten meldet sich dann mit 401. Der Link folgt auch einem
+    Kontowechsel im Hauptverzeichnis. Scheitert etwas, None: der Aufruf
+    laeuft dann wie bisher im Hauptverzeichnis.
+    """
+    try:
+        ziel = (os.getenv("CODEX_TEXT_HOME") or "").strip() or haupt.rstrip("/") + "-text"
+        quelle = os.path.join(haupt, "auth.json")
+        if not os.path.exists(quelle):
+            return None
+        os.makedirs(ziel, mode=0o700, exist_ok=True)
+        link = os.path.join(ziel, "auth.json")
+        _codex_text_anmeldung_heilen(link, quelle)
+        if not os.path.islink(link) or os.readlink(link) != quelle:
+            if os.path.lexists(link):
+                os.remove(link)
+            os.symlink(quelle, link)
+        benutzer = (os.getenv("CODEX_RUN_AS_USER") or "").strip()
+        if benutzer and os.geteuid() == 0:
+            import pwd
+            pw = pwd.getpwnam(benutzer)
+            if os.stat(ziel).st_uid != pw.pw_uid:
+                os.chown(ziel, pw.pw_uid, pw.pw_gid)
+            os.lchown(link, pw.pw_uid, pw.pw_gid)
+        return ziel
+    except Exception as e:  # nie den Aufruf verhindern
+        logger.warning("codex Text-Home nicht nutzbar (%s), nehme %s", e, haupt)
+        return None
+
+
+def _codex_text_anmeldung_heilen(link: str, quelle: str) -> None:
+    """Hat codex den Link durch eine Datei ersetzt (Token erneuert und per
+    Umbenennen geschrieben), gehoert die NEUERE Anmeldung zurueck an die
+    Quelle, sonst gilt dort ein verbrauchtes Refresh-Token."""
+    if not os.path.lexists(link) or os.path.islink(link):
+        return
+    echt = os.path.realpath(quelle)
+    if os.path.getmtime(link) > os.path.getmtime(echt):
+        import shutil
+        shutil.copy2(link, echt + ".neu")
+        os.replace(echt + ".neu", echt)
+        logger.warning("codex Text-Home: erneuerte Anmeldung nach %s zurueckgeschrieben", echt)
+    os.remove(link)
 
 
 def _weise_tools_aus_ab(prompt: "Prompt", endpoint: str) -> None:
@@ -1671,6 +1737,11 @@ async def _chatgpt_einmal(
 
             # Remove OPENAI_API_KEY so Codex CLI uses OAuth credentials
             env.pop("OPENAI_API_KEY", None)
+            if not prompt.tools:
+                haupt = env.get("CODEX_HOME") or os.path.join(cli_home, ".codex")
+                text_home = _codex_text_home(haupt)
+                if text_home:
+                    env["CODEX_HOME"] = text_home
 
             # Own-pgid + killpg-on-timeout — see _run_cli_with_pgid docstring
             result = _run_cli_with_pgid(cmd, env=env, timeout=300, input=prompt_text)
