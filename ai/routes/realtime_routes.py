@@ -51,11 +51,11 @@ import os
 import re
 import time
 import uuid
-from typing import Any, List, Optional
+from typing import Annotated, Any, List, Optional
 
 import httpx
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Header, Path, UploadFile
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, WithJsonSchema
 
 from ..services.realtime_grant_verifier import (
     GrantError,
@@ -559,6 +559,13 @@ class RealtimeUsageReport(BaseModel):
     )
 
 
+# Zeitpunkt "ISO-String oder Epoch-ms", unveraendert gespeichert. Als
+# Optional[Any] erschien das im OpenAPI als anyOf [{}, null]; der C#-Generator
+# machte daraus den Typ `AnyOf`, den es nicht gibt (SDK-PR #3 kompilierte
+# nicht, 11.11.2026). Die Pruefung bleibt gleich, nur das Schema ist offen.
+_Zeitpunkt = Annotated[Optional[Any], WithJsonSchema({"description": "ISO-Zeitstring oder Epoch-ms, unveraendert gespeichert."})]
+
+
 class DevlogLine(BaseModel):
     """One narration-log line. Schema mirrors what CloudV2's FE captures
     per Realtime turn (Content-Post #1215, narration analysis fenster).
@@ -570,7 +577,7 @@ class DevlogLine(BaseModel):
     ``kind`` mirrors the context-segment context_kind enum.
     """
 
-    ts: Optional[Any] = None  # ISO string or epoch ms — kept opaque
+    ts: _Zeitpunkt = None  # ISO string or epoch ms — kept opaque
     role: Optional[str] = None
     kind: Optional[str] = None
     agent: Optional[str] = None
@@ -610,11 +617,11 @@ class DevlogUpsertRequest(BaseModel):
         default=None,
         description="Name of the agent the operator is focused on.",
     )
-    started_at: Optional[Any] = Field(
+    started_at: _Zeitpunkt = Field(
         default=None,
         description="Epoch-ms or ISO when the capture started.",
     )
-    ended_at: Optional[Any] = Field(
+    ended_at: _Zeitpunkt = Field(
         default=None,
         description="Epoch-ms or ISO when the capture finished (null mid-run).",
     )
