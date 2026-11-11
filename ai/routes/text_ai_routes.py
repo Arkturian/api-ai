@@ -684,6 +684,12 @@ class Prompt(BaseModel):
     # das Feld mit 422 abgewiesen statt still verschluckt, sonst haelt
     # der Aufrufer Prosa fuer JSON.
     response_format: Optional[Dict[str, Any]] = None
+    # Werkzeuge (nur /ai/chatgpt, und /ai/claude ueber Codex). False schaltet
+    # in codex Shell und unified_exec ab: reiner Textaufruf, eine Modellrunde.
+    # Anlass 11.11. (CloudV2, Vorlesen): "in 150 Woertern" bei effort high
+    # liess das Modell per Shell nachzaehlen, 3 Runden, 42k Tokens, 90 s.
+    # Default True = bisheriges Verhalten. Auf anderen CLI-Pfaden 422.
+    tools: bool = True
     # request_id (nur /ai/chatgpt): dauerhafter Status + Idempotenz nach dem
     # narrate-Muster (Story, PM-Entscheidung 13.09.): ein Timeout nach
     # ausgefuehrtem Auftrag heisst "Ergebnis wiederfinden", nicht
@@ -803,6 +809,30 @@ def _pruefe_response_format(prompt: "Prompt", endpoint: str) -> Optional[Dict[st
                 },
             )
     return rf
+
+
+CODEX_OHNE_WERKZEUGE = ["-c", "features.shell_tool=false",
+                        "-c", "features.unified_exec=false"]
+
+
+def _codex_werkzeug_args(tools: bool) -> list:
+    """tools=False -> codex ohne Shell (gemessen 11.11.: Modell meldet dann
+    KEIN_WERKZEUG statt einen Befehl auszufuehren)."""
+    return [] if tools else list(CODEX_OHNE_WERKZEUGE)
+
+
+def _weise_tools_aus_ab(prompt: "Prompt", endpoint: str) -> None:
+    """Pfade ohne Schalter: tools=false waere dort still wirkungslos -> 422."""
+    if getattr(prompt, "tools", True):
+        return
+    raise HTTPException(
+        status_code=422,
+        detail={
+            "error": "tools_switch_unsupported_on_endpoint",
+            "endpoint": endpoint,
+            "hint": "tools=false gibt es nur auf /ai/chatgpt (und /ai/claude ueber Codex).",
+        },
+    )
 
 
 def _weise_response_format_ab(prompt: "Prompt", endpoint: str) -> None:
@@ -952,6 +982,7 @@ async def claude_endpoint(
     from ..services.claude_cost_tracker import claude_cost_tracker
 
     _weise_response_format_ab(prompt, endpoint="claude")
+    _weise_tools_aus_ab(prompt, endpoint="claude")
     model = model or prompt.model
 
     try:
@@ -1498,7 +1529,8 @@ async def _chatgpt_einmal(
         # model to actually fetch URLs in the prompt instead of
         # filename-guessing.
         cmd = (["codex", "exec", "--json", "--skip-git-repo-check"]
-               + _codex_sandbox_args(prompt.sandbox))
+               + _codex_sandbox_args(prompt.sandbox)
+               + _codex_werkzeug_args(prompt.tools))
 
         # Only add model if explicitly specified by user
         # (ChatGPT subscription has limited model access, let Codex use its default)
@@ -1858,6 +1890,7 @@ async def grok_endpoint(
     import json as json_module
 
     _weise_response_format_ab(prompt, endpoint="grok")
+    _weise_tools_aus_ab(prompt, endpoint="grok")
     model = model or prompt.model
 
     try:
@@ -2179,6 +2212,7 @@ async def gemini_endpoint(
         return weiter
 
     _weise_response_format_ab(prompt, endpoint="gemini")
+    _weise_tools_aus_ab(prompt, endpoint="gemini")
     model = model or prompt.model
 
     # Extract prompt text and image paths
