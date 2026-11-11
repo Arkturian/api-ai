@@ -76,13 +76,29 @@ OPENAI_TOKEN_PRICING = {
 _MAX_KOSTEN_JE_BILD_USD = 5.0
 
 
+def _familienpreis(model: str) -> Optional[dict]:
+    """Ein neueres gpt-image-Modell, das hier noch fehlt (der Katalog waehlt
+    es automatisch), rechnet mit dem Satz der neuesten bekannten Version,
+    statt auf den Pauschalsatz je Bild zu fallen. Mit Warnung im Log."""
+    from ai.services.openai_bildmodell_katalog import version_von
+    v = version_von(model)
+    if not v:
+        return None
+    bekannt = sorted(((version_von(k), k) for k in OPENAI_TOKEN_PRICING if version_von(k)),
+                     reverse=True)
+    if not bekannt or v < bekannt[0][0]:
+        return None
+    logger.warning("Kein Tokenpreis fuer %s hinterlegt, rechne mit %s", model, bekannt[0][1])
+    return OPENAI_TOKEN_PRICING[bekannt[0][1]]
+
+
 def kosten_aus_usage(model: str, usage: Optional[dict]) -> Optional[float]:
     """USD aus der usage der Antwort, oder None (dann gilt per_image).
 
     usage: {input_tokens, output_tokens, input_tokens_details: {text_tokens,
     image_tokens}}. Fehlen die Details, zaehlt die ganze Eingabe als Text.
     """
-    preise = OPENAI_TOKEN_PRICING.get(model)
+    preise = OPENAI_TOKEN_PRICING.get(model) or _familienpreis(model)
     if not preise or not isinstance(usage, dict):
         return None
     try:
