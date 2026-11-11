@@ -685,7 +685,7 @@ class Prompt(BaseModel):
     # der Aufrufer Prosa fuer JSON.
     response_format: Optional[Dict[str, Any]] = None
     # Werkzeuge (nur /ai/chatgpt, und /ai/claude ueber Codex). False schaltet
-    # in codex Shell und unified_exec ab: reiner Textaufruf, eine Modellrunde.
+    # in codex Shell, Code-Modus, Apps und Plugins ab: reiner Textaufruf.
     # Anlass 11.11. (CloudV2, Vorlesen): "in 150 Woertern" bei effort high
     # liess das Modell per Shell nachzaehlen, 3 Runden, 42k Tokens, 90 s.
     # Default True = bisheriges Verhalten. Auf anderen CLI-Pfaden 422.
@@ -811,13 +811,18 @@ def _pruefe_response_format(prompt: "Prompt", endpoint: str) -> Optional[Dict[st
     return rf
 
 
+# Nur Shell aus reicht nicht: Gemessen 11.11. zaehlte das Modell dann per
+# Code-Modus (JavaScript-Werkzeug `exec`) weiter. Erst alle fuenf aus ergeben
+# null Werkzeugaufrufe, und der Grundkontext sinkt von ~13,7k auf ~10,6k Tokens.
 CODEX_OHNE_WERKZEUGE = ["-c", "features.shell_tool=false",
-                        "-c", "features.unified_exec=false"]
+                        "-c", "features.unified_exec=false",
+                        "-c", "features.code_mode_host=false",
+                        "-c", "features.apps=false",
+                        "-c", "features.plugins=false"]
 
 
 def _codex_werkzeug_args(tools: bool) -> list:
-    """tools=False -> codex ohne Shell (gemessen 11.11.: Modell meldet dann
-    KEIN_WERKZEUG statt einen Befehl auszufuehren)."""
+    """tools=False -> codex ohne Shell, Code-Modus, Apps und Plugins."""
     return [] if tools else list(CODEX_OHNE_WERKZEUGE)
 
 

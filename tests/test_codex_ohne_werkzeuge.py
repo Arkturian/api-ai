@@ -3,8 +3,8 @@
 Der echte Fehler: Prosa-Zusammenfassung "in 150 Woertern" bei effort high.
 codex zaehlte die Woerter per Shell nach (python, dann python3), drei
 Modellrunden, 42k Eingabe-Tokens, 90 s, cloud-api brach nach 30 s mit 502 ab.
-Gemessen: mit features.shell_tool=false und unified_exec=false antwortet das
-Modell auf "fuehre uname -n aus" mit KEIN_WERKZEUG statt den Befehl auszufuehren.
+Nur Shell aus reichte nicht: das Modell zaehlte dann per Code-Modus (JS-exec)
+weiter. Gemessen mit allen fuenf Schaltern aus: null Werkzeugaufrufe.
 """
 import asyncio
 import types
@@ -16,7 +16,9 @@ from ai.routes import text_ai_routes as t
 
 ERFOLG = ('{"type":"item.completed","item":{"type":"agent_message","text":"OK"}}\n'
           '{"type":"turn.completed","usage":{"input_tokens":5,"output_tokens":1}}\n')
-AUS = ["-c", "features.shell_tool=false", "-c", "features.unified_exec=false"]
+AUS = ["-c", "features.shell_tool=false", "-c", "features.unified_exec=false",
+       "-c", "features.code_mode_host=false", "-c", "features.apps=false",
+       "-c", "features.plugins=false"]
 
 
 def _verdrahten(monkeypatch):
