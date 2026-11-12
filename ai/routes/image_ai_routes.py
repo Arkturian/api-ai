@@ -109,7 +109,10 @@ class ImageGenRequest(BaseModel):
         default=None,
         description=(
             "Reference images as storage object IDs instead of URLs. Merged "
-            "after reference_image_urls; same limits."
+            "after reference_image_urls; same limits. PUBLIC files only: "
+            "api-ai fetches without the service key (#2659), and assets_share "
+            "to the agent AiApi does not grant the service. For private files "
+            "pass a signed URL from assets_download in reference_image_urls."
         ),
     )
 
