@@ -37,4 +37,4 @@ def test_andere_clis_bleiben(monkeypatch):
 def test_verdrahtung():
     import inspect
     assert "cmd = codex_als_benutzer(cmd, env)" in inspect.getsource(t._run_cli_with_pgid)
-    assert 'codex_als_benutzer(["codex", "debug", "models"], env)' in inspect.getsource(t._codex_katalog)
+    assert 'codex_als_benutzer(["codex", "debug", "models"], env)' in inspect.getsource(t._codex_katalog_lesen)

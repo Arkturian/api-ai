@@ -35,7 +35,7 @@ def _verdrahten(monkeypatch, tmp_path=None):
         monkeypatch.delenv("CODEX_TEXT_HOME", raising=False)
         monkeypatch.delenv("CODEX_RUN_AS_USER", raising=False)
 
-    def fake_run(cmd, env=None, timeout=None, input=None):
+    def fake_run(cmd, env=None, timeout=None, input=None, phasen=None):
         laeufe.append(list(cmd))
         umgebungen.append(dict(env or {}))
         return types.SimpleNamespace(returncode=0, stdout=ERFOLG, stderr="")

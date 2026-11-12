@@ -74,14 +74,15 @@ def test_katalog_wird_gecacht_und_bei_fehler_nicht_geblockt(monkeypatch):
         return _R()
 
     monkeypatch.setattr(t.subprocess, "run", fake_run)
-    t._codex_katalog_cache.update({"at": 0.0, "katalog": None})
+    monkeypatch.setattr(t, "_codex_text_home", lambda haupt: None)
+    t._codex_katalog_cache.update({"at": 0.0, "katalog": None, "fehl_at": None})
     k1 = t._codex_katalog(); k2 = t._codex_katalog()
     assert k1 and k1 is k2 and len(calls) == 1          # zweiter Aufruf aus dem Cache
 
     def boom(cmd, **kw):
         raise RuntimeError("kein codex")
     monkeypatch.setattr(t.subprocess, "run", boom)
-    t._codex_katalog_cache.update({"at": 0.0, "katalog": None})
+    t._codex_katalog_cache.update({"at": 0.0, "katalog": None, "fehl_at": None})
     assert t._codex_katalog() is None                     # kein Katalog, kein Crash
 
 

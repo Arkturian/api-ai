@@ -141,7 +141,85 @@ def bilder_fuer_codex_benutzer(pfade):
     return neu, kopien
 
 
-def _run_cli_with_pgid(cmd, env, timeout=300, cwd="/", input=None):
+def _jsonl_phasen(zeilen_mit_zeit) -> dict:
+    """[(sekunden_seit_start, zeile)] aus `codex exec --json` -> erste Zeit je
+    Ereignis: start (thread.started), turn (turn.started), antwort (erste
+    agent_message), fertig (turn.completed/failed). Rein, damit testbar."""
+    import json as _json
+    out: dict = {}
+    for t, zeile in zeilen_mit_zeit:
+        try:
+            ev = _json.loads(zeile)
+        except Exception:
+            continue
+        typ = ev.get("type") if isinstance(ev, dict) else None
+        if typ == "thread.started":
+            out.setdefault("start", t)
+        elif typ == "turn.started":
+            out.setdefault("turn", t)
+        elif typ == "item.completed" and (ev.get("item") or {}).get("type") == "agent_message":
+            out.setdefault("antwort", t)
+        elif typ in ("turn.completed", "turn.failed"):
+            out.setdefault("fertig", t)
+    return out
+
+
+def _mit_phasen_warten(proc, cmd, input, timeout, phasen: dict):
+    """Wie communicate(), aber stdout zeilenweise mit Zeitstempel, damit ein
+    langsamer Lauf zeigt, WO die Zeit liegt (CLI-Start, Warten aufs Modell,
+    Ausgabe) — CloudV2 12.11.: 20 bis 113 s ohne Befund. Timeout: ganze
+    Prozessgruppe toeten, dann TimeoutExpired wie subprocess.run."""
+    import signal as _signal
+    import threading as _th
+    import time as _tm
+    t0 = _tm.monotonic()
+    zeilen: list = []
+    fehler: list = []
+
+    def _lies_out():
+        try:
+            for z in proc.stdout:
+                zeilen.append((round(_tm.monotonic() - t0, 2), z))
+        except (ValueError, OSError):
+            pass
+
+    def _lies_err():
+        try:
+            fehler.append(proc.stderr.read())
+        except (ValueError, OSError):
+            pass
+
+    leser = [_th.Thread(target=_lies_out, daemon=True), _th.Thread(target=_lies_err, daemon=True)]
+    for th in leser:
+        th.start()
+    if input is not None and proc.stdin is not None:
+        try:
+            proc.stdin.write(input)
+            proc.stdin.close()
+        except (BrokenPipeError, OSError, ValueError):
+            pass
+    try:
+        proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(os.getpgid(proc.pid), _signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            pass
+        phasen.update(_jsonl_phasen(zeilen))
+        raise subprocess.TimeoutExpired(cmd, timeout)
+    for th in leser:
+        th.join(timeout=5)
+    phasen.update(_jsonl_phasen(zeilen))
+    phasen["gesamt"] = round(_tm.monotonic() - t0, 2)
+    return subprocess.CompletedProcess(args=cmd, returncode=proc.returncode,
+                                       stdout="".join(z for _, z in zeilen), stderr="".join(fehler))
+
+
+def _run_cli_with_pgid(cmd, env, timeout=300, cwd="/", input=None, phasen=None):
     """Run a CLI subprocess as its own process-group leader.
 
     Two reasons we don't just use ``subprocess.run`` here:
@@ -180,6 +258,8 @@ def _run_cli_with_pgid(cmd, env, timeout=300, cwd="/", input=None):
         text=True,
         start_new_session=True,  # own pgid for clean group-kill
     )
+    if phasen is not None:
+        return _mit_phasen_warten(proc, cmd, input, timeout, phasen)
     try:
         stdout, stderr = proc.communicate(input=input, timeout=timeout)
     except subprocess.TimeoutExpired:
@@ -1334,7 +1414,12 @@ async def claude_cost_status(_: str = Depends(require_operator_key)):
 
 
 _CODEX_KATALOG_TTL_S = 3600.0
-_codex_katalog_cache: dict = {"at": 0.0, "katalog": None}
+# Fehlschlag merken: ohne das lief jeder Aufruf erneut (zweimal je 15 s) in
+# den Timeout von `codex debug models` (CloudV2 12.11.: 30 s je Vorlesen).
+_CODEX_KATALOG_FEHL_TTL_S = 300.0
+_codex_katalog_cache: dict = {"at": 0.0, "katalog": None, "fehl_at": None}
+_codex_katalog_lock = __import__("threading").Lock()
+_codex_katalog_auffrischung = {"laeuft": False}
 
 
 def _codex_katalog_parsen(daten: Any) -> Optional[dict]:
@@ -1360,26 +1445,66 @@ def _codex_katalog_parsen(daten: Any) -> Optional[dict]:
         return None
 
 
-def _codex_katalog() -> Optional[dict]:
-    """Effort-Katalog je Modell, 1 h gecacht; None wenn nicht lesbar (dann
-    wird NICHT geblockt — ein fehlender Katalog darf keinen Aufruf kosten)."""
-    import time as _t
-    now = _t.monotonic()
-    if _codex_katalog_cache["katalog"] is not None and now - _codex_katalog_cache["at"] < _CODEX_KATALOG_TTL_S:
-        return _codex_katalog_cache["katalog"]
+def _codex_katalog_lesen() -> Optional[dict]:
+    """Ein Lauf `codex debug models`. Im schlanken Text-Home (0,1 s), nicht
+    im grossen Haupt-Home: dort hing der Aufruf unter Last ueber 15 s
+    (12.11. 10:06-10:31 sechsmal TimeoutExpired); das Abo ist dasselbe."""
     try:
         env = os.environ.copy()
         env["NO_COLOR"] = "1"
+        haupt = env.get("CODEX_HOME") or os.path.join(
+            os.getenv("CLI_HOME") or os.path.expanduser("~"), ".codex")
+        text_home = _codex_text_home(haupt)
+        if text_home:
+            env["CODEX_HOME"] = text_home
         r = subprocess.run(codex_als_benutzer(["codex", "debug", "models"], env), capture_output=True, text=True,
                            timeout=15, env=env)
         import json as _json
-        katalog = _codex_katalog_parsen(_json.loads(r.stdout)) if r.returncode == 0 and r.stdout else None
+        return _codex_katalog_parsen(_json.loads(r.stdout)) if r.returncode == 0 and r.stdout else None
     except Exception as exc:
         logger.warning("codex debug models nicht lesbar: %s: %s", type(exc).__name__, exc)
-        katalog = None
-    if katalog:
-        _codex_katalog_cache.update({"at": now, "katalog": katalog})
+        return None
+
+
+def _codex_katalog_auffrischen() -> Optional[dict]:
+    import time as _t
+    katalog = _codex_katalog_lesen()
+    with _codex_katalog_lock:
+        if katalog:
+            _codex_katalog_cache.update({"at": _t.monotonic(), "katalog": katalog, "fehl_at": None})
+        else:
+            _codex_katalog_cache["fehl_at"] = _t.monotonic()
+        _codex_katalog_auffrischung["laeuft"] = False
     return katalog
+
+
+def _codex_katalog() -> Optional[dict]:
+    """Effort-Katalog je Modell; None wenn nicht lesbar (dann wird NICHT
+    geblockt — ein fehlender Katalog darf keinen Aufruf kosten).
+
+    - frisch (< 1 h): aus dem Speicher.
+    - abgelaufen, aber vorhanden: alter Stand sofort, Auffrischung im
+      Hintergrund — der Aufruf wartet nie auf `codex debug models`.
+    - Fehlschlag in den letzten 5 min: None ohne neuen Versuch.
+    - kalt (nie gelesen): einmal lesen, hoechstens 15 s.
+    """
+    import threading as _th
+    import time as _t
+    now = _t.monotonic()
+    with _codex_katalog_lock:
+        katalog = _codex_katalog_cache["katalog"]
+        if katalog is not None and now - _codex_katalog_cache["at"] < _CODEX_KATALOG_TTL_S:
+            return katalog
+        fehl_at = _codex_katalog_cache.get("fehl_at")
+        kuerzlich_fehl = fehl_at is not None and now - fehl_at < _CODEX_KATALOG_FEHL_TTL_S
+        if katalog is not None or kuerzlich_fehl:
+            if not kuerzlich_fehl and not _codex_katalog_auffrischung["laeuft"]:
+                _codex_katalog_auffrischung["laeuft"] = True
+                _th.Thread(target=_codex_katalog_auffrischen, daemon=True,
+                           name="codex-katalog").start()
+            return katalog
+        _codex_katalog_auffrischung["laeuft"] = True
+    return _codex_katalog_auffrischen()
 
 
 def _codex_vorgabe_modell() -> str:
@@ -1619,8 +1744,12 @@ async def _chatgpt_einmal(
         _vom_aufrufer = selected_model is not None
         _model_requested: Optional[str] = None
         _model_fallback = False
+        # Katalog einmal je Anfrage und im Thread: `codex debug models` ist
+        # ein Subprozess und blockierte sonst die Ereignisschleife (bis 30 s
+        # fuer ALLE Anfragen dieses Workers, 12.11.).
+        _katalog = await asyncio.to_thread(_codex_katalog)
         if _vom_aufrufer and not prompt.model_fallback:
-            _mok, _mavail = _codex_modell_pruefen(_codex_katalog(), selected_model)
+            _mok, _mavail = _codex_modell_pruefen(_katalog, selected_model)
             if not _mok:
                 raise HTTPException(
                     status_code=422,
@@ -1652,7 +1781,7 @@ async def _chatgpt_einmal(
         # reject and the upstream error surfaces verbatim via our 400/502
         # mapping.
         _ok, _effort_applied, _available = _codex_effort_pruefen(
-            _codex_katalog(), selected_model, prompt.effort, _codex_config_effort())
+            _katalog, selected_model, prompt.effort, _codex_config_effort())
         if not _ok:
             raise HTTPException(
                 status_code=422,
@@ -1744,7 +1873,11 @@ async def _chatgpt_einmal(
                     env["CODEX_HOME"] = text_home
 
             # Own-pgid + killpg-on-timeout — see _run_cli_with_pgid docstring
-            result = _run_cli_with_pgid(cmd, env=env, timeout=300, input=prompt_text)
+            phasen: dict = {}
+            result = _run_cli_with_pgid(cmd, env=env, timeout=300, input=prompt_text, phasen=phasen)
+            logger.info("codex Phasen (s ab Start): %s, home=%s",
+                        " ".join(f"{k}={v}" for k, v in phasen.items()),
+                        os.path.basename(env.get("CODEX_HOME") or "") or "?")
             return result
 
         sem = await _acquire_cli_slot("codex")
@@ -1757,7 +1890,7 @@ async def _chatgpt_einmal(
                 if _vom_aufrufer and not prompt.model_fallback:
                     # Angefordert und abgelehnt: der Aufrufer bekommt den
                     # Fehler, nicht ein anderes Modell mit 200.
-                    _, _mavail = _codex_modell_pruefen(_codex_katalog(), selected_model)
+                    _, _mavail = _codex_modell_pruefen(_katalog, selected_model)
                     raise HTTPException(
                         status_code=422,
                         detail={"error": "unsupported_model", "model": selected_model,

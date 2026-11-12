@@ -53,7 +53,7 @@ def test_ohne_katalog_oder_ohne_modell_wird_nicht_geblockt():
 def _verdrahten(monkeypatch, katalog=KATALOG, ablehnen_bei_model=True):
     laeufe = []
 
-    def fake_run(cmd, env=None, timeout=None, input=None):
+    def fake_run(cmd, env=None, timeout=None, input=None, phasen=None):
         laeufe.append(list(cmd))
         stdout = ABLEHNUNG if (ablehnen_bei_model and "--model" in cmd) else ERFOLG
         return types.SimpleNamespace(returncode=0, stdout=stdout, stderr="")
