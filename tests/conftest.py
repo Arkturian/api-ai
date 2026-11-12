@@ -56,6 +56,10 @@ def pytest_configure(config):
         "markers",
         "ohne_kundendaten: prueft den fail-closed-Pfad ohne Marken/Kategorien",
     )
+    config.addinivalue_line(
+        "markers",
+        "ziel_echt: echte Ziel-Sperre (#2744) statt Durchreichen; DNS setzt der Test selbst",
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -71,3 +75,17 @@ def _kein_echter_codex_katalog():
     yield
     _t._codex_katalog_cache.clear()
     _t._codex_katalog_cache.update(alt)
+
+
+@pytest.fixture(autouse=True)
+def _ziel_sperre_durchreichen(request, monkeypatch):
+    """Die Ziel-Sperre (#2744) loest DNS auf und verbindet mit der IP. Tests,
+    die den Schluessel-Weg pruefen, schauen auf `request.url.host` und haben
+    kein Netz: fuer sie reicht die Sperre die Adresse unveraendert durch.
+    Tests mit `@pytest.mark.ziel_echt` pruefen die echte Sperre."""
+    if request.node.get_closest_marker("ziel_echt"):
+        yield
+        return
+    from ai.clients import storage_abruf as _sa
+    monkeypatch.setattr(_sa, "ziel_pruefen", lambda url: (url, {}, {}))
+    yield

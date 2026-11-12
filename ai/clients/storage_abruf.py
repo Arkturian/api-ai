@@ -15,10 +15,13 @@ Schluessel doch einmal gilt (``mit_schluessel=True``), je Sprung neu geprueft:
   stillen oder irrefuehrenden Fehlers.
 """
 
+import ipaddress
 import json
 import logging
 import os
 import re
+import socket
+from urllib.parse import unquote
 from contextlib import asynccontextmanager, contextmanager
 from typing import List, Optional
 from urllib.parse import parse_qs, urljoin, urlsplit, urlunsplit
@@ -184,6 +187,151 @@ def medien_adressen(text: str) -> List[str]:
     return [u for u in treffer if ist_signiert(u) or urlsplit(u).path not in signierte]
 
 
+# ── Ziel-Sperre gegen SSRF (#2744) ───────────────────────────────────────
+#
+# Adressen vom Aufrufer duerfen nur nach draussen zeigen. Ohne diese Sperre
+# konnte jeder Aufrufer api-ai interne, unauthentifizierte Endpunkte holen
+# lassen (127.0.0.1:<port>, private Netze, 169.254.169.254), auch ueber eine
+# Umleitung. Geprueft wird JE SPRUNG die aufgeloeste IP, und verbunden wird
+# mit genau dieser IP (gegen DNS-Rebinding zwischen Pruefung und Verbindung).
+
+class ZielGesperrt(Exception):
+    """Adresse zeigt auf ein nicht erlaubtes Ziel (Schema, internes Netz)."""
+
+    def __init__(self, url: str, grund: str):
+        self.url = url
+        self.grund = grund
+        super().__init__(f"{grund}: {ohne_anfrage(url)}")
+
+
+ZIEL_GESPERRT_HINWEIS = (
+    "Nur https-Adressen auf oeffentliche Ziele. Interne Quellen gibt die "
+    "Instanz ueber AI_REFERENZ_FREIGABE frei; Referenzbilder gehen auch als "
+    "Storage-ID."
+)
+
+
+def ziel_gesperrt_detail(e: "ZielGesperrt", error: str = "url_blocked") -> dict:
+    """Fehlertext nach aussen: Grund und Adresse ohne Query, keine IP und
+    keine Antwortinhalte des Ziels."""
+    return {"error": error, "code": e.grund, "url": ohne_anfrage(e.url), "hint": ZIEL_GESPERRT_HINWEIS}
+
+
+def _vorgabe_port(scheme: str) -> Optional[int]:
+    return {"https": 443, "http": 80}.get(scheme)
+
+
+def _pfad_sauber(pfad: str) -> bool:
+    """Keine Punkt-Segmente (auch kodiert): `/ki-vorlage/../admin` darf das
+    Praefix nicht erfuellen."""
+    teile = unquote(unquote(pfad or "/")).replace("\\", "/").split("/")
+    return not any(t in (".", "..") for t in teile)
+
+
+def _freigaben() -> list:
+    """AI_REFERENZ_FREIGABE: Komma-Liste `schema://host:port/pfadpraefix`.
+    Ohne Port gilt der Standardport des Schemas, ohne Pfad `/`."""
+    out = []
+    for roh in (os.getenv("AI_REFERENZ_FREIGABE", "") or "").split(","):
+        roh = roh.strip()
+        if not roh:
+            continue
+        p = urlsplit(roh)
+        scheme = (p.scheme or "").lower()
+        host = (p.hostname or "").lower()
+        if scheme not in ("http", "https") or not host:
+            continue
+        try:
+            port = p.port or _vorgabe_port(scheme)
+        except ValueError:
+            continue
+        out.append((scheme, host, port, p.path or "/"))
+    return out
+
+
+def ist_freigegeben(url: str) -> bool:
+    """Bewusst interne Quelle? Eigene Storage-Urspruenge (nur `/storage/`)
+    oder ein Eintrag aus AI_REFERENZ_FREIGABE — Schema, Host und Port exakt,
+    Pfad mit Praefix, ohne Punkt-Segmente."""
+    p = urlsplit(url or "")
+    pfad = p.path or "/"
+    if not _pfad_sauber(pfad):
+        return False
+    u = _ursprung(url)
+    if u is not None and u in _storage_urspruenge() and pfad.startswith("/storage/"):
+        return True
+    scheme = (p.scheme or "").lower()
+    host = (p.hostname or "").lower()
+    try:
+        port = p.port or _vorgabe_port(scheme)
+    except ValueError:
+        return False
+    for f_scheme, f_host, f_port, f_pfad in _freigaben():
+        if (scheme, host, port) == (f_scheme, f_host, f_port) and pfad.startswith(f_pfad):
+            return True
+    return False
+
+
+def _ip_oeffentlich(ip) -> bool:
+    if getattr(ip, "ipv4_mapped", None):
+        ip = ip.ipv4_mapped
+    return ip.is_global and not ip.is_multicast and not ip.is_reserved and not ip.is_unspecified
+
+
+def _aufloesen(host: str, port: int) -> list:
+    infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    return list(dict.fromkeys(i[4][0] for i in infos))
+
+
+def ziel_pruefen(url: str) -> tuple:
+    """-> (verbinden_mit_url, kopfzeilen, extensions). Raises ZielGesperrt.
+
+    Freigegeben: beliebiges Ziel, aber mit der aufgeloesten IP verbunden.
+    Sonst: nur https, und JEDE aufgeloeste Adresse muss oeffentlich sein
+    (eine gemischte Antwort ist ein Rebinding-Versuch)."""
+    p = urlsplit(url or "")
+    scheme = (p.scheme or "").lower()
+    host = p.hostname
+    if scheme not in ("http", "https") or not host:
+        raise ZielGesperrt(url, "scheme_not_allowed")
+    freigegeben = ist_freigegeben(url)
+    if scheme != "https" and not freigegeben:
+        raise ZielGesperrt(url, "https_required")
+    try:
+        port = p.port or _vorgabe_port(scheme)
+    except ValueError:
+        raise ZielGesperrt(url, "invalid_port")
+    try:
+        ips = _aufloesen(host, port)
+    except (socket.gaierror, UnicodeError, OSError):
+        raise ZielGesperrt(url, "unresolvable")
+    if not ips:
+        raise ZielGesperrt(url, "unresolvable")
+    if not freigegeben:
+        for roh in ips:
+            try:
+                ip = ipaddress.ip_address(roh.split("%")[0])
+            except ValueError:
+                raise ZielGesperrt(url, "internal_address")
+            if not _ip_oeffentlich(ip):
+                raise ZielGesperrt(url, "internal_address")
+    ip = ips[0]
+    netloc_ip = f"[{ip}]" if ":" in ip else ip
+    if p.port:
+        netloc_ip = f"{netloc_ip}:{p.port}"
+    verbinden = urlunsplit((scheme, netloc_ip, p.path, p.query, ""))
+    kopf = {"Host": p.netloc.rsplit("@", 1)[-1]}
+    ext = {"sni_hostname": host} if scheme == "https" else {}
+    return verbinden, kopf, ext
+
+
+async def ziel_pruefen_async(url: str) -> tuple:
+    """Wie ``ziel_pruefen``; die DNS-Aufloesung laeuft im Thread, nicht in
+    der Ereignisschleife."""
+    import asyncio
+    return await asyncio.to_thread(ziel_pruefen, url)
+
+
 def _kopf(ziel: str, kette_eigen: bool) -> dict:
     return {"X-API-KEY": storage_api_key()} if kette_eigen and darf_schluessel_sehen(ziel) else {}
 
@@ -197,13 +345,15 @@ async def oeffne(client: httpx.AsyncClient, url: str, mit_schluessel: bool = Fal
     und so nicht oeffentliche Dateien lesen (Post 5782).
 
     Der Client muss ``follow_redirects=False`` haben. Raises PrivateDatei,
-    GesperrteDatei, ZuVieleUmleitungen oder httpx.HTTPStatusError.
+    GesperrteDatei, ZielGesperrt, ZuVieleUmleitungen oder httpx.HTTPStatusError.
     """
     ziel = url
     eigen = mit_schluessel
     for _ in range(MAX_SPRUENGE + 1):
         eigen = eigen and darf_schluessel_sehen(ziel)
-        async with client.stream("GET", ziel, headers=_kopf(ziel, eigen)) as r:
+        verbinden, kopf, ext = await ziel_pruefen_async(ziel)
+        async with client.stream("GET", verbinden, headers={**kopf, **_kopf(ziel, eigen)},
+                                 extensions=ext) as r:
             ort = r.headers.get("location") if r.status_code in UMLEITUNGEN else None
             if ort:
                 ziel = urljoin(ziel, ort)
@@ -225,7 +375,9 @@ def oeffne_sync(client: httpx.Client, url: str, mit_schluessel: bool = False):
     eigen = mit_schluessel
     for _ in range(MAX_SPRUENGE + 1):
         eigen = eigen and darf_schluessel_sehen(ziel)
-        with client.stream("GET", ziel, headers=_kopf(ziel, eigen)) as r:
+        verbinden, kopf, ext = ziel_pruefen(ziel)
+        with client.stream("GET", verbinden, headers={**kopf, **_kopf(ziel, eigen)},
+                           extensions=ext) as r:
             ort = r.headers.get("location") if r.status_code in UMLEITUNGEN else None
             if ort:
                 ziel = urljoin(ziel, ort)

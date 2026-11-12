@@ -9,7 +9,7 @@ Endpoints for image generation and processing:
 """
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from typing import List, Optional
 import logging
 import os
@@ -102,6 +102,26 @@ class ImageGenRequest(BaseModel):
             "switches dispatch to OpenAI /v1/images/edits. Max 16 URLs."
         ),
     )
+    # Statt Adressen: Storage-IDs (#2744). api-ai baut daraus die eigene
+    # Storage-Adresse und holt sie ohne Schluessel wie jede Referenz:
+    # oeffentliche Dateien gehen, private nur ueber eine signierte Adresse.
+    reference_storage_ids: Optional[List[int]] = Field(
+        default=None,
+        description=(
+            "Reference images as storage object IDs instead of URLs. Merged "
+            "after reference_image_urls; same limits."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _storage_ids_als_adressen(self):
+        ids = self.reference_storage_ids or []
+        if ids:
+            basis = os.getenv("STORAGE_API_URL", "https://api-storage.arkturian.com").rstrip("/")
+            adressen = [f"{basis}/storage/media/{int(i)}?variant=full" for i in ids]
+            self.reference_image_urls = list(self.reference_image_urls or []) + adressen
+            self.reference_storage_ids = None
+        return self
 
 
 class ImageResponse(BaseModel):
@@ -268,6 +288,10 @@ def prompt_mit_negativ(prompt: str, negative_prompt: Optional[str]) -> str:
 
 
 from ai.clients.storage_abruf import (  # noqa: E402
+    ZielGesperrt,
+    ohne_anfrage,
+    ziel_gesperrt_detail,
+    ziel_pruefen_async,
     _storage_urspruenge,
     _ursprung,
     darf_schluessel_sehen as _darf_schluessel_sehen,
@@ -293,7 +317,14 @@ async def _hole_referenz(client, url: str, storage_key: str, max_spruenge: int =
         eigen = eigen and bool(storage_key) and _darf_schluessel_sehen(ziel)
         if eigen:
             headers["X-API-KEY"] = storage_key
-        r = await client.get(ziel, headers=headers)
+        # Ziel-Sperre je Sprung, verbunden wird mit der geprueften IP (#2744).
+        try:
+            verbinden, kopf, ext = await ziel_pruefen_async(ziel)
+        except ZielGesperrt as e:
+            # Nach aussen die Adresse des Aufrufers, nicht das Umleitungsziel.
+            raise HTTPException(status_code=422, detail=ziel_gesperrt_detail(
+                ZielGesperrt(url, e.grund), "reference_image_url_blocked"))
+        r = await client.get(verbinden, headers={**kopf, **headers}, extensions=ext)
         if r.status_code in (301, 302, 303, 307, 308):
             ort = r.headers.get("location")
             if not ort:
@@ -304,7 +335,7 @@ async def _hole_referenz(client, url: str, storage_key: str, max_spruenge: int =
         return r
     raise HTTPException(
         status_code=422,
-        detail={"error": "reference_image_too_many_redirects", "url": url},
+        detail={"error": "reference_image_too_many_redirects", "url": ohne_anfrage(url)},
     )
 
 
@@ -377,13 +408,23 @@ async def _download_reference_images(urls: List[str]) -> List[tuple]:
                         },
                     )
                 r.raise_for_status()
+            except httpx.HTTPStatusError as e:
+                # Nur der Status, nie Inhalte der Gegenseite (#2744).
+                raise HTTPException(
+                    status_code=422,
+                    detail={
+                        "error": "reference_image_fetch_failed",
+                        "url": ohne_anfrage(url),
+                        "status": e.response.status_code,
+                    },
+                )
             except httpx.HTTPError as e:
                 raise HTTPException(
                     status_code=422,
                     detail={
                         "error": "reference_image_fetch_failed",
-                        "url": url,
-                        "exc": str(e)[:200],
+                        "url": ohne_anfrage(url),
+                        "exc": type(e).__name__,
                     },
                 )
             ct = r.headers.get("content-type", "image/png")

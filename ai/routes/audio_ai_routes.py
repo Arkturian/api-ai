@@ -390,7 +390,8 @@ async def _fetch_audio_from_url(url: str) -> UploadFile:
     import httpx
     from urllib.parse import urlparse, parse_qs
     from ai.clients.storage_abruf import (
-        GesperrteDatei, PrivateDatei, gesperrt_detail, oeffne, ohne_anfrage, private_media_detail,
+        GesperrteDatei, PrivateDatei, ZielGesperrt, gesperrt_detail, oeffne, ohne_anfrage,
+        private_media_detail, ziel_gesperrt_detail,
     )
 
     max_bytes = int(os.getenv("TRANSCRIBE_URL_MAX_MB", "100")) * 1024 * 1024
@@ -419,6 +420,8 @@ async def _fetch_audio_from_url(url: str) -> UploadFile:
         raise HTTPException(status_code=403, detail=private_media_detail(url))
     except GesperrteDatei:
         raise HTTPException(status_code=451, detail=gesperrt_detail(url))
+    except ZielGesperrt as e:
+        raise HTTPException(status_code=422, detail=ziel_gesperrt_detail(ZielGesperrt(url, e.grund), "file_url_blocked"))
     except Exception as e:
         grund = str(e).replace(url, ohne_anfrage(url))
         raise HTTPException(status_code=502, detail=f"Failed to fetch file_url: {grund}")
