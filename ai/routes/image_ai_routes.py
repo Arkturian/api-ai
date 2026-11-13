@@ -8,7 +8,7 @@ Endpoints for image generation and processing:
 - Depth map generation
 """
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel, Field, model_validator
 from typing import List, Optional
 import logging
@@ -701,10 +701,8 @@ async def generate_with_openai_image(
     # against the cap. Federation-shared via openai_cost_tracker.
     from ai.services.openai_cost_tracker import openai_cost_tracker
     from ai.services.openai_cost_tracker import kosten_aus_usage
-    openai_cost_tracker.track_image(
-        model=model, num_images=1,
-        cost_usd=kosten_aus_usage(model, body.get("usage")),
-    )
+    _kosten = kosten_aus_usage(model, body.get("usage"))
+    openai_cost_tracker.track_image(model=model, num_images=1, cost_usd=_kosten)
 
     # Was OpenAI selbst abgerechnet hat, protokollieren — der Zaehler
     # rechnet je Bild mit einem festen Satz und kennt weder Groesse noch
@@ -729,6 +727,9 @@ async def generate_with_openai_image(
         "file_url": saved_obj.file_url,
         "storage_object_id": saved_obj.id,
         "request_id": request_id,
+        # Was OpenAI fuer dieses Bild abgerechnet hat (aus usage), fuer den
+        # Bildverbrauch je Aufrufer (Alex 13.11.2026).
+        "cost_usd": _kosten,
     }
 
 
@@ -1116,16 +1117,38 @@ async def generate_with_gemini(
     }
 
 
+def _bild_buchen(out: dict, authorization, x_agent_name, request_id=None) -> None:
+    """Je erzeugtem Bild eine Zeile im Bildverbrauch (Alex 13.11.2026).
+    Interne Aufrufe (speech_service, audio_drama) rufen die Funktion direkt;
+    dann sind die Kopf-Parameter keine Zeichenketten -> `(intern)`."""
+    from ai.services import bild_verbrauch as bv
+    if not isinstance(authorization, str) and not isinstance(x_agent_name, str):
+        agent, quelle = bv.INTERN, "intern"
+    else:
+        agent, quelle = bv.aufrufer(authorization if isinstance(authorization, str) else None,
+                                    x_agent_name if isinstance(x_agent_name, str) else None)
+    bv.buchen(agent=agent, quelle=quelle, model=out.get("actual_model") or out.get("model"),
+              routed_via=out.get("routed_via"), kosten_usd=out.get("cost_usd"),
+              storage_id=out.get("storage_object_id") or out.get("id"), request_id=request_id)
+
+
 @router.post("/genimage")
 async def generate_image_endpoint(
     request: ImageGenRequest,
-    api_key: str = Depends(get_api_key)
+    api_key: str = Depends(get_api_key),
+    authorization: Optional[str] = Header(default=None),
+    x_agent_name: Optional[str] = Header(default=None, alias="X-Agent-Name"),
 ):
-    """Idempotenz-Huelle (Issue #1817); ohne request_id unveraendert."""
+    """Idempotenz-Huelle (Issue #1817); ohne request_id unveraendert.
+    Jedes erzeugte Bild wird dem Aufrufer zugeschrieben (gepruefter JWT,
+    sonst X-Agent-Name); ein Replay zaehlt nicht noch einmal."""
+    import asyncio
     from ai.services import narrate_jobs as nj
     rid = request.request_id
     if not rid:
-        return await _generate_image_einmal(request, api_key)
+        out = await _generate_image_einmal(request, api_key)
+        await asyncio.to_thread(_bild_buchen, out, authorization, x_agent_name)
+        return out
     replay = nj.vorab(rid, "image", _nutzlast_fuer_hash(request.model_dump()))
     if replay:
         return replay
@@ -1133,6 +1156,7 @@ async def generate_image_endpoint(
         out = await _generate_image_einmal(request, api_key)
         out = dict(out); out["request_id"] = rid; out["replayed"] = False
         nj.abschliessen(rid, out)
+        await asyncio.to_thread(_bild_buchen, out, authorization, x_agent_name, rid)
         return out
     except HTTPException as e:
         nj.nachtrag_fehler(rid, e.status_code, e.detail); raise

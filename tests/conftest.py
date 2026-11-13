@@ -89,3 +89,10 @@ def _ziel_sperre_durchreichen(request, monkeypatch):
     from ai.clients import storage_abruf as _sa
     monkeypatch.setattr(_sa, "ziel_pruefen", lambda url: (url, {}, {}))
     yield
+
+
+@pytest.fixture(autouse=True)
+def _verbrauch_in_tmp(monkeypatch, tmp_path):
+    """Der Bildverbrauch (13.11.2026) schreibt nach VERBRAUCH_DIR. Kein Test
+    darf in /var/lib/api-ai/verbrauch landen und echte Zahlen verfaelschen."""
+    monkeypatch.setenv("VERBRAUCH_DIR", str(tmp_path / "verbrauch"))

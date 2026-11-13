@@ -338,6 +338,8 @@ from ai.routes import jev_routes  # noqa: E402
 app.include_router(jev_routes.router, prefix="/ai", tags=["Jev (TypeSafe)"])
 from ai.routes import decisions_routes  # noqa: E402
 app.include_router(decisions_routes.router, prefix="/ai", tags=["Decisions (OpenAI)"])
+from ai.routes import verbrauch_routes  # noqa: E402
+app.include_router(verbrauch_routes.router, prefix="/ai", tags=["Verbrauch"])
 from ai.routes import audio_mix_routes  # noqa: E402
 app.include_router(audio_mix_routes.router, prefix="/ai", tags=["Audio Mix"])
 app.include_router(music_ai_routes.router, prefix="/ai", tags=["Music AI"])
