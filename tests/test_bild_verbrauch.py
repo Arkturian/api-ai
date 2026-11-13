@@ -138,6 +138,15 @@ def test_interner_direktaufruf_ist_intern(monkeypatch):
     assert _zeilen()[0]["agent"] == bv.INTERN and _zeilen()[0]["quelle"] == "intern"
 
 
+def test_http_aufruf_ohne_kopf_ist_unbekannt_nicht_intern(monkeypatch):
+    """Am Ziel gefunden (13.11. 11:16): Ohne Kopf liefert FastAPI None, das
+    galt faelschlich als interner Direktaufruf."""
+    _verdrahten(monkeypatch)
+    asyncio.run(g.generate_image_endpoint(g.ImageGenRequest(prompt="x", model="gpt-image-2"), "k",
+                                          authorization=None, x_agent_name=None))
+    assert (_zeilen()[0]["agent"], _zeilen()[0]["quelle"]) == (bv.UNBEKANNT, "keine")
+
+
 def test_fehlschlag_bucht_nichts(monkeypatch):
     _verdrahten(monkeypatch)
 

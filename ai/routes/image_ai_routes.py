@@ -1121,8 +1121,12 @@ def _bild_buchen(out: dict, authorization, x_agent_name, request_id=None) -> Non
     """Je erzeugtem Bild eine Zeile im Bildverbrauch (Alex 13.11.2026).
     Interne Aufrufe (speech_service, audio_drama) rufen die Funktion direkt;
     dann sind die Kopf-Parameter keine Zeichenketten -> `(intern)`."""
+    from fastapi import params as _fp
     from ai.services import bild_verbrauch as bv
-    if not isinstance(authorization, str) and not isinstance(x_agent_name, str):
+    # Direktaufruf als Funktion: die Kopf-Parameter sind FastAPIs
+    # Vorgabe-Objekte. Ein HTTP-Aufruf ohne Kopf liefert dagegen None —
+    # der ist (unbekannt), nicht intern (am Ziel gefunden 13.11. 11:16).
+    if isinstance(authorization, _fp.Param) and isinstance(x_agent_name, _fp.Param):
         agent, quelle = bv.INTERN, "intern"
     else:
         agent, quelle = bv.aufrufer(authorization if isinstance(authorization, str) else None,
