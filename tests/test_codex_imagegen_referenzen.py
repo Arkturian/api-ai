@@ -34,14 +34,16 @@ def aufbau(monkeypatch, tmp_path):
     monkeypatch.setenv("CODEX_HOME", str(tmp_path))
     ziel = tmp_path / "generated_images" / "sitzung" / "bild.png"
     ziel.parent.mkdir(parents=True)
-    spur = {"cmd": None, "stdin": None, "geladen": [], "gespeichert": [], "ref_dateien": []}
+    spur = {"ziel": ziel, "cmd": None, "stdin": None, "geladen": [], "gespeichert": [], "ref_dateien": []}
 
-    def fake_cli(cmd, env, timeout=300, cwd="/", input=None):
-        spur["cmd"], spur["stdin"] = list(cmd), input
+    def fake_cli(cmd, env, timeout=300, cwd="/", input=None, phasen=None):
+        spur["cmd"], spur["stdin"], spur["home"] = list(cmd), input, env.get("CODEX_HOME")
         # Die angehaengten Dateien muessen beim Start existieren und lesbar sein.
         for i, teil in enumerate(cmd):
             if teil == "-i":
                 spur["ref_dateien"].append(open(cmd[i + 1], "rb").read())
+        ziel = spur["ziel"]
+        ziel.parent.mkdir(parents=True, exist_ok=True)
         ziel.write_bytes(_png())
         zeile = json.dumps({"type": "item.completed", "item": {
             "type": "agent_message", "text": json.dumps({"path": str(ziel), "width": 1536, "height": 1024})}})
@@ -120,3 +122,23 @@ def test_kopien_fuer_den_codex_benutzer_werden_aufgeraeumt(aufbau, monkeypatch, 
     _lauf(reference_image_urls=["https://api-storage.arkturian.com/storage/media/1"])
     assert aufbau["cmd"][aufbau["cmd"].index("-i") + 1] == str(kopie)   # codex bekommt die lesbare Kopie
     assert not kopie.exists()                                           # und sie ist danach weg
+
+
+def test_bild_startet_im_schlanken_home_mit_modell_aus_der_hauptkonfiguration(aufbau, tmp_path, monkeypatch):
+    """13.11. (3DTischler): Im 13-GB-Hauptverzeichnis brauchte codex unter
+    Last 80-150 s nur zum Start, das Abo-Bild lief bei 240 s ab. Wie beim
+    Vorlesen laeuft es jetzt im schlanken Verzeichnis, Modell und Effort
+    bleiben die der Hauptkonfiguration."""
+    haupt = tmp_path / "haupt"
+    haupt.mkdir()
+    (haupt / "auth.json").write_text("{}")
+    (haupt / "config.toml").write_text('model = "gpt-5.6-sol"\nmodel_reasoning_effort = "high"\n')
+    monkeypatch.setenv("CODEX_HOME", str(haupt))
+    monkeypatch.delenv("CODEX_TEXT_HOME", raising=False)
+    aufbau["ziel"] = tmp_path / "haupt-text" / "generated_images" / "s" / "bild.png"
+    out = _lauf()
+    assert aufbau["home"] == str(tmp_path / "haupt-text")
+    cmd = aufbau["cmd"]
+    assert cmd[cmd.index("-m") + 1] == "gpt-5.6-sol"
+    assert "model_reasoning_effort=high" in cmd
+    assert out["storage_object_id"] == 42                     # Pfad im schlanken Home wird angenommen

@@ -257,6 +257,19 @@ async def generate_with_codex_imagegen(
 
     env = os.environ.copy()
     env["NO_COLOR"] = "1"
+    # Schlankes CODEX_HOME wie beim Vorlesen (11.11.): Im gemeinsamen
+    # Verzeichnis (13 GB Zustand, Plugins) brauchte codex unter Last am
+    # 13.11. 80-150 s nur zum Starten, das Abo-Bild lief bei 240 s in den
+    # Zeitablauf (3DTischler). Im schlanken Verzeichnis gemessen: 67 s
+    # fuer das ganze Bild. Modell und Effort kommen aus der config.toml des
+    # Hauptverzeichnisses, damit sich am Ergebnis nichts aendert.
+    from ai.routes.text_ai_routes import _codex_text_home
+    from ai.services.cli_katalog import codex_config
+    haupt = str(codex_home())
+    schlank = _codex_text_home(haupt)
+    home = Path(schlank) if schlank else codex_home()
+    env["CODEX_HOME"] = str(home)
+    cfg_modell, cfg_effort = codex_config(haupt) if schlank else (None, None)
     # read-only: das Modell braucht weder Schreib- noch Netzrechte, das
     # Werkzeug laeuft ueber codex' eigene Verbindung (gemessen: unter
     # workspace-write scheiterte jeder Dateischreibversuch, das Bild kam
@@ -264,6 +277,10 @@ async def generate_with_codex_imagegen(
     with tempfile.TemporaryDirectory(prefix="codex-imagegen-") as arbeitsdir:
         cmd = ["codex", "exec", "--json", "--skip-git-repo-check", "-s", "read-only",
                "-C", arbeitsdir]
+        if cfg_modell:
+            cmd += ["-m", cfg_modell]
+        if cfg_effort:
+            cmd += ["-c", f"model_reasoning_effort={cfg_effort}"]
         kopien: list = []
         try:
             if referenzen:
@@ -285,9 +302,14 @@ async def generate_with_codex_imagegen(
                     cmd += ["-i", pfad_ref]
                 cmd.append("--")
             cmd.append("-")
-            result = await asyncio.to_thread(
-                _run_cli_with_pgid, cmd, env, CODEX_IMAGEGEN_TIMEOUT_S, arbeitsdir, anweisung,
-            )
+            phasen: dict = {}
+            try:
+                result = await asyncio.to_thread(
+                    _run_cli_with_pgid, cmd, env, CODEX_IMAGEGEN_TIMEOUT_S, arbeitsdir, anweisung, phasen,
+                )
+            finally:
+                logger.info("codex imagegen Phasen (s ab Start): %s, home=%s",
+                            " ".join(f"{k}={v}" for k, v in phasen.items()) or "-", home.name)
         except subprocess.TimeoutExpired:
             raise HTTPException(
                 status_code=504,
@@ -312,7 +334,7 @@ async def generate_with_codex_imagegen(
             detail={"error": "codex_imagegen_no_path", "agent_text": (text or "")[:300],
                     "stderr": (result.stderr or "")[-300:]},
         )
-    if not pfad_ist_erlaubt(pfad):
+    if not pfad_ist_erlaubt(pfad, home):
         logger.error("codex imagegen: Pfad ausserhalb generated_images verweigert: %s", pfad)
         raise HTTPException(status_code=502, detail={"error": "codex_imagegen_path_refused"})
 
