@@ -183,3 +183,25 @@ def test_grok_ohne_erhebung_bleibt_bei_der_basis(cli, basis):
     cli()
     r = asyncio.run(t.list_text_models())
     assert r["sources"]["grok"] == "automation-curated" and _ids(r, "grok") == ["grok-4.6"]
+
+
+def test_alte_models_json_bleibt_ergaenzung_solange_die_erhebung_frisch_ist(cli, basis):
+    """Seit 13.11. pusht Automation nicht mehr. models.json altert; nach
+    49 h fielen sonst Vorgaben und Felder weg, die nur sie fuehrt."""
+    import os
+    alt = time.time() - 72 * 3600
+    os.utime(basis, (alt, alt))
+    cli()
+    r = asyncio.run(t.list_text_models())
+    assert _prov(r)["gemini"]["default"] == "gemini-3.8-flash"     # aus der Basis, nicht ids[0]
+    assert r["sources"]["grok"] == "automation-curated"            # Basis-Eintrag noch da
+    assert r["stale"] is False                                     # Alter der Erhebung zaehlt
+
+
+def test_alte_models_json_ohne_erhebung_faellt_weiter_weg(cli, basis, monkeypatch, tmp_path):
+    import os
+    alt = time.time() - 72 * 3600
+    os.utime(basis, (alt, alt))
+    monkeypatch.setenv("CLI_MODELS_PATH", str(tmp_path / "gibtsnicht.json"))
+    r = asyncio.run(t.list_text_models())
+    assert r["source"] == "fallback"                              # weder Erhebung noch frische Basis

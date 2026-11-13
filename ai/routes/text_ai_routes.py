@@ -3024,19 +3024,23 @@ async def list_text_models(
     data: dict = {}
     basis = None
     age = None
+    # Seit #5740: die CLI-Erhebung der cloud-api dieses Knotens ersetzt
+    # claude/codex/gemini/grok. Seit 13.11. pusht Automation nicht mehr;
+    # models.json liefert dann nur noch, was die Erhebung nicht kennt
+    # (claude-efforts, min_cli_version, Vorgaben). Mit frischer Erhebung
+    # gilt deshalb keine Altersgrenze fuer models.json — sonst fielen diese
+    # Felder 49 h nach dem letzten Push still weg. Ohne Erhebung bleibt sie.
+    cli = _ck.lesen(_MODELS_MAX_AGE_S)
     if state_path.exists():
         try:
             age = time.time() - state_path.stat().st_mtime
-            if age <= _MODELS_MAX_AGE_S:
+            if age <= _MODELS_MAX_AGE_S or cli is not None:
                 data = _json.loads(state_path.read_text())
                 basis = data.get("providers", {})
             else:
                 logger.warning(f"models.json is {age/3600:.1f}h old (>{_MODELS_MAX_AGE_S//3600}h)")
         except Exception as e:
             logger.warning(f"Failed to read models.json: {e}")
-    # Seit #5740: die CLI-Erhebung der cloud-api dieses Knotens ersetzt
-    # claude/codex/gemini; models.json bleibt Basis fuer grok und Rueckfall.
-    cli = _ck.lesen(_MODELS_MAX_AGE_S)
     if basis is not None or cli is not None:
         try:
             providers, quellen = _ck.zusammenfuehren(basis, cli)
