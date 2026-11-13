@@ -24,10 +24,20 @@ from ai.routes import text_ai_routes as t
 
 @pytest.fixture
 def katalog(tmp_path, monkeypatch):
+    """Seit #2758 (13.11.2026) stehen die festen gemini-Felder im Repo
+    (`ai/data/cli_anbieter.json`) und liegen ueber models.json. Der Test
+    schreibt deshalb beide Schichten gleich, damit er den Mechanismus
+    prueft und nicht die Schichtung."""
+    from ai.services import cli_katalog as ck
+
     def schreiben(efforts):
         p = tmp_path / "models.json"
         p.write_text(json.dumps({"providers": {"gemini": {"efforts": efforts}}}))
         monkeypatch.setattr(t, "_MODELS_JSON_PFAD", p)
+        r = tmp_path / "cli_anbieter.json"
+        r.write_text(json.dumps({"providers": {"gemini": {"efforts": efforts}}}))
+        monkeypatch.setattr(ck, "CLI_ANBIETER_PFAD", r)
+        monkeypatch.setenv("CLI_MODELS_PATH", str(tmp_path / "keine-erhebung.json"))
         return p
     return schreiben
 
@@ -38,7 +48,7 @@ def test_katalog_vorgabe_wird_genommen(katalog):
 
 
 def test_der_katalog_gewinnt_gegen_die_notfallkonstante(katalog):
-    """Die Wahrheit steht in `agy models` und kommt über Automation.
+    """Die Wahrheit steht in `agy models`; die Vorgabe im Repo-Katalog.
 
     Eine Konstante im Code, die den Katalog überstimmt, wäre wieder die
     driftende Tabelle, die 2026-07-29 aus genau diesem Modul entfernt

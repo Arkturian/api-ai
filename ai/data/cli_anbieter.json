@@ -1,0 +1,49 @@
+{
+ "_comment": "Feste Felder der CLI-Anbieter, die die Erhebung der cloud-api (cli-models.json) nicht kennt (#2758). Startstand 13.11.2026 aus dem letzten Automation-Push von models.json, gegen die CLIs geprueft. Modelllisten, Stufen je Modell und Fassungen kommen aus der Erhebung, nicht von hier. Pflege hier.",
+ "providers": {
+  "claude": {
+   "min_cli_version": "2.1.180",
+   "subscription_locked": false,
+   "efforts": {
+    "param_name": "effort",
+    "available": ["low", "medium", "high", "xhigh", "max"],
+    "default": null,
+    "supported_via": "--effort flag",
+    "note": "Laut `claude --help` (2.1.323) fuenf Stufen. Kein per_model: das Flag gilt je Sitzung. default bewusst null, die Hilfe nennt keinen."
+   }
+  },
+  "codex": {
+   "min_cli_version": "0.144.0",
+   "min_cli_version_note": "gpt-5.6-* brauchen codex-cli 0.144.0+ (Incident 2026-07-23 UnityCodex/mac).",
+   "subscription_locked": false,
+   "efforts": {
+    "param_name": "effort",
+    "supported_via": "-c reasoning_effort= override"
+   }
+  },
+  "gemini": {
+   "default": "gemini-3.8-flash",
+   "min_cli_version": "1.1.0",
+   "underlying_cli": "agy",
+   "subscription_locked": false,
+   "efforts": {
+    "param_name": "effort",
+    "default": "medium",
+    "required": true,
+    "supported_via": "slug_suffix_composition",
+    "note": "Pflicht: agy fuehrt nur suffigierte Slugs, ein Aufruf ohne effort waere ein sicherer 502 (2026-08-23, ~2800/Tag). api-ai setzt die Vorgabe ein, wenn per_model sie erlaubt."
+   }
+  },
+  "grok": {
+   "min_cli_version": "0.2.100",
+   "underlying_cli": "grok",
+   "subscription_locked": false,
+   "efforts": {
+    "param_name": "effort",
+    "available": ["low", "medium", "high"],
+    "default": "high",
+    "supported_via": "--reasoning-effort flag"
+   }
+  }
+ }
+}

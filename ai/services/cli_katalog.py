@@ -32,6 +32,7 @@ logger = logging.getLogger(__name__)
 
 STANDARD_PFAD = "/var/lib/cloud-api/cli-models.json"
 API_ANBIETER_PFAD = Path(__file__).resolve().parents[1] / "data" / "api_anbieter.json"
+CLI_ANBIETER_PFAD = Path(__file__).resolve().parents[1] / "data" / "cli_anbieter.json"
 _STUFEN = ("low", "medium", "high", "xhigh", "max", "ultra")
 # Aus _STUFEN gebaut, nicht von Hand: agy 1.5.7 brachte mit
 # gemini-4-hydrogen die erste xhigh-Stufe, und die handgeschriebene
@@ -181,6 +182,32 @@ def api_anbieter() -> Dict[str, dict]:
         return {}
 
 
+def cli_anbieter() -> Dict[str, dict]:
+    """Feste Felder je CLI-Anbieter (#2758): was die Erhebung nicht kennt
+    (claude-efforts, grok-efforts, min_cli_version, gemini-Vorgabe).
+    Seit 13.11. pusht Automation models.json nicht mehr; diese Felder
+    stehen deshalb versioniert hier statt in einer Datei, die keiner
+    mehr schreibt."""
+    try:
+        d = json.loads(CLI_ANBIETER_PFAD.read_text())
+        return {k: v for k, v in (d.get("providers") or {}).items() if isinstance(v, dict)}
+    except Exception as e:
+        logger.warning("cli_anbieter.json nicht lesbar: %s", e)
+        return {}
+
+
+def _ueberlagern(unten: dict, oben: dict) -> dict:
+    """oben gewinnt; verschachtelte dicts (efforts) werden gemischt, damit
+    per_model und Co. aus `unten` erhalten bleiben."""
+    neu = copy.deepcopy(unten)
+    for k, v in oben.items():
+        if isinstance(v, dict) and isinstance(neu.get(k), dict):
+            neu[k] = _ueberlagern(neu[k], v)
+        else:
+            neu[k] = copy.deepcopy(v)
+    return neu
+
+
 def zusammenfuehren(basis: Optional[Dict[str, dict]], cli: Optional[dict],
                     config: Optional[Tuple[Optional[str], Optional[str]]] = None) -> Tuple[Dict[str, dict], Dict[str, str]]:
     """Provider-Eintraege + Quelle je Provider.
@@ -189,9 +216,16 @@ def zusammenfuehren(basis: Optional[Dict[str, dict]], cli: Optional[dict],
     (oder None). Die CLI-Erhebung ersetzt claude/codex/gemini/grok, sobald
     die Datei sie fuehrt; API-Anbieter kommen aus dem Repo; der Rest bleibt
     bei der Basis."""
-    basis = basis or {}
+    basis = dict(basis or {})
+    quellen = {k: "automation-curated" for k in basis}
+    # Feste Felder aus dem Repo liegen ueber dem eingefrorenen models.json.
+    # Auch ohne models.json (neuer Host) bekommen die Bauer sie; ein
+    # Anbieter entsteht aber nur, wenn Basis oder Erhebung ihn fuehren.
+    fest = cli_anbieter()
+    for k, v in fest.items():
+        if k in basis:
+            basis[k] = _ueberlagern(basis[k], v)
     providers: Dict[str, dict] = {k: copy.deepcopy(v) for k, v in basis.items()}
-    quellen = {k: "automation-curated" for k in providers}
     for k, v in api_anbieter().items():
         p = copy.deepcopy(providers.get(k) or {})
         p.update(v)
@@ -211,7 +245,7 @@ def zusammenfuehren(basis: Optional[Dict[str, dict]], cli: Optional[dict],
         eintrag = clis.get(cli_name)
         if not isinstance(eintrag, dict):
             continue
-        neu = bau(eintrag, basis.get(name) or {})
+        neu = bau(eintrag, basis.get(name) or copy.deepcopy(fest.get(name) or {}))
         if not neu:
             continue
         neu["cli_version"] = _fassung(eintrag) or neu.get("cli_version")

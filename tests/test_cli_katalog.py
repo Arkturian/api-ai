@@ -205,3 +205,28 @@ def test_alte_models_json_ohne_erhebung_faellt_weiter_weg(cli, basis, monkeypatc
     monkeypatch.setenv("CLI_MODELS_PATH", str(tmp_path / "gibtsnicht.json"))
     r = asyncio.run(t.list_text_models())
     assert r["source"] == "fallback"                              # weder Erhebung noch frische Basis
+
+
+def test_feste_felder_kommen_aus_dem_repo_und_schlagen_die_eingefrorene_datei(cli, basis):
+    """#2758: models.json wird nicht mehr gepflegt. claude-efforts,
+    min_cli_version, grok-efforts stehen im Repo und gewinnen."""
+    d = json.loads(basis.read_text())
+    d["providers"]["claude"] = {"available": ["sonnet"], "default": "sonnet",
+                                "efforts": {"available": ["medium", "high"], "default": "high"}}
+    basis.write_text(json.dumps(d))
+    cli()
+    r = asyncio.run(t.list_text_models())
+    c = _prov(r)["claude"]["efforts"]
+    assert c["available"] == ["low", "medium", "high", "xhigh", "max"] and c["default"] is None
+    assert _prov(r)["gemini"]["default"] == "gemini-3.8-flash"
+    assert _prov(r)["codex"]["efforts"]["per_model"]          # aus der Erhebung, nicht ueberschrieben
+
+
+def test_feste_felder_auch_ohne_models_json(cli, tmp_path, monkeypatch):
+    monkeypatch.setattr(t, "_MODELS_STATE_PATH", tmp_path / "gibtsnicht.json")
+    monkeypatch.setattr(t, "_MODELS_JSON_PFAD", tmp_path / "gibtsnicht.json")
+    cli()
+    r = asyncio.run(t.list_text_models())
+    assert _prov(r)["claude"]["efforts"]["available"] == ["low", "medium", "high", "xhigh", "max"]
+    assert _prov(r)["gemini"]["efforts"]["required"] is True
+    assert "grok" not in _prov(r)                              # weder Basis noch Erhebung -> kein Anbieter
