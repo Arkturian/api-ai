@@ -163,3 +163,23 @@ def test_agy_xhigh_kommt_in_den_katalog(cli, basis):
 def test_agy_effort_im_namen(model, vorbelegt):
     """Sonst bekaeme ...-xhigh ein zweites --effort angehaengt."""
     assert ck.agy_effort_im_namen(model) is vorbelegt
+
+
+def test_grok_aus_der_erhebung(cli, basis):
+    """Cloud-worker erhebt ab 13.11. auch `grok models`. Ohne Bauer blieb
+    grok still bei automation-curated und fror ohne Push ein."""
+    d = json.loads(json.dumps(ECHT))
+    d["clis"]["grok"] = {"binaer": "/home/alex/.local/bin/grok", "fassung": "1.0.77",
+                         "modelle": [{"id": "grok-4.5", "name": "grok-4.5"},
+                                     {"id": "grok-4.7", "name": "grok-4.7", "vorgabe": True}]}
+    cli(d)
+    r = asyncio.run(t.list_text_models())
+    assert r["sources"]["grok"] == "cli"
+    assert _ids(r, "grok") == ["grok-4.5", "grok-4.7"]
+    assert _prov(r)["grok"]["default"] == "grok-4.7"
+
+
+def test_grok_ohne_erhebung_bleibt_bei_der_basis(cli, basis):
+    cli()
+    r = asyncio.run(t.list_text_models())
+    assert r["sources"]["grok"] == "automation-curated" and _ids(r, "grok") == ["grok-4.6"]

@@ -9,8 +9,8 @@ claude, codex und gemini in derselben Form wie `models.json`, damit
 
 Was die Datei nicht liefert, kommt weiter aus dem Basis-Eintrag
 (`models.json`), solange es ihn gibt: `param_name`, `supported_via`,
-`min_cli_version`, Notizen. grok steht nicht in der Datei und bleibt bei
-`models.json`. Die API-Anbieter ohne CLI (minimax, deepseek, glm) liegen
+`min_cli_version`, Notizen. grok kommt aus der Datei, sobald sie ihn
+fuehrt (Cloud-worker, ab 13.11.), bis dahin aus `models.json`. Die API-Anbieter ohne CLI (minimax, deepseek, glm) liegen
 versioniert in `ai/data/api_anbieter.json`.
 
 Gibt es die Datei nicht (arkturian: keine cloud-api), ist sie unlesbar
@@ -153,6 +153,24 @@ def _claude(eintrag: dict, basis: dict) -> Optional[dict]:
     return p
 
 
+def _grok(eintrag: dict, basis: dict) -> Optional[dict]:
+    """`grok models` (Cloud-worker, ab 13.11.). Das Standardmodell traegt
+    `"vorgabe": true`. Fehlt die Markierung, bleibt die Basis-Vorgabe,
+    sofern es sie noch gibt, sonst das erste Modell."""
+    modelle = [m for m in eintrag.get("modelle") or [] if m.get("id")]
+    if not modelle:
+        return None
+    ids = [m["id"] for m in modelle]
+    p = copy.deepcopy(basis)
+    p["available"] = ids
+    markiert = [m["id"] for m in modelle if m.get("vorgabe") is True]
+    if markiert:
+        p["default"] = markiert[0]
+    elif p.get("default") not in ids:
+        p["default"] = ids[0]
+    return p
+
+
 def api_anbieter() -> Dict[str, dict]:
     """minimax, deepseek, glm: keine CLI, Liste versioniert im Repo."""
     try:
@@ -168,8 +186,9 @@ def zusammenfuehren(basis: Optional[Dict[str, dict]], cli: Optional[dict],
     """Provider-Eintraege + Quelle je Provider.
 
     basis: `providers` aus models.json (oder None). cli: gelesene Datei
-    (oder None). Die CLI-Erhebung ersetzt claude/codex/gemini; API-Anbieter
-    kommen aus dem Repo; der Rest (grok) bleibt bei der Basis."""
+    (oder None). Die CLI-Erhebung ersetzt claude/codex/gemini/grok, sobald
+    die Datei sie fuehrt; API-Anbieter kommen aus dem Repo; der Rest bleibt
+    bei der Basis."""
     basis = basis or {}
     providers: Dict[str, dict] = {k: copy.deepcopy(v) for k, v in basis.items()}
     quellen = {k: "automation-curated" for k in providers}
@@ -186,6 +205,7 @@ def zusammenfuehren(basis: Optional[Dict[str, dict]], cli: Optional[dict],
         "codex": ("codex", lambda e, b: _codex(e, b, config if config is not None else codex_config())),
         "gemini": ("agy", _gemini),
         "claude": ("claude", _claude),
+        "grok": ("grok", _grok),
     }
     for name, (cli_name, bau) in bauer.items():
         eintrag = clis.get(cli_name)
