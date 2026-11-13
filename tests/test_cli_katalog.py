@@ -138,3 +138,28 @@ def test_codex_config_liest_toml(tmp_path):
     (tmp_path / "config.toml").write_text('model = "gpt-5.6-sol"\nmodel_reasoning_effort = "high"\n[x]\nmodel = "nein"\n')
     assert ck.codex_config(str(tmp_path)) == ("gpt-5.6-sol", "high")
     assert ck.codex_config(str(tmp_path / "fehlt")) == (None, None)
+
+
+def test_agy_xhigh_kommt_in_den_katalog(cli, basis):
+    """agy 1.5.7 (Automation, 13.11.): gemini-4-hydrogen fuehrt als erste
+    Familie xhigh. Die handgeschriebene Slug-Liste liess sie fallen."""
+    d = json.loads(json.dumps(ECHT))
+    d["clis"]["agy"]["modelle"] += [{"id": f"gemini-4-hydrogen-{s}", "name": "h"}
+                                   for s in ("low", "medium", "high", "xhigh")]
+    d["clis"]["agy"]["modelle"].append({"id": "gemini-pro-orchestrator-g1-pro", "name": "o"})
+    cli(d)
+    r = asyncio.run(t.list_text_models())
+    eff = _prov(r)["gemini"]["efforts"]
+    assert eff["per_model"]["gemini-4-hydrogen"] == ["low", "medium", "high", "xhigh"]
+    assert "xhigh" in eff["available"]
+    assert "gemini-pro-orchestrator-g1" not in _ids(r, "gemini")   # ohne Effort-Suffix bleibt draussen
+
+
+@pytest.mark.parametrize("model,vorbelegt", [
+    ("gemini-4-hydrogen-xhigh", True), ("gemini-4-hydrogen-high", True),
+    ("gemini-3.8-flash-low", True), ("Gemini 3.5 Flash (High)", True),
+    ("gemini-4-hydrogen", False), ("gemini-pro-orchestrator-g1-pro", False),
+])
+def test_agy_effort_im_namen(model, vorbelegt):
+    """Sonst bekaeme ...-xhigh ein zweites --effort angehaengt."""
+    assert ck.agy_effort_im_namen(model) is vorbelegt

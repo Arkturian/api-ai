@@ -32,8 +32,18 @@ logger = logging.getLogger(__name__)
 
 STANDARD_PFAD = "/var/lib/cloud-api/cli-models.json"
 API_ANBIETER_PFAD = Path(__file__).resolve().parents[1] / "data" / "api_anbieter.json"
-_AGY_SLUG = re.compile(r"^(?P<familie>.+)-(?P<stufe>low|medium|high)$")
 _STUFEN = ("low", "medium", "high", "xhigh", "max", "ultra")
+# Aus _STUFEN gebaut, nicht von Hand: agy 1.5.7 brachte mit
+# gemini-4-hydrogen die erste xhigh-Stufe, und die handgeschriebene
+# Liste (low|medium|high) liess sie still aus /ai/models fallen.
+_AGY_SLUG = re.compile(r"^(?P<familie>.+)-(?P<stufe>" + "|".join(_STUFEN) + r")$")
+
+
+def agy_effort_im_namen(model: str) -> bool:
+    """Traegt der Modellname seinen Effort schon (Slug-Suffix oder
+    Anzeigename wie "Gemini 3.5 Flash (High)")? Dann kein --effort."""
+    m = model.strip()
+    return bool(_AGY_SLUG.match(m)) or "(" in m
 _VERSION = re.compile(r"\d+(?:\.\d+)+")
 
 

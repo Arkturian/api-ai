@@ -2497,14 +2497,14 @@ async def gemini_endpoint(
         # Letting agy be the source of truth removes that whole bug class
         # (Post #4383, 2026-07-29). Our existing error envelope surfaces
         # agy's message verbatim as a 502, so callers see the valid values.
-        _AGY_EFFORT_SUFFIXES = ("-low", "-medium", "-high")
+        from ai.services.cli_katalog import agy_effort_im_namen
         if model:
             _m = model.strip()
             cmd.extend(["--model", _m])
             # Only pass --effort when the model string does not already
             # carry it (slug suffix like "...-high" or a display name like
             # "Gemini 3.5 Flash (High)"), otherwise agy sees a conflict.
-            _preset = _m.endswith(_AGY_EFFORT_SUFFIXES) or "(" in _m
+            _preset = agy_effort_im_namen(_m)
             if prompt.effort and not _preset:
                 cmd.extend(["--effort", prompt.effort.strip().lower()])
             elif not prompt.effort and not _preset:
