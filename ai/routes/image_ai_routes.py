@@ -295,8 +295,8 @@ from ai.clients.storage_abruf import (  # noqa: E402
     ohne_anfrage,
     ziel_gesperrt_detail,
     ziel_pruefen_async,
-    _storage_urspruenge,
     _ursprung,
+    signatur_urspruenge as _signatur_urspruenge,
     darf_schluessel_sehen as _darf_schluessel_sehen,
     ist_private_antwort,
     private_media_detail,
@@ -351,7 +351,7 @@ def _ohne_signatur(url: str) -> str:
     Query-Teile (etwa `v=<checksum>`, `variant`) bleiben, denn sie
     bestimmen, welches Bild kommt."""
     from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
-    if not isinstance(url, str) or _ursprung(url) not in _storage_urspruenge():
+    if not isinstance(url, str) or _ursprung(url) not in _signatur_urspruenge():
         return url
     p = urlparse(url)
     paare = parse_qsl(p.query, keep_blank_values=True)

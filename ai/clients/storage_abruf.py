@@ -116,6 +116,32 @@ def _storage_urspruenge() -> set:
     return urspruenge
 
 
+def signatur_urspruenge() -> set:
+    """Urspruenge, deren Links eine Storage-Signatur (`exp`/`kid`/`sig`)
+    tragen koennen. NUR fuer die Idempotenz-Normalisierung, nie fuer den
+    Schluessel: wer hier steht, bekommt dadurch keinen Schluessel.
+
+    Die eigenen Storage-Urspruenge plus die Namen, unter denen Storage
+    signierte Links ausgibt (STORAGE_SIGNATUR_HOSTS, Vorgabe der
+    kanonische `api-storage.arkturian.com`). Am Ziel gefunden 14.11.:
+    arkserver hat STORAGE_API_URL=api-storage.arkserver…, die signierten
+    Links lauten auf den kanonischen Namen. Ohne diese Liste blieb die
+    Signatur im Hash, und der Neuanlauf von arkturian-daily-2026-11-14-bild
+    scheiterte an request_id_payload_mismatch (Post 5771)."""
+    urspruenge = set(_storage_urspruenge())
+    roh = os.getenv("STORAGE_SIGNATUR_HOSTS", "api-storage.arkturian.com") or ""
+    for eintrag in roh.split(","):
+        eintrag = eintrag.strip()
+        if not eintrag:
+            continue
+        if "//" not in eintrag:
+            eintrag = "https://" + eintrag
+        u = _ursprung(eintrag)
+        if u:
+            urspruenge.add(u)
+    return urspruenge
+
+
 def ist_signiert(url: str) -> bool:
     """Traegt die Adresse eine Storage-Signatur?"""
     q = parse_qs(urlsplit(url or "").query)

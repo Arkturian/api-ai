@@ -227,3 +227,55 @@ def test_ohne_signatur_nur_storage_und_nur_die_drei():
     assert g._ohne_signatur(_S + "1?v=c&exp=9&kid=k&sig=s") == _S + "1?v=c"
     fremd = "https://fremd.example/x?exp=9&sig=s"
     assert g._ohne_signatur(fremd) == fremd
+
+
+# --- Am Ziel gefunden 14.11. (Post 5771): arkserver-Umgebung --------------
+# Die Tests oben loeschen STORAGE_API_URL und liefen damit nur gegen die
+# Vorgabe. arkserver hat api-storage.arkserver…, die signierten Links lauten
+# auf den kanonischen Namen -> die Signatur blieb im Hash.
+
+_ARKSERVER = "https://api-storage.arkserver.arkturian.com"
+
+
+def test_ohne_signatur_kanonischer_host_bei_arkserver_umgebung(monkeypatch):
+    monkeypatch.setenv("STORAGE_API_URL", _ARKSERVER)
+    monkeypatch.delenv("STORAGE_EXTRA_HOSTS", raising=False)
+    monkeypatch.delenv("STORAGE_SIGNATUR_HOSTS", raising=False)
+    assert g._ohne_signatur(_S + "128981?exp=9&kid=k&sig=s") == _S + "128981"
+    assert g._ohne_signatur(_S + "1?v=c&exp=9&kid=k&sig=s") == _S + "1?v=c"
+    eigen = _ARKSERVER + "/storage/media/1?exp=9&kid=k&sig=s"
+    assert g._ohne_signatur(eigen) == _ARKSERVER + "/storage/media/1"
+    fremd = "https://fremd.example/storage/media/1?exp=9&sig=s"
+    assert g._ohne_signatur(fremd) == fremd
+    anderer_port = "https://api-storage.arkturian.com:8443/storage/media/1?exp=9&sig=s"
+    assert g._ohne_signatur(anderer_port) == anderer_port
+
+
+def test_signatur_host_gibt_keinen_schluessel(monkeypatch):
+    """Die neue Liste gilt nur fuer den Hash, nie fuer den Schluessel."""
+    from ai.clients import storage_abruf as sa
+    monkeypatch.setenv("STORAGE_API_URL", _ARKSERVER)
+    monkeypatch.delenv("STORAGE_EXTRA_HOSTS", raising=False)
+    assert sa.darf_schluessel_sehen(_S + "128981") is False
+    assert sa.darf_schluessel_sehen(_ARKSERVER + "/storage/media/1") is True
+
+
+@pytest.mark.asyncio
+async def test_genimage_signierte_referenzen_neuanlauf_bei_arkserver_umgebung(monkeypatch):
+    monkeypatch.setenv("STORAGE_API_URL", _ARKSERVER)
+    monkeypatch.delenv("STORAGE_EXTRA_HOSTS", raising=False)
+    monkeypatch.delenv("STORAGE_SIGNATUR_HOSTS", raising=False)
+    gesehen = []
+    async def lauf(r):
+        gesehen.append(list(r.reference_image_urls))
+        if len(gesehen) == 1:
+            raise HTTPException(status_code=422, detail={"error": "reference_image_fetch_failed"})
+        return {"id": 9, "image_url": "u", "file_url": "u"}
+    _bild_stub(monkeypatch, lauf)
+    rid = "arkturian-daily-test3-bild"
+    mk = lambda refs: g.ImageGenRequest(prompt="x", model="gpt-image-2", confirm_api_billing=True,
+                                        request_id=rid, reference_image_urls=refs)
+    with pytest.raises(HTTPException):
+        await g.generate_image_endpoint(mk(_refs()), "x")
+    out = await g.generate_image_endpoint(mk(_refs(1000)), "x")
+    assert out["id"] == 9 and gesehen[1] == _refs(1000)
