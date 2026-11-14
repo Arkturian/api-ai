@@ -397,19 +397,26 @@ def _download_storage_images(prompt_text):
         try:
             with httpx.Client(timeout=30.0, follow_redirects=False) as c:
                 with oeffne_sync(c, url) as r:
+                    ct = r.headers.get('content-type', '')
+                    # Videos (Carbon liest sie samt Ton, 14.11.) mit eigener Endung
+                    # und eigener Grenze; Bilder bleiben bei 50 MB.
+                    ist_video = ct.startswith('video/')
+                    grenze = (int(os.getenv('VISION_VIDEO_MAX_MB', '300')) * 1024 * 1024) if ist_video else max_bytes
                     clen = r.headers.get('content-length')
-                    if clen and int(clen) > max_bytes:
+                    if clen and int(clen) > grenze:
                         logger.warning('localize: skip oversized ref %s (%s bytes > cap)' % (ohne_anfrage(url), clen))
                         continue
-                    ct = r.headers.get('content-type', '')
-                    ext = 'png' if 'png' in ct else ('webp' if 'webp' in ct else 'jpg')
+                    if ist_video:
+                        ext = {'video/quicktime': 'mov', 'video/webm': 'webm'}.get(ct.split(';')[0].strip(), 'mp4')
+                    else:
+                        ext = 'png' if 'png' in ct else ('webp' if 'webp' in ct else 'jpg')
                     p = os.path.join(img_dir, 'aiimg_' + uuid.uuid4().hex[:10] + '.' + ext)
                     total = 0
                     with open(p, 'wb') as fh:
                         for chunk in r.iter_bytes(65536):
                             total += len(chunk)
-                            if total > max_bytes:
-                                raise ValueError('stream exceeded %d-byte cap' % max_bytes)
+                            if total > grenze:
+                                raise ValueError('stream exceeded %d-byte cap' % grenze)
                             fh.write(chunk)
             out.append((url, p))
             logger.info('localized storage image -> ' + p)
@@ -2344,6 +2351,80 @@ def _agy_effort_vorgabe(model: str) -> Optional[str]:
     return vorgabe
 
 
+# ── agy: nur ueber das Abo, lokale Medien, Carbon fuer Vision (14.11.2026) ──
+# Fuer #2867 bekommt api-ai wieder einen GOOGLE_API_KEY. Erbt agy ihn, kann es
+# in den bezahlten API-Modus kippen (Mai-Vorfall, 209,56 EUR). Darum werden
+# alle Google-Schluessel aus der Umgebung des Kindprozesses entfernt.
+_AGY_VERBOTENE_UMGEBUNG = ("GOOGLE_API_KEY", "GEMINI_API_KEY", "GOOGLE_GENAI_API_KEY",
+                           "GOOGLE_APPLICATION_CREDENTIALS", "GOOGLE_GENAI_USE_VERTEXAI",
+                           "GOOGLE_CLOUD_PROJECT")
+
+
+def _agy_umgebung(quelle) -> dict:
+    env = dict(quelle)
+    for k in _AGY_VERBOTENE_UMGEBUNG:
+        env.pop(k, None)
+    return env
+
+
+_MEDIEN_ENDUNGEN = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".heic",
+                    ".mp4", ".mov", ".webm", ".m4v", ".mkv"}
+
+
+def _lokale_wurzeln() -> list:
+    roh = os.getenv("VISION_LOKALE_WURZELN", "/mnt/backup-disk/,/tmp/,/var/tmp/")
+    return [os.path.realpath(w.strip()) + os.sep for w in roh.split(",") if w.strip()]
+
+
+def _darf_lokale_pfade(request) -> bool:
+    """Lokale Dateipfade nur von Aufrufern auf demselben Host (Storage-Worker
+    ruft 127.0.0.1:8000 direkt). Alles ueber nginx traegt X-Real-IP und kommt
+    von aussen — sonst koennte jeder ueber das Modell Dateien von der Platte
+    lesen lassen, auch private Storage-Dateien."""
+    if request is None:
+        return True  # interner Funktionsaufruf
+    try:
+        host = request.client.host if request.client else ""
+    except Exception:
+        host = ""
+    if request.headers.get("x-real-ip") or request.headers.get("x-forwarded-for"):
+        return False
+    return host in ("127.0.0.1", "::1", "localhost")
+
+
+def _lokale_medien_kopieren(pfade, ziel_dir: str):
+    """Lokale Medien in den agy-Arbeitsbereich kopieren (agy liest nur unter
+    seinem cwd). Rueckgabe [(originalpfad, kopie)]. Wirft ValueError mit Grund."""
+    import shutil
+    import uuid
+    grenze = int(os.getenv("VISION_LOKAL_MAX_MB", "500")) * 1024 * 1024
+    wurzeln = _lokale_wurzeln()
+    out = []
+    try:
+        for q in pfade:
+            echt = os.path.realpath(q)
+            if not any(echt.startswith(w) for w in wurzeln):
+                raise ValueError(f"path_outside_allowed_roots: {q}")
+            ext = os.path.splitext(echt)[1].lower()
+            if ext not in _MEDIEN_ENDUNGEN:
+                raise ValueError(f"not_a_media_file: {q}")
+            if not os.path.isfile(echt):
+                raise ValueError(f"file_not_found: {q}")
+            if os.path.getsize(echt) > grenze:
+                raise ValueError(f"file_too_large: {q}")
+            ziel = os.path.join(ziel_dir, "ailoc_" + uuid.uuid4().hex[:12] + ext)
+            shutil.copyfile(echt, ziel)
+            out.append((q, ziel))
+    except Exception:
+        for _q, z in out:
+            try:
+                os.remove(z)
+            except OSError:
+                pass
+        raise
+    return out
+
+
 # ── agy-Weiterleitung (30.10.2026) ──────────────────────────────────
 # Seit 30.10. 19:20 lehnt Google Antigravity Aufrufe von arkturian mit
 # "User location is not supported" ab; dasselbe Konto geht auf arkserver.
@@ -2439,10 +2520,37 @@ async def gemini_endpoint(
     # the paid Gemini Vision API. With --no-sandbox --yolo the CLI reads local
     # file paths AND WebFetches image URLs from the prompt. OAuth subscription
     # is set up on these hosts now, so the old hard-503 is gone.
+    # Lokale Pfade (Storage-Worker auf demselben Host) in den agy-Arbeitsbereich
+    # kopieren; ausserhalb des cwd liest agy nichts und raet dann (15.06.).
+    _lokal = [p for p in image_paths if isinstance(p, str) and not p.startswith(("http://", "https://"))]
+    _lokale_kopien = []
+    if _lokal:
+        if not _darf_lokale_pfade(request):
+            raise HTTPException(status_code=403, detail={
+                "error": "local_paths_not_allowed",
+                "hint": "Lokale Dateipfade nur von Diensten auf demselben Host; sonst https-Adressen nutzen."})
+        import pwd as _pwd
+        _home = os.getenv("CLI_HOME") or _pwd.getpwuid(os.getuid()).pw_dir
+        _vdir = os.path.join(_home, ".aiapi-neutral", ".vision")
+        os.makedirs(_vdir, exist_ok=True)
+        try:
+            _lokale_kopien = _lokale_medien_kopieren(_lokal, _vdir)
+        except ValueError as e:
+            raise HTTPException(status_code=422, detail={"error": "local_path_rejected", "reason": str(e)})
+
     if image_paths:
         paths_text = "\n".join(image_paths)
         prompt_text = f"{prompt_text}\n\nAnalysiere folgende Bilder:\n{paths_text}"
         logger.info(f"Folding {len(image_paths)} image ref(s) into gemini CLI prompt (subscription path)")
+
+    # Vision ohne Modellwunsch -> Gemini 4 Carbon (Alex 14.11.2026). Gilt, sobald
+    # Bilder als Pfad oder Storage-Adresse im Prompt stehen.
+    if not model:
+        from ai.clients.storage_abruf import medien_adressen as _ma
+        if image_paths or _ma(prompt_text):
+            model = os.getenv("GEMINI_VISION_MODEL", "gemini-4-carbon-medium") or None
+            if model:
+                logger.info("agy: vision ohne Modellwunsch -> %s", model)
 
     try:
         # Gemini CLI has no --system-prompt, so prepend system prompt to user prompt
@@ -2526,6 +2634,7 @@ async def gemini_endpoint(
         logger.info("agy cmd model-arg: %r", cmd[cmd.index("--model")+1] if "--model" in cmd else None)
         _imgs = _download_storage_images(prompt_text)
         prompt_text = _mit_hinweis_unlesbar(prompt_text, _imgs)
+        _imgs = list(_imgs) + list(_lokale_kopien)
         for _u, _p in _imgs:
             prompt_text = prompt_text.replace(_u, "@" + _p)
         if _imgs:
@@ -2539,7 +2648,7 @@ async def gemini_endpoint(
         def run_gemini_cli():
             import os
             import pwd
-            env = os.environ.copy()
+            env = _agy_umgebung(os.environ)
             env["NO_COLOR"] = "1"
             cli_home = os.getenv("CLI_HOME") or pwd.getpwuid(os.getuid()).pw_dir
             env["HOME"] = cli_home
