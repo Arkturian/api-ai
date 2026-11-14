@@ -261,3 +261,32 @@ def test_bild_count_eins_gesendet_und_beide_formen_gesichert(bup, client):
     assert bup.typen[0].startswith(b"image/jpeg")
     z = _verbrauch(bup.tmp)
     assert len(z) == 2 and {x["agent"] for x in z} == {"Story"} and z[0]["art"] == "bild"
+
+
+def test_bild_hochskaliert_und_faellt_sonst_auf_1k_zurueck(bup, client, monkeypatch):
+    import base64
+    alt = bup.handler
+    zaehler = {"n": 0}
+
+    def h(req):
+        if str(req.url).endswith("/images/upscale"):
+            zaehler["n"] += 1
+            if json.loads(req.content)["mediaGenerationId"] == "g2":
+                return httpx.Response(503, json={"error": "weg"})
+            assert json.loads(req.content)["resolution"] == "4k"
+            return httpx.Response(200, json={"encodedImage": base64.b64encode(b"JPG4K").decode()})
+        return alt(req)
+    monkeypatch.setattr(fr, "_client", lambda timeout=60.0: httpx.AsyncClient(transport=httpx.MockTransport(h)))
+    r = client.post("/ai/genimage/flow", json={"prompt": "x", "count": 2, "upscale": "4k", "confirm_api_billing": True})
+    b = r.json()
+    assert zaehler["n"] == 2
+    a, z = b["images"]
+    assert a["upscaled"] == "4k" and a["original_storage_object_id"] == 701 and a["storage_object_id"] == 702
+    assert b["image_url"].endswith("/storage/media/702")
+    assert "upscale_error" in z and z["storage_object_id"] == 703
+    assert [x["storage_id"] for x in _verbrauch(bup.tmp)] == [702, 703]
+
+
+def test_bild_falscher_upscale_ohne_aufruf(bup, client):
+    r = client.post("/ai/genimage/flow", json={"prompt": "x", "upscale": "8k", "confirm_api_billing": True})
+    assert r.status_code == 422 and bup.aufrufe == []

@@ -493,6 +493,7 @@ class FlowImageRequest(BaseModel):
     reference_images: Optional[List[str]] = Field(default=None, description="bis 10, Storage-ID oder https-Adresse")
     collection_id: Optional[str] = Field(default="ai-generated-image")
     link_id: Optional[str] = None
+    upscale: Optional[str] = Field(default=None, description="2k | 4k: Flow skaliert kostenlos hoch (je Bild eine weitere Captcha-Loesung)")
     confirm_api_billing: Optional[bool] = Field(
         default=False, description="Pflicht true: je Auftrag eine Captcha-Loesung (300 frei), ggf. Flow-Credits")
 
@@ -530,6 +531,9 @@ async def flow_image(request: FlowImageRequest,
         raise HTTPException(status_code=422, detail={"error": "auto_requires_reference"})
     if len(refs) > 10:
         raise HTTPException(status_code=422, detail={"error": "too_many_references", "max": 10})
+    hoch = (request.upscale or "").strip().lower() or None
+    if hoch not in (None, "2k", "4k"):
+        raise HTTPException(status_code=422, detail={"error": "invalid_upscale", "allowed": ["2k", "4k"]})
     _token()
 
     body: Dict[str, Any] = {"prompt": request.prompt, "model": modell, "aspectRatio": seite,
@@ -551,13 +555,36 @@ async def flow_image(request: FlowImageRequest,
             inhalt = base64.b64decode(g["encodedImage"])
         gesichert = await _datei_sichern(g.get("fifeUrl"), inhalt, "image/png", request.collection_id,
                                          request.link_id, f"flow_{modell}_{i}_{int(time.time())}.png")
-        bilder.append({"storage_object_id": gesichert.get("storage_object_id"),
-                       "image_url": gesichert.get("storage_url"),
-                       "media_generation_id": g.get("mediaGenerationId"),
-                       "seed": g.get("seed"), "save_error": gesichert.get("save_error")})
+        eintrag = {"storage_object_id": gesichert.get("storage_object_id"),
+                   "image_url": gesichert.get("storage_url"),
+                   "media_generation_id": g.get("mediaGenerationId"),
+                   "seed": g.get("seed"), "save_error": gesichert.get("save_error")}
+        if hoch and g.get("mediaGenerationId"):
+            # Hochskalieren kostet keine Flow-Credits; scheitert es, bleibt das 1K-Bild.
+            try:
+                import base64
+                gross = await _flow("POST", "/images/upscale", timeout=240.0,
+                                    json_body={"mediaGenerationId": g["mediaGenerationId"], "resolution": hoch})
+                roh = base64.b64decode(gross.get("encodedImage") or "")
+                if not roh:
+                    raise ValueError("leer")
+                g2 = await _datei_sichern(None, roh, "image/jpeg", request.collection_id, request.link_id,
+                                          f"flow_{modell}_{i}_{hoch}_{int(time.time())}.jpg")
+                if g2.get("storage_object_id"):
+                    eintrag.update({"original_storage_object_id": eintrag["storage_object_id"],
+                                    "original_url": eintrag["image_url"],
+                                    "storage_object_id": g2["storage_object_id"],
+                                    "image_url": g2["storage_url"], "upscaled": hoch})
+                else:
+                    eintrag["upscale_error"] = g2.get("save_error")
+            except HTTPException as e:
+                eintrag["upscale_error"] = e.detail
+            except Exception as e:
+                eintrag["upscale_error"] = type(e).__name__
+        bilder.append(eintrag)
         bv.buchen(agent=agent, quelle=quelle, art="bild", anzahl=1, model=modell,
                   routed_via="google-flow", kosten_usd=None,
-                  storage_id=gesichert.get("storage_object_id"), request_id=job_id)
+                  storage_id=eintrag.get("storage_object_id"), request_id=job_id)
     if not bilder:
         raise HTTPException(status_code=502, detail={"error": "flow_no_images", "job_id": job_id})
     out: Dict[str, Any] = {"job_id": job_id, "model": modell, "routed_via": "google-flow", "images": bilder,
