@@ -51,7 +51,9 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],  # In production: specify allowed origins
-    allow_credentials=True,
+    # #2938: Zugang laeuft ueber Kopfzeilen (Bearer, X-API-KEY), nie ueber
+    # Cookies. Mit "*" + credentials spiegelt Starlette jede Herkunft.
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -156,6 +158,14 @@ _BEZAHLPFADE = (
     "/ai/dialog",
     # Jev (TypeSafe) — pro Token abgerechnet, 0,042 USD/1M Eingabe (#5083).
     "/ai/jev",
+    # #2938 (Befund 59): weitere Anbieter- bzw. Lastpfade.
+    "/ai/translate",     # OpenAI
+    "/ai/upscale",       # Replicate
+    "/ai/gendepth",      # Replicate
+    "/ai/audio",         # ffmpeg + oeffentlicher Upload
+    "/ai/decisions",     # OpenAI Decisions
+    "/ai/realtime/token",
+    "/ai/realtime/live",
 )
 
 

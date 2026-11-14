@@ -193,6 +193,8 @@ def test_konto_kuerzt_adresse(up, client, monkeypatch):
             return httpx.Response(200, json={"alex@gmail.com": {"health": "ok", "secret": "x"}})
         return httpx.Response(200, json={})
     monkeypatch.setattr(fr, "_client", lambda timeout=60.0: httpx.AsyncClient(transport=httpx.MockTransport(h)))
+    from ai import auth_guard as ag
+    client.app.dependency_overrides[ag.angemeldet] = lambda: "test"
     b = client.get("/ai/genvideo/flow/account").json()
     assert b["accounts"] == [{"account": "a***@gmail.com", "health": "ok"}]
     assert "alex@" not in json.dumps(b)

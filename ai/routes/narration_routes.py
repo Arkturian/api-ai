@@ -11,7 +11,8 @@ GET  /ai/tts/elevenlabs/subscription — quota/tier proxy so batch scripts can p
 import logging
 from typing import Optional
 
-from fastapi import APIRouter, Depends, Form, HTTPException, UploadFile, File
+from fastapi import APIRouter, Depends, Form, Header, HTTPException, UploadFile, File
+from ai import auth_guard as _ag
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
@@ -33,7 +34,8 @@ def get_api_key():
 
 
 @router.get("/tts/elevenlabs/subscription")
-async def elevenlabs_subscription(api_key: str = Depends(get_api_key)):
+async def elevenlabs_subscription(api_key: str = Depends(get_api_key),
+                                  x_api_key: Optional[str] = Header(default=None, alias="X-API-KEY")):
     """Proxy for ElevenLabs ``GET /v1/user/subscription``.
 
     Lets batch scripts (ArTrack's pre-flight quota check, IACP
@@ -83,11 +85,12 @@ async def elevenlabs_subscription(api_key: str = Depends(get_api_key)):
         "character_limit": limit,
         "remaining": max(0, limit - count),
         "next_reset_unix": data.get("next_character_count_reset_unix"),
-        "raw": data,
+        # #2938: das volle Konto (Rechnungsdaten, Stimmen-Limits) nur fuer den Betreiber.
+        **({"raw": data} if _ag.ist_betreiber(x_api_key) else {}),
     }
 
 
-@router.get("/tts/elevenlabs/cost-status")
+@router.get("/tts/elevenlabs/cost-status", dependencies=[Depends(_ag.betreiber)])
 async def elevenlabs_cost_status():
     """Unser Zeichenzaehler plus ElevenLabs' eigene Abrechnung nebeneinander.
 

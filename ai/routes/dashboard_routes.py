@@ -23,6 +23,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from fastapi import Depends
+from ai import auth_guard as _ag
+
 import httpx
 from fastapi import APIRouter, Response
 from fastapi.responses import HTMLResponse
@@ -132,13 +135,13 @@ def _build_snapshot(include_local_cli: bool = True) -> dict[str, Any]:
 
 
 # ── JSON snapshot (no smoke tests — fast) ──────────────────────────────
-@router.get("/status.json")
+@router.get("/status.json", dependencies=[Depends(_ag.betreiber_oder_lokal)])
 async def status_json() -> dict[str, Any]:
     return _build_snapshot(include_local_cli=True)
 
 
 # ── Live smoke tests (slow — runs real API calls) ──────────────────────
-@router.post("/status/smoketest")
+@router.post("/status/smoketest", dependencies=[Depends(_ag.betreiber)])
 async def status_smoketest() -> dict[str, Any]:
     snap = _build_snapshot(include_local_cli=False)
     tasks = []
@@ -290,7 +293,7 @@ def _provider_card(name: str, info: dict[str, Any]) -> str:
 """
 
 
-@router.get("/status", response_class=HTMLResponse)
+@router.get("/status", response_class=HTMLResponse, dependencies=[Depends(_ag.betreiber_oder_lokal)])
 async def status_html() -> Response:
     snap = _build_snapshot(include_local_cli=True)
     models = snap["models_json"]

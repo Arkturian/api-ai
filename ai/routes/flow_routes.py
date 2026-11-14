@@ -31,7 +31,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import httpx
-from fastapi import APIRouter, Header, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException
+from ai import auth_guard as _ag
 from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
@@ -206,7 +207,7 @@ async def _bild_hochladen(wert: str) -> str:
         while True:
             try:
                 async with httpx.AsyncClient(timeout=60.0, follow_redirects=False) as c:
-                    async with sa.oeffne(c, url, mit_schluessel=True) as r:
+                    async with sa.oeffne(c, url, mit_schluessel=False) as r:  # #2659/#2938: Aufrufer-Adresse, kein Dienstschluessel
                         typ = (r.headers.get("content-type") or "").split(";")[0].strip().lower()
                         buf = bytearray()
                         async for teil in r.aiter_bytes(65536):
@@ -456,7 +457,7 @@ async def _stand_ausgeben(job_id, job, sichern, collection_id, link_id, schaetzu
     return out
 
 
-@router.get("/genvideo/flow/account")
+@router.get("/genvideo/flow/account", dependencies=[Depends(_ag.angemeldet)])
 async def flow_account():
     """Verknuepfte Google-Konten (Adresse gekuerzt), Gesundheit, Captcha-Guthaben."""
     konten = await _flow("GET", "/accounts")

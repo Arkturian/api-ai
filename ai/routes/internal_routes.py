@@ -560,7 +560,7 @@ async def openai_realtime_cost_shared_state_track(
     return status
 
 
-@router.get("/cli-pressure")
+@router.get("/cli-pressure", dependencies=[Depends(_betreiber)])
 async def cli_pressure():
     """Live snapshot of per-provider CLI semaphore saturation.
 

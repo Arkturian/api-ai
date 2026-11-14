@@ -9,6 +9,7 @@ Endpoints for text-based AI models:
 """
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
+from ai import auth_guard as _ag
 # Real operator gate — the local get_api_key() is a placeholder that
 # verifies nothing, which is why these three served the owner's spend
 # to the open internet until 2026-08-07.
@@ -2207,7 +2208,7 @@ async def chatgpt_cost_status(_: str = Depends(require_operator_key)):
     return codex_cost_tracker.get_status()
 
 
-@router.get("/chatgpt/{request_id}")
+@router.get("/chatgpt/{request_id}", dependencies=[Depends(_ag.betreiber_oder_lokal)])
 async def chatgpt_status(request_id: str):
     """Status eines /ai/chatgpt-Auftrags mit request_id. `cost-status`
     ist ein eigener Endpunkt, keine Kennung."""
@@ -3153,7 +3154,7 @@ async def gemini_vision_endpoint(
         raise HTTPException(status_code=500, detail=error_msg)
 
 
-@router.post("/gemini/send-report")
+@router.post("/gemini/send-report", dependencies=[Depends(_ag.betreiber)])
 async def gemini_send_report():
     """
     Manually trigger a usage report via Telegram.
@@ -3213,6 +3214,25 @@ async def gcp_budget_webhook(request: Request):
     from ..services.notification_manager import notification_manager
 
     try:
+        # #2938: anonym konnte jeder den GCP-Hard-Cap ausloesen. Google
+        # schickt bei Push-Abos mit Authentifizierung ein OIDC-JWT. Erst
+        # messen, ob es kommt (Protokoll), dann mit GCP_WEBHOOK_AUDIENCE
+        # scharf schalten: ohne gueltiges Google-JWT 401.
+        _auth = request.headers.get("authorization") or ""
+        logger.info("GCP webhook: bearer_present=%s", _auth.lower().startswith("bearer "))
+        _aud = os.getenv("GCP_WEBHOOK_AUDIENCE", "").strip()
+        if _aud:
+            try:
+                from google.oauth2 import id_token as _idt
+                from google.auth.transport import requests as _greq
+                _claims = _idt.verify_oauth2_token(_auth.split(" ", 1)[1], _greq.Request(), audience=_aud)
+                _erlaubt = os.getenv("GCP_WEBHOOK_SA_EMAIL", "").strip()
+                if _erlaubt and _claims.get("email") != _erlaubt:
+                    raise ValueError("falsches Dienstkonto")
+            except Exception as _e:
+                logger.warning("GCP webhook abgewiesen: %s", type(_e).__name__)
+                raise HTTPException(status_code=401, detail={"error": "invalid_pubsub_token"})
+
         body = await request.json()
 
         # Decode Pub/Sub message
@@ -3221,7 +3241,8 @@ async def gcp_budget_webhook(request: Request):
             decoded = base64.b64decode(message_data).decode()
             budget_data = json.loads(decoded)
 
-            budget_name = budget_data.get("budgetDisplayName", "Unknown")
+            import html as _html_mod
+            budget_name = _html_mod.escape(str(budget_data.get("budgetDisplayName", "Unknown")))
             cost_amount = budget_data.get("costAmount", 0)
             budget_amount = budget_data.get("budgetAmount", 0)
             threshold = budget_data.get("alertThresholdExceeded", 0) * 100
@@ -3279,13 +3300,15 @@ async def gcp_budget_webhook(request: Request):
 
         return {"status": "ok", "notification": "sent"}
 
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"GCP Budget webhook error: {e}")
         return {"status": "error", "message": str(e)}
 
 
 @router.post("/gemini/cost-status/reset-hard-cap")
-async def reset_gcp_hard_cap(api_key: str = Depends(get_api_key)):
+async def reset_gcp_hard_cap(_: str = Depends(_ag.betreiber)):
     """Manually clear the persistent GCP hard-cap flag.
 
     Use only after confirming GCP-side budget has reset (month rollover)
@@ -3313,7 +3336,7 @@ async def get_notification_status():
     return notification_manager.get_status()
 
 
-@router.post("/notifications/reset/{notification_type}")
+@router.post("/notifications/reset/{notification_type}", dependencies=[Depends(_ag.betreiber)])
 async def reset_notification_cooldown(notification_type: str):
     """
     Reset cooldown for a specific notification type.

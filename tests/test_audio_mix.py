@@ -117,8 +117,11 @@ def test_kein_anbieter_kein_zaehler():
     q = inspect.getsource(m)
     assert "elevenlabs" not in q.lower().replace("nicht neu gebaut", "")  # keine Sperre, kein Zaehler
     assert "openai" not in q.lower()
+    # Seit #2938 (Befund 59) steht /ai/audio in den Bezahlpfaden: kein
+    # Anbieter, aber ffmpeg-Last und ein oeffentlicher Upload mit dem
+    # Dienstschluessel. Ein Zaehler bleibt trotzdem aussen vor.
     from main import _ist_bezahlpfad
-    assert not _ist_bezahlpfad("/ai/audio/mix")
+    assert _ist_bezahlpfad("/ai/audio/mix")
 
 
 def test_route_registriert():

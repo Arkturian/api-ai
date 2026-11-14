@@ -82,6 +82,13 @@ def _segment_timestamps(word_timestamps: list, interval_s: float) -> list:
 
     total_duration = max(w.get("end", 0) for w in word_timestamps) if word_timestamps else 0
     num_images = max(1, math.floor(total_duration / interval_s))
+    # #2938: ohne Deckel erzeugte eine lange Szene mit kleinem Intervall
+    # beliebig viele bezahlte Bilder.
+    deckel = int(os.getenv("SCENE_MAX_IMAGES", "24"))
+    if num_images > deckel:
+        raise HTTPException(status_code=422, detail={
+            "error": "too_many_scene_images", "requested": num_images, "max": deckel,
+            "hint": "interval_s vergroessern oder die Szene teilen."})
 
     # If scene is shorter than interval, just one image with all text
     if total_duration <= interval_s:

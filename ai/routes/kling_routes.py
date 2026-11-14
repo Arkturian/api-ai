@@ -30,6 +30,7 @@ import time
 import uuid
 
 from ai.clients.storage_client import storage_api_key
+from ai import auth_guard as _ag
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -416,7 +417,7 @@ async def kling_status(task_id: str, save_to_storage: bool = False,
     return out
 
 
-@router.get("/genvideo/kling/account")
+@router.get("/genvideo/kling/account", dependencies=[Depends(_ag.angemeldet)])
 async def kling_account(api_key: str = Depends(get_api_key)):
     """Remaining Kling units per resource pack — check before burning budget."""
     now_ms = int(time.time() * 1000)

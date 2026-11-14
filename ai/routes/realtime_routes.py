@@ -45,6 +45,7 @@ import asyncio
 import fcntl
 import hashlib
 import hmac
+from urllib.parse import quote as _url_quote
 import logging
 import json
 import os
@@ -2810,7 +2811,7 @@ async def _fetch_presence_context(agent: str, authorization: str) -> Optional[di
     base = os.getenv("CLOUD_API_URL", "https://cloud-api.arkserver.arkturian.com")
     try:
         async with httpx.AsyncClient(timeout=8.0) as client:
-            r = await client.get(f"{base}/api/sessions/{agent}/presence-context",
+            r = await client.get(f"{base}/api/sessions/{_quote_seg(agent)}/presence-context",
                                  headers={"Authorization": authorization},
                                  params={"question": "[mint] agent-presence"})
         if r.status_code != 200:
@@ -6646,6 +6647,11 @@ async def _tool_look_at_screen(args: dict, authorization: Optional[str]) -> dict
     return {"storage_id": sid, "description": antwort.response, "model": antwort.model}
 
 
+
+def _quote_seg(wert: str) -> str:
+    """#2938: Agentenname als ein Pfadsegment (kein ../, ?, # in cloud-api-URLs)."""
+    return _url_quote(str(wert), safe="")
+
 async def _tool_agent_status(args: dict, authorization: Optional[str]) -> Any:
     """Agentenzustände lesen — UNTER DER KENNUNG DES AUFRUFERS.
 
@@ -7302,7 +7308,7 @@ async def _tool_frage_kleinhirn(args: dict, authorization: Optional[str],
         try:
             # `question` ist Audit-Metadatum (`generated_for_question`),
             # kein Modellaufruf — verifiziert in cloud-api presence.py.
-            r = await client.get(f"{base}/api/sessions/{agent}/presence-context",
+            r = await client.get(f"{base}/api/sessions/{_quote_seg(agent)}/presence-context",
                                  headers=hdrs, params={"question": frage})
         except Exception as exc:
             return {"ok": False, "status": "unavailable", "agent": agent,
