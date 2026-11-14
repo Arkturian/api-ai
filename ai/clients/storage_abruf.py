@@ -51,6 +51,20 @@ class PrivateDatei(Exception):
         super().__init__(f"private_media: {ohne_anfrage(url)}")
 
 
+def ist_safety_pending(status: int, inhalt: bytes) -> bool:
+    """451 mit code safety_pending: Storage prueft die Datei noch (ca. 1 min
+    nach dem Hochladen). Vorlaeufig, kein Urteil — warten hilft."""
+    if status != 451:
+        return False
+    try:
+        import json as _json
+        d = _json.loads(inhalt or b"{}")
+        d = d.get("detail", d) if isinstance(d, dict) else {}
+        return isinstance(d, dict) and d.get("code") == "safety_pending"
+    except Exception:
+        return False
+
+
 class GesperrteDatei(Exception):
     """Storage verweigert die Datei wegen des Safety-Urteils (451).
 
@@ -59,6 +73,10 @@ class GesperrteDatei(Exception):
     def __init__(self, url: str):
         self.url = url
         super().__init__(f"quarantined: {ohne_anfrage(url)}")
+
+
+class SicherheitAusstehend(GesperrteDatei):
+    """451 safety_pending: noch keine Freigabe, kein Urteil. Wer kann, wartet."""
 
 
 def _ursprung(url: str):
@@ -189,6 +207,16 @@ def _ist_private_media(status: int, inhalt: bytes) -> bool:
 def private_media_detail(url: str) -> dict:
     """Antwortkoerper fuer den 403 an den Aufrufer."""
     return {"error": "private_media", "url": ohne_anfrage(url), "hint": PRIVATE_MEDIA_HINWEIS}
+
+
+SAFETY_WARTEN_S = float(os.getenv("REFERENZ_SAFETY_WARTEN_S", "90"))
+
+
+def ausstehend_detail(url: str) -> dict:
+    """Antwortkoerper, wenn die Pruefung auch nach dem Warten nicht fertig ist."""
+    return {"error": "reference_safety_pending", "code": "safety_pending", "url": ohne_anfrage(url),
+            "retry_after_s": 30,
+            "hint": "Storage prueft die frisch hochgeladene Datei noch (meist ~1 min). Gleich erneut senden."}
 
 
 def gesperrt_detail(url: str) -> dict:
@@ -387,6 +415,8 @@ async def oeffne(client: httpx.AsyncClient, url: str, mit_schluessel: bool = Fal
             if r.status_code == 403 and _ist_private_media(403, await r.aread()):
                 raise PrivateDatei(url)
             if r.status_code == 451:
+                if ist_safety_pending(451, await r.aread()):
+                    raise SicherheitAusstehend(url)
                 raise GesperrteDatei(url)
             r.raise_for_status()
             yield r
@@ -411,6 +441,8 @@ def oeffne_sync(client: httpx.Client, url: str, mit_schluessel: bool = False):
             if r.status_code == 403 and _ist_private_media(403, r.read()):
                 raise PrivateDatei(url)
             if r.status_code == 451:
+                if ist_safety_pending(451, r.read()):
+                    raise SicherheitAusstehend(url)
                 raise GesperrteDatei(url)
             r.raise_for_status()
             yield r

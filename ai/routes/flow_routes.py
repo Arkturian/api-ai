@@ -183,6 +183,9 @@ def _schreiben(job_id: str, daten: Dict[str, Any]) -> None:
 
 # --- Startbilder -------------------------------------------------------------
 
+_SAFETY_TAKT_S = 5.0
+
+
 def _bild_adresse(wert: str) -> str:
     """Storage-ID oder Adresse -> Adresse."""
     w = str(wert).strip()
@@ -198,16 +201,25 @@ async def _bild_hochladen(wert: str) -> str:
     from ai.clients import storage_abruf as sa
     url = _bild_adresse(wert)
     grenze = 20 * 1024 * 1024
+    frist = time.monotonic() + sa.SAFETY_WARTEN_S
     try:
-        async with httpx.AsyncClient(timeout=60.0, follow_redirects=False) as c:
-            async with sa.oeffne(c, url, mit_schluessel=True) as r:
-                typ = (r.headers.get("content-type") or "").split(";")[0].strip().lower()
-                buf = bytearray()
-                async for teil in r.aiter_bytes(65536):
-                    buf.extend(teil)
-                    if len(buf) > grenze:
-                        raise HTTPException(status_code=422, detail={"error": "image_too_large",
-                                                                     "max_mb": 20})
+        while True:
+            try:
+                async with httpx.AsyncClient(timeout=60.0, follow_redirects=False) as c:
+                    async with sa.oeffne(c, url, mit_schluessel=True) as r:
+                        typ = (r.headers.get("content-type") or "").split(";")[0].strip().lower()
+                        buf = bytearray()
+                        async for teil in r.aiter_bytes(65536):
+                            buf.extend(teil)
+                            if len(buf) > grenze:
+                                raise HTTPException(status_code=422, detail={"error": "image_too_large",
+                                                                             "max_mb": 20})
+                break
+            except sa.SicherheitAusstehend:
+                # Frisch hochgeladen, Storage prueft noch (~1 min, Tschepp 14.11.): warten statt scheitern.
+                if time.monotonic() >= frist:
+                    raise HTTPException(status_code=422, detail=sa.ausstehend_detail(url))
+                await asyncio.sleep(_SAFETY_TAKT_S)
     except HTTPException:
         raise
     except sa.PrivateDatei:

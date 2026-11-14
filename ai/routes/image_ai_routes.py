@@ -300,7 +300,14 @@ from ai.clients.storage_abruf import (  # noqa: E402
     darf_schluessel_sehen as _darf_schluessel_sehen,
     ist_private_antwort,
     private_media_detail,
+    ist_safety_pending,
+    ausstehend_detail,
+    SAFETY_WARTEN_S,
 )
+import asyncio  # noqa: E402
+import time  # noqa: E402
+
+_SAFETY_TAKT_S = 5.0
 
 
 async def _hole_referenz(client, url: str, storage_key: str, max_spruenge: int = 3):
@@ -397,6 +404,14 @@ async def _download_reference_images(urls: List[str]) -> List[tuple]:
         for i, url in enumerate(urls):
             try:
                 r = await _hole_referenz(client, url, storage_key)
+                # Frisch hochgeladen: Storage prueft noch und antwortet ~1 min mit
+                # 451 safety_pending (Tschepp 14.11.). Kein Urteil — kurz warten.
+                frist = time.monotonic() + SAFETY_WARTEN_S
+                while ist_safety_pending(r.status_code, r.content):
+                    if time.monotonic() >= frist:
+                        raise HTTPException(status_code=422, detail=ausstehend_detail(url))
+                    await asyncio.sleep(_SAFETY_TAKT_S)
+                    r = await _hole_referenz(client, url, storage_key)
                 if ist_private_antwort(r):
                     # Status und error bleiben: narrate_jobs und Aufrufer
                     # verzweigen darauf. code/hint nennen den richtigen Weg.
