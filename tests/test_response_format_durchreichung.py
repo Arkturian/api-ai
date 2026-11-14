@@ -124,7 +124,7 @@ def test_cli_pfade_ohne_feld_lassen_durch():
 @pytest.mark.parametrize(
     "funktion,endpunkt",
     [
-        (t.claude_endpoint, "claude"),
+        (t._claude_mit_rechten, "claude"),
         (t._chatgpt_einmal, "chatgpt"),
         (t.grok_endpoint, "grok"),
         (t.gemini_endpoint, "gemini"),

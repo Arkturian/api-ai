@@ -59,9 +59,15 @@ def _enthaelt(cmd, teil):
     return any(cmd[i:i + len(teil)] == teil for i in range(len(cmd)))
 
 
-def test_vorgabe_laesst_werkzeuge_an(monkeypatch, tmp_path):
+def test_vorgabe_schaltet_werkzeuge_seit_2936_ab(monkeypatch, tmp_path):
     laeufe = _verdrahten(monkeypatch, tmp_path)
     asyncio.run(t._chatgpt_einmal(t.Prompt(prompt="hallo"), "gpt-5.6-luna", "x"))
+    assert _enthaelt(laeufe[0], AUS)
+
+
+def test_tools_true_laesst_werkzeuge_an(monkeypatch, tmp_path):
+    laeufe = _verdrahten(monkeypatch, tmp_path)
+    asyncio.run(t._chatgpt_einmal(t.Prompt(prompt="hallo", tools=True), "gpt-5.6-luna", "x"))
     assert not _enthaelt(laeufe[0], AUS)
     assert "features.shell_tool=false" not in laeufe[0]
 
@@ -118,7 +124,7 @@ def test_tools_false_laeuft_im_text_home_mit_link_auf_die_anmeldung(monkeypatch,
 
 def test_vorgabe_bleibt_im_hauptverzeichnis(monkeypatch, tmp_path):
     laeufe = _verdrahten(monkeypatch, tmp_path)
-    asyncio.run(t._chatgpt_einmal(t.Prompt(prompt="x"), "gpt-5.6-luna", "x"))
+    asyncio.run(t._chatgpt_einmal(t.Prompt(prompt="x", tools=True), "gpt-5.6-luna", "x"))
     assert umgebungen[0]["CODEX_HOME"] == str(tmp_path / "codex")
     assert "--ephemeral" not in laeufe[0]
     assert not Path(str(tmp_path / "codex") + "-text").exists()

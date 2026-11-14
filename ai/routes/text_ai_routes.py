@@ -8,12 +8,12 @@ Endpoints for text-based AI models:
 - Gemini (Google)
 """
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Request
 # Real operator gate — the local get_api_key() is a placeholder that
 # verifies nothing, which is why these three served the owner's spend
 # to the open internet until 2026-08-07.
 from ai.routes.realtime_routes import require_operator_key
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 from typing import Optional, List, Dict, Any, Union
 import asyncio
 import logging
@@ -132,6 +132,17 @@ def bilder_fuer_codex_benutzer(pfade):
         if q.startswith(("http://", "https://")) or not os.path.isfile(q):
             neu.append(q)
             continue
+        # #2936: als root wird nur kopiert, was ein Medium unter den erlaubten
+        # Wurzeln oder im eigenen Vision-Ordner ist, nie /etc/shadow & Co.
+        _cli_home = os.getenv("CLI_HOME") or pwd.getpwuid(os.getuid()).pw_dir
+        grund = _lokaler_pfad_erlaubt(q, zusatz=(os.path.join(_cli_home, ".aiapi-neutral", ".vision"),))
+        if grund:
+            for k in kopien:
+                try:
+                    os.remove(k)
+                except OSError:
+                    pass
+            raise HTTPException(status_code=422, detail={"error": "local_path_rejected", "reason": grund})
         ziel = os.path.join(basis, "aiimg_" + uuid.uuid4().hex[:12] + os.path.splitext(q)[1])
         shutil.copyfile(q, ziel)
         os.chown(ziel, pw.pw_uid, pw.pw_gid)
@@ -595,8 +606,19 @@ PERSONA_TTL_S = int(os.getenv("AI_API_PERSONA_TTL", "60"))
 _PERSONA_INSTR = {"claude": "CLAUDE.md", "chatgpt": "AGENTS.md", "gemini": "GEMINI.md"}
 
 
+_PERSONA_NAME = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")
+
+
+def _persona_pruefen(variant) -> str:
+    """#2935/#2936: persona_variant landete ungeprueft in einem Pfad (Schreiben
+    als root) und in einer URL mit X-IACP-Token. Nur ein Name ist erlaubt."""
+    if not isinstance(variant, str) or not _PERSONA_NAME.match(variant):
+        raise ValueError("persona_variant: nur a-z 0-9 _ -, 1 bis 32 Zeichen")
+    return variant
+
+
 def persona_dir_for(endpoint: str, variant: str) -> Path:
-    return PERSONAS_DIR / f"api-ai-{endpoint}-{variant}"
+    return PERSONAS_DIR / f"api-ai-{endpoint}-{_persona_pruefen(variant)}"
 
 
 async def get_persona_bundle(endpoint: str, variant: Optional[str]) -> dict:
@@ -615,6 +637,10 @@ async def get_persona_bundle(endpoint: str, variant: Optional[str]) -> dict:
     if not variant:
         return empty
     import httpx
+    try:
+        variant = _persona_pruefen(variant)
+    except ValueError:
+        return empty
     vbot = f"api-ai-{endpoint}-{variant}"
     cache_dir = PERSONAS_DIR / vbot
     cache = cache_dir / "effective.json"
@@ -641,7 +667,8 @@ async def get_persona_bundle(endpoint: str, variant: Optional[str]) -> dict:
     # (Re)fetch from cloud-api
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:
-            r = await client.get(f"{CLOUD_API_URL}/api/sessions/{vbot}/effective-prompt")
+            from urllib.parse import quote as _quote
+            r = await client.get(f"{CLOUD_API_URL}/api/sessions/{_quote(vbot, safe='')}/effective-prompt")
             r.raise_for_status()
             payload = r.json()
         cache_dir.mkdir(parents=True, exist_ok=True)
@@ -730,6 +757,11 @@ class PromptText(BaseModel):
     image_paths: Optional[List[str]] = None  # Local file paths - Claude CLI reads these directly
 
 class Prompt(BaseModel):
+    @field_validator("persona_variant", check_fields=False)
+    @classmethod
+    def _persona_name(cls, v):
+        return v if v is None else _persona_pruefen(v)
+
     prompt: Union[str, PromptText]  # Support both string and nested object
     system: Optional[str] = None
     max_tokens: Optional[int] = 1000
@@ -775,8 +807,11 @@ class Prompt(BaseModel):
     # in codex Shell, Code-Modus, Apps und Plugins ab: reiner Textaufruf.
     # Anlass 11.11. (CloudV2, Vorlesen): "in 150 Woertern" bei effort high
     # liess das Modell per Shell nachzaehlen, 3 Runden, 42k Tokens, 90 s.
-    # Default True = bisheriges Verhalten. Auf anderen CLI-Pfaden 422.
-    tools: bool = True
+    # Vorgabe seit #2936 (14.11.2026): None = AUS. Werkzeuge (Shell, Code)
+    # nur auf ausdruecklichen Wunsch UND mit Betreiber-Schluessel; gemessen
+    # nutzte am 13./14.11. kein Aufruf Shell oder Websuche.
+    # Auf anderen CLI-Pfaden 422 bei tools=false.
+    tools: Optional[bool] = None
     # request_id (nur /ai/chatgpt): dauerhafter Status + Idempotenz nach dem
     # narrate-Muster (Story, PM-Entscheidung 13.09.): ein Timeout nach
     # ausgefuehrtem Auftrag heisst "Ergebnis wiederfinden", nicht
@@ -981,7 +1016,7 @@ def _codex_text_anmeldung_heilen(link: str, quelle: str) -> None:
 
 def _weise_tools_aus_ab(prompt: "Prompt", endpoint: str) -> None:
     """Pfade ohne Schalter: tools=false waere dort still wirkungslos -> 422."""
-    if getattr(prompt, "tools", True):
+    if getattr(prompt, "tools", None) is not False:
         return
     raise HTTPException(
         status_code=422,
@@ -1115,7 +1150,23 @@ def _claude_konto_vorab() -> None:
 async def claude_endpoint(
     prompt: Prompt,
     model: Optional[str] = None,
-    api_key: str = Depends(get_api_key)
+    api_key: str = Depends(get_api_key),
+    request: Request = None,
+    x_api_key: Optional[str] = Header(default=None, alias="X-API-KEY"),
+):
+    _marke = _rechte_setzen(request, x_api_key)
+    try:
+        _lokale_pfade_pruefen(_bildpfade(prompt))
+        return await _claude_mit_rechten(prompt, model, api_key)
+    finally:
+        if _marke is not None:
+            _AUFRUF_RECHTE.reset(_marke)
+
+
+async def _claude_mit_rechten(
+    prompt: Prompt,
+    model: Optional[str] = None,
+    api_key: str = "placeholder",
 ):
     """
     Claude AI endpoint via Claude Code CLI (claude -p)
@@ -1628,6 +1679,69 @@ def _codex_model_rejected(stdout: str) -> bool:
     return any(m in stdout for m in _CODEX_MODEL_REJECTED_MARKERS) and "agent_message" not in stdout
 
 
+# ── Aufrufer-Rechte (#2936, Befund 57) ─────────────────────────────────
+# Die CLI-Pfade sind ohne Schluessel offen (#1755). Was ueber reinen Text
+# hinausgeht, haengt deshalb am Aufrufer: lokale Dateipfade nur von Diensten
+# auf demselben Host, Werkzeuge und volle Sandbox nur mit Betreiber-Schluessel.
+import contextvars as _cv
+import hmac as _hmac
+
+_AUFRUF_RECHTE = _cv.ContextVar("aufruf_rechte", default={"lokal": True, "betreiber": False})
+
+
+def _ist_betreiber(x_api_key) -> bool:
+    erwartet = os.environ.get("REALTIME_GRANT_SERVICE_KEY", "")
+    return bool(erwartet and isinstance(x_api_key, str) and x_api_key
+                and _hmac.compare_digest(x_api_key, erwartet))
+
+
+def _rechte_setzen(request, x_api_key):
+    """Nur bei echten HTTP-Aufrufen setzen. Interne Funktionsaufrufe
+    (claude->codex, audio_drama) erben die Rechte des aeusseren Aufrufs."""
+    if request is None:
+        return None
+    return _AUFRUF_RECHTE.set({"lokal": _darf_lokale_pfade(request),
+                               "betreiber": _ist_betreiber(x_api_key)})
+
+
+def _bildpfade(prompt) -> list:
+    if isinstance(prompt.prompt, str):
+        return list(prompt.image_paths or [])
+    return list(prompt.prompt.image_paths or prompt.image_paths or [])
+
+
+def _lokaler_pfad_erlaubt(q: str, zusatz=()) -> str:
+    """Grund als Text, wenn der Pfad nicht erlaubt ist, sonst ''."""
+    echt = os.path.realpath(q)
+    wurzeln = _lokale_wurzeln() + [os.path.realpath(z) + os.sep for z in zusatz]
+    if not any(echt.startswith(w) for w in wurzeln):
+        return f"path_outside_allowed_roots: {q}"
+    if os.path.splitext(echt)[1].lower() not in _MEDIEN_ENDUNGEN:
+        return f"not_a_media_file: {q}"
+    if not os.path.isfile(echt):
+        return f"file_not_found: {q}"
+    return ""
+
+
+def _lokale_pfade_pruefen(image_paths) -> None:
+    """Lokale image_paths: nur vom selben Host, nur Medien unter den Wurzeln."""
+    lokal = [p for p in (image_paths or []) if isinstance(p, str)
+             and not p.startswith(("http://", "https://"))]
+    if not lokal:
+        return
+    if not _AUFRUF_RECHTE.get().get("lokal"):
+        raise HTTPException(status_code=403, detail={
+            "error": "local_paths_not_allowed",
+            "hint": "Lokale Dateipfade nur von Diensten auf demselben Host; sonst https-Adressen nutzen."})
+    for q in lokal:
+        grund = _lokaler_pfad_erlaubt(q)
+        if grund:
+            raise HTTPException(status_code=422, detail={"error": "local_path_rejected", "reason": grund})
+
+
+_SANDBOX_VOLL = ("voll", "full", "danger-full-access")
+
+
 def _codex_sandbox_args(sandbox) -> list:
     """Sandbox-Wahl fuer `codex exec` — verifiziert 2026-09-01 als Dienst-User:
     `-s read-only` laeuft im exec-Modus ohne Haengen und ohne Rueckfrage.
@@ -1639,7 +1753,15 @@ def _codex_sandbox_args(sandbox) -> list:
     Feld anfasst, wollte einschraenken; ein Tippfehler darf die Sandbox
     nicht heimlich oeffnen.
     """
-    if sandbox is None or str(sandbox).strip() == "":
+    # Seit #2936 (14.11.2026) ist read-only die Vorgabe. Vollzugriff
+    # (Netz, Schreiben, Ausfuehren) nur ausdruecklich und mit
+    # Betreiber-Schluessel; gemessen brauchte ihn am 13./14.11. kein Aufruf.
+    wert = str(sandbox).strip().lower() if sandbox is not None else ""
+    if wert in _SANDBOX_VOLL:
+        if not _AUFRUF_RECHTE.get().get("betreiber"):
+            raise HTTPException(status_code=403, detail={
+                "error": "full_sandbox_requires_operator_key",
+                "hint": "sandbox='voll' nur mit dem Betreiber-Schluessel (X-API-KEY)."})
         return ["--dangerously-bypass-approvals-and-sandbox"]
     return ["-s", "read-only"]
 
@@ -1648,10 +1770,27 @@ def _codex_sandbox_args(sandbox) -> list:
 async def chatgpt_endpoint(
     prompt: Prompt,
     model: Optional[str] = None,
-    api_key: str = Depends(get_api_key)
+    api_key: str = Depends(get_api_key),
+    request: Request = None,
+    x_api_key: Optional[str] = Header(default=None, alias="X-API-KEY"),
 ):
     """Idempotenz-Huelle um den eigentlichen Lauf (siehe _chatgpt_einmal).
     Ohne request_id: unveraendert."""
+    _marke = _rechte_setzen(request, x_api_key)
+    try:
+        return await _chatgpt_mit_rechten(prompt, model, api_key)
+    finally:
+        if _marke is not None:
+            _AUFRUF_RECHTE.reset(_marke)
+
+
+async def _chatgpt_mit_rechten(prompt, model, api_key):
+    _lokale_pfade_pruefen(_bildpfade(prompt))
+    if prompt.tools is True and not _AUFRUF_RECHTE.get().get("betreiber"):
+        raise HTTPException(status_code=403, detail={
+            "error": "tools_require_operator_key",
+            "hint": "Werkzeuge (Shell, Code) nur mit dem Betreiber-Schluessel (X-API-KEY). "
+                    "Ohne tools laeuft der Aufruf als reiner Text."})
     from ai.services import narrate_jobs as nj
     rid = prompt.request_id
     if not rid:
@@ -2425,6 +2564,61 @@ def _lokale_medien_kopieren(pfade, ziel_dir: str):
     return out
 
 
+def _agy_benutzer():
+    """(user, home) aus AGY_RUN_AS_USER, sonst (None, None)."""
+    import pwd
+    user = (os.getenv("AGY_RUN_AS_USER") or "").strip()
+    if not user:
+        return None, None
+    try:
+        return user, pwd.getpwnam(user).pw_dir
+    except KeyError:
+        raise HTTPException(status_code=503, detail={"error": "agy_user_missing", "user": user})
+
+
+def _agy_arbeitsbereich(home: str, user: str) -> str:
+    import pwd
+    pw = pwd.getpwnam(user)
+    pfad = os.path.join(home, ".aiapi-neutral")
+    for d in (pfad, os.path.join(pfad, ".vision")):
+        os.makedirs(d, mode=0o700, exist_ok=True)
+        os.chown(d, pw.pw_uid, pw.pw_gid)
+        os.chmod(d, 0o700)
+    return pfad
+
+
+def _agy_bilder_uebergeben(imgs, home: str, user: str):
+    """Kopiert die lokalisierten Bilder in den Arbeitsbereich des agy-Benutzers
+    (0600, ihm gehoerend) und loescht die root-Kopie. Rueckgabe wie imgs."""
+    import pwd
+    import shutil
+    import uuid
+    pw = pwd.getpwnam(user)
+    ziel_dir = os.path.join(_agy_arbeitsbereich(home, user), ".vision")
+    out = []
+    for u, p in imgs:
+        ziel = os.path.join(ziel_dir, "ailoc_" + uuid.uuid4().hex[:12] + os.path.splitext(p)[1])
+        shutil.copyfile(p, ziel)
+        os.chown(ziel, pw.pw_uid, pw.pw_gid)
+        os.chmod(ziel, 0o600)
+        try:
+            os.remove(p)
+        except OSError:
+            pass
+        out.append((u, ziel))
+    return out
+
+
+def _agy_als_benutzer(cmd, user: str, home: str, env: dict) -> list:
+    """sudo -n -u <user> env HOME=... PATH=... NO_COLOR=1 agy ... - die Umgebung
+    wird nicht geerbt, also kommt auch kein Google-Schluessel mit."""
+    import shutil
+    pfad = f"{home}/.local/bin:/usr/local/bin:/usr/bin:/bin"
+    binaer = shutil.which("agy", path=pfad) or cmd[0]
+    return (["sudo", "-n", "-u", user, "-H", "env", f"HOME={home}", f"PATH={pfad}", "NO_COLOR=1", binaer]
+            + list(cmd[1:]))
+
+
 # ── agy-Weiterleitung (30.10.2026) ──────────────────────────────────
 # Seit 30.10. 19:20 lehnt Google Antigravity Aufrufe von arkturian mit
 # "User location is not supported" ab; dasselbe Konto geht auf arkserver.
@@ -2577,8 +2771,11 @@ async def gemini_endpoint(
         # zugewiesen und spaeter gelesen wird, ist ein NameError im
         # Betrieb und beim Import unsichtbar.
         _effort_nachgereicht: Optional[str] = None
-        cmd = ["agy", "--output-format", "json",
-               "--dangerously-skip-permissions"]
+        # #2936: kein --dangerously-skip-permissions mehr. Headless lehnt agy
+        # Werkzeuge (Datei lesen, Shell, Web) dann selbst ab statt zu haengen
+        # (gemessen 14.11.: denied_actions read_file, 9 s); @Pfad-Bilder gehen
+        # weiter. --sandbox schraenkt das Terminal zusaetzlich ein.
+        cmd = ["agy", "--output-format", "json", "--sandbox"]
         # agy expects --model as a display-name STRING (e.g. "Gemini 3.5
         # Flash (High)"), not a slug like "gemini-3.5-flash". Frontends
         # send the slug + an `effort` knob; we compose the display name
@@ -2635,6 +2832,10 @@ async def gemini_endpoint(
         _imgs = _download_storage_images(prompt_text)
         prompt_text = _mit_hinweis_unlesbar(prompt_text, _imgs)
         _imgs = list(_imgs) + list(_lokale_kopien)
+        # agy laeuft als AGY_RUN_AS_USER (#2936): Bilder in dessen Arbeitsbereich.
+        _agy_user, _agy_home = _agy_benutzer()
+        if _agy_user and _imgs:
+            _imgs = _agy_bilder_uebergeben(_imgs, _agy_home, _agy_user)
         for _u, _p in _imgs:
             prompt_text = prompt_text.replace(_u, "@" + _p)
         if _imgs:
@@ -2666,6 +2867,12 @@ async def gemini_endpoint(
                 os.makedirs(neutral_cwd, exist_ok=True)
             except OSError:
                 neutral_cwd = "/"
+            if _agy_user:
+                # Nie als root (#2936): sudo -u <user>, eigene Umgebung ohne
+                # jeden Schluessel, Arbeitsbereich im Home des Benutzers.
+                neutral_cwd = _agy_arbeitsbereich(_agy_home, _agy_user)
+                return _run_cli_with_pgid(_agy_als_benutzer(cmd, _agy_user, _agy_home, env),
+                                          env=env, timeout=300, cwd=neutral_cwd)
 
             # Hardening 2026-05-30 (GCP cost incident, 209.56 EUR Mai):
             # The previous conditional `if google_key: env["GEMINI_API_KEY"] = google_key`
@@ -2831,11 +3038,33 @@ async def gemini_cost_status(_: str = Depends(require_operator_key)):
     return gemini_cli_cost_tracker.get_status()
 
 
+def _vision_aufrufer(
+    authorization: Optional[str] = Header(default=None),
+    x_api_key: Optional[str] = Header(default=None, alias="X-API-KEY"),
+) -> str:
+    """#2936: /ai/gemini/vision lud anonym beliebige Bytes oeffentlich in den
+    Storage. Jetzt nur mit Betreiber-Schluessel oder geprueftem JWT."""
+    if _ist_betreiber(x_api_key):
+        return "betreiber"
+    from ai.services import bild_verbrauch as bv
+    claims = bv._claims_geprueft(authorization)
+    name = bv.name_aus_claims(claims) if claims else None
+    if name:
+        return name
+    raise HTTPException(status_code=401, detail={
+        "error": "vision_auth_required",
+        "hint": "Bearer-JWT der Foederation oder Betreiber-Schluessel; neue Aufrufer nehmen /ai/gemini mit image_paths."})
+
+
+_VISION_MIME = {"image/png": "png", "image/jpeg": "jpg", "image/jpg": "jpg", "image/webp": "webp", "image/gif": "gif"}
+
+
 @router.post("/gemini/vision", response_model=AIResponse)
 async def gemini_vision_endpoint(
     prompt: Prompt,
     model: Optional[str] = None,
-    api_key: str = Depends(get_api_key)
+    api_key: str = Depends(get_api_key),
+    wer: str = Depends(_vision_aufrufer),
 ):
     """
     Gemini Vision — thin base64 bridge, NOT a separate backend.
@@ -2881,12 +3110,20 @@ async def gemini_vision_endpoint(
                 for i, img_b64 in enumerate(images_b64):
                     if img_b64.startswith("data:"):
                         header, b64_data = img_b64.split(",", 1)
-                        mime_type = header.split(":")[1].split(";")[0]
+                        mime_type = header.split(":")[1].split(";")[0].strip().lower()
                     else:
                         b64_data = img_b64
                         mime_type = "image/jpeg"
-                    ext = (mime_type.split("/")[-1] or "jpg").replace("jpeg", "jpg")
+                    if mime_type not in _VISION_MIME:
+                        raise HTTPException(status_code=422, detail={
+                            "error": "vision_mime_not_allowed", "got": mime_type,
+                            "allowed": sorted(set(_VISION_MIME))})
+                    ext = _VISION_MIME[mime_type]
                     img_bytes = base64.b64decode(b64_data)
+                    if not (img_bytes.startswith(b"\x89PNG") or img_bytes.startswith(b"\xff\xd8")
+                            or img_bytes.startswith(b"GIF8")
+                            or (img_bytes[:4] == b"RIFF" and img_bytes[8:12] == b"WEBP")):
+                        raise HTTPException(status_code=422, detail={"error": "vision_not_an_image"})
                     resp = await client.post(
                         f"{storage_url}/storage/upload",
                         files={"file": (f"vision_{uuid.uuid4().hex[:8]}_{i}.{ext}", img_bytes, mime_type)},

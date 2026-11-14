@@ -24,10 +24,24 @@ from ai.routes.text_ai_routes import _codex_sandbox_args  # noqa: E402
 BYPASS = "--dangerously-bypass-approvals-and-sandbox"
 
 
-def test_default_bleibt_vollzugriff():
-    assert _codex_sandbox_args(None) == [BYPASS]
-    assert _codex_sandbox_args("") == [BYPASS]
-    assert _codex_sandbox_args("   ") == [BYPASS]
+def test_vorgabe_ist_seit_2936_read_only():
+    """#2936: Vollzugriff ist nicht mehr die Vorgabe."""
+    for wert in (None, "", "   "):
+        assert _codex_sandbox_args(wert) == ["-s", "read-only"]
+
+
+def test_voll_nur_mit_betreiber_schluessel():
+    import pytest
+    from fastapi import HTTPException
+    from ai.routes import text_ai_routes as t
+    with pytest.raises(HTTPException) as e:
+        _codex_sandbox_args("voll")
+    assert e.value.status_code == 403
+    marke = t._AUFRUF_RECHTE.set({"lokal": True, "betreiber": True})
+    try:
+        assert _codex_sandbox_args("voll") == [BYPASS]
+    finally:
+        t._AUFRUF_RECHTE.reset(marke)
 
 
 def test_read_only_ersetzt_das_bypass_flag():
