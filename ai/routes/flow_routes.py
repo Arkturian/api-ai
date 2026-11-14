@@ -101,11 +101,12 @@ def _fehler_text(r: httpx.Response) -> Any:
 
 
 async def _flow(method: str, pfad: str, *, json_body: Optional[dict] = None,
-                inhalt: Optional[bytes] = None, content_type: Optional[str] = None) -> Dict[str, Any]:
+                inhalt: Optional[bytes] = None, content_type: Optional[str] = None,
+                timeout: float = 60.0) -> Dict[str, Any]:
     kopf = {"Authorization": f"Bearer {_token()}"}
     if content_type:
         kopf["Content-Type"] = content_type
-    async with _client() as c:
+    async with _client(timeout=timeout) as c:
         r = await c.request(method, f"{FLOW_BASE}{pfad}", json=json_body, content=inhalt, headers=kopf)
     if r.status_code >= 400:
         detail = {"error": "flow_error", "flow_status": r.status_code, "flow": _fehler_text(r)}
@@ -232,26 +233,39 @@ async def _bild_hochladen(wert: str) -> str:
 
 async def _video_sichern(url: str, collection_id: Optional[str], link_id: Optional[str],
                          name: str) -> Dict[str, Any]:
+    return await _datei_sichern(url, None, "video/mp4", collection_id, link_id, name)
+
+
+async def _datei_sichern(url: Optional[str], inhalt: Optional[bytes], mime: str,
+                         collection_id: Optional[str], link_id: Optional[str], name: str,
+                         privat: bool = False) -> Dict[str, Any]:
+    """Ergebnis von Google (Link oder Bytes) in den Storage legen."""
     from ai.clients.storage_client import storage_api_key
     storage_url = os.getenv("STORAGE_API_URL", "https://api-storage.arkturian.com")
     grenze = int(os.getenv("FLOW_MAX_VIDEO_MB", "500")) * 1024 * 1024
     try:
         async with _client(timeout=300.0) as c:
-            async with c.stream("GET", url, follow_redirects=True) as r:
-                r.raise_for_status()
-                buf = bytearray()
-                async for teil in r.aiter_bytes(65536):
-                    buf.extend(teil)
-                    if len(buf) > grenze:
-                        raise ValueError("video exceeds size cap")
-            daten = {"is_public": "true", "analyze": "false", "ai_mode": "none",
+            if inhalt is not None:
+                buf = bytearray(inhalt)
+            else:
+                async with c.stream("GET", url, follow_redirects=True) as r:
+                    r.raise_for_status()
+                    buf = bytearray()
+                    async for teil in r.aiter_bytes(65536):
+                        buf.extend(teil)
+                        if len(buf) > grenze:
+                            raise ValueError("file exceeds size cap")
+                    mime = (r.headers.get("content-type") or mime).split(";")[0].strip() or mime
+            daten = {"is_public": "false" if privat else "true", "analyze": "false", "ai_mode": "none",
                      "reuse_existing": "false"}
+            if privat:
+                daten["private"] = "true"
             if collection_id:
                 daten["collection_id"] = collection_id
             if link_id:
                 daten["link_id"] = link_id
             up = await c.post(f"{storage_url}/storage/upload",
-                              files={"file": (name, bytes(buf), "video/mp4")},
+                              files={"file": (name, bytes(buf), mime)},
                               data=daten, headers={"X-API-KEY": storage_api_key()})
             up.raise_for_status()
             sid = up.json().get("id")
@@ -461,3 +475,94 @@ async def flow_status(job_id: str, save_to_storage: bool = True):
     _job_pfad(job_id)  # Form pruefen
     job = await _flow("GET", f"/jobs/{job_id}")
     return await _stand_ausgeben(job_id, job, save_to_storage, None, None)
+
+
+# --- Bilder (Nano Banana in Flow, Alex 14.11.2026) ---------------------------
+
+BILD_MODELLE = ("nano-banana-2-lite", "nano-banana-2", "nano-banana-pro")
+BILD_VORGABE = os.getenv("FLOW_IMAGE_DEFAULT_MODEL", "nano-banana-2")
+BILD_SEITEN = ("16:9", "4:3", "1:1", "3:4", "9:16", "auto")
+
+
+class FlowImageRequest(BaseModel):
+    prompt: str = Field(..., min_length=1)
+    model: Optional[str] = Field(default=None, description=f"{', '.join(BILD_MODELLE)}; Vorgabe {BILD_VORGABE}")
+    aspect_ratio: str = Field(default="1:1", description="16:9 | 4:3 | 1:1 | 3:4 | 9:16 | auto (nur mit Referenzen)")
+    count: int = Field(default=1, ge=1, le=4, description="Bilder je Auftrag; useapi nimmt sonst 4")
+    seed: Optional[int] = Field(default=None, ge=0)
+    reference_images: Optional[List[str]] = Field(default=None, description="bis 10, Storage-ID oder https-Adresse")
+    collection_id: Optional[str] = Field(default="ai-generated-image")
+    link_id: Optional[str] = None
+    confirm_api_billing: Optional[bool] = Field(
+        default=False, description="Pflicht true: je Auftrag eine Captcha-Loesung (300 frei), ggf. Flow-Credits")
+
+
+def _bilder(antwort: Dict[str, Any]) -> List[Dict[str, Any]]:
+    medien = antwort.get("media") or (antwort.get("response") or {}).get("media") or []
+    out = []
+    for m in medien:
+        g = ((m or {}).get("image") or {}).get("generatedImage") or {}
+        if g:
+            out.append(g)
+    return out
+
+
+@router.post("/genimage/flow")
+async def flow_image(request: FlowImageRequest,
+                     authorization: Optional[str] = Header(default=None),
+                     x_agent_name: Optional[str] = Header(default=None, alias="X-Agent-Name")):
+    """Bild ueber Google Flow (Nano Banana) mit Alex' Ultra-Konto; nur Abo, kein Bezahl-Rueckfall."""
+    if not request.confirm_api_billing:
+        raise HTTPException(status_code=403, detail={
+            "error": "api_billing_confirmation_required", "endpoint": "flow-image",
+            "hint": ("Laeuft ueber das Google-Ultra-Abo (Flow) und verbraucht je Auftrag eine "
+                     "Captcha-Loesung. `confirm_api_billing: true` mitschicken."),
+        })
+    modell = (request.model or BILD_VORGABE).strip()
+    if modell not in BILD_MODELLE:
+        raise HTTPException(status_code=422, detail={"error": "unknown_model", "got": modell,
+                                                     "available": list(BILD_MODELLE)})
+    seite = request.aspect_ratio.strip()
+    if seite not in BILD_SEITEN:
+        raise HTTPException(status_code=422, detail={"error": "invalid_aspect_ratio", "allowed": list(BILD_SEITEN)})
+    refs = list(request.reference_images or [])
+    if seite == "auto" and not refs:
+        raise HTTPException(status_code=422, detail={"error": "auto_requires_reference"})
+    if len(refs) > 10:
+        raise HTTPException(status_code=422, detail={"error": "too_many_references", "max": 10})
+    _token()
+
+    body: Dict[str, Any] = {"prompt": request.prompt, "model": modell, "aspectRatio": seite,
+                            "count": request.count}
+    if request.seed is not None:
+        body["seed"] = request.seed
+    for i, ref in enumerate(refs, start=1):
+        body[f"reference_{i}"] = await _bild_hochladen(str(ref))
+
+    from ai.services import bild_verbrauch as bv
+    agent, quelle = bv.aufrufer(authorization, x_agent_name)
+    antwort = await _flow("POST", "/images", json_body=body, timeout=240.0)  # sync, meist 10-20 s
+    job_id = antwort.get("jobId") or antwort.get("jobid")
+    bilder = []
+    for i, g in enumerate(_bilder(antwort)):
+        inhalt = None
+        if not g.get("fifeUrl") and g.get("encodedImage"):
+            import base64
+            inhalt = base64.b64decode(g["encodedImage"])
+        gesichert = await _datei_sichern(g.get("fifeUrl"), inhalt, "image/png", request.collection_id,
+                                         request.link_id, f"flow_{modell}_{i}_{int(time.time())}.png")
+        bilder.append({"storage_object_id": gesichert.get("storage_object_id"),
+                       "image_url": gesichert.get("storage_url"),
+                       "media_generation_id": g.get("mediaGenerationId"),
+                       "seed": g.get("seed"), "save_error": gesichert.get("save_error")})
+        bv.buchen(agent=agent, quelle=quelle, art="bild", anzahl=1, model=modell,
+                  routed_via="google-flow", kosten_usd=None,
+                  storage_id=gesichert.get("storage_object_id"), request_id=job_id)
+    if not bilder:
+        raise HTTPException(status_code=502, detail={"error": "flow_no_images", "job_id": job_id})
+    out: Dict[str, Any] = {"job_id": job_id, "model": modell, "routed_via": "google-flow", "images": bilder,
+                           "image_url": bilder[0]["image_url"], "storage_object_id": bilder[0]["storage_object_id"]}
+    if antwort.get("remainingCredits") is not None:
+        out["remaining_credits"] = antwort.get("remainingCredits")
+    logger.info("flow: Bild %s (%s, x%d) von %s", job_id, modell, len(bilder), agent)
+    return out

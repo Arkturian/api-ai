@@ -202,3 +202,62 @@ def test_credits_schaetzung():
     assert fr.credits_schaetzung("omni-flash-1.2", 15, "720p", 1) == 60
     assert fr.credits_schaetzung("omni-flash-1.2", 8, "360p", 1) == 8
     assert fr.credits_schaetzung("veo-3.1-fast", 8, "720p", 2) == 20
+
+
+# --- Bilder -------------------------------------------------------------------
+
+class BildUpstream(Upstream):
+    def handler(self, req):
+        u = str(req.url)
+        self.aufrufe.append((req.method, u))
+        if req.method == "POST" and u.endswith("/images"):
+            self.gesendet = json.loads(req.content)
+            import base64
+            return httpx.Response(200, json={"jobId": "ji1", "media": [
+                {"image": {"generatedImage": {"mediaGenerationId": "g1", "seed": 5,
+                                              "fifeUrl": "https://img.example/a.png"}}},
+                {"image": {"generatedImage": {"mediaGenerationId": "g2", "seed": 6,
+                                              "encodedImage": base64.b64encode(b"PNG").decode()}}}]})
+        if req.method == "GET" and u.startswith("https://img.example/"):
+            return httpx.Response(200, content=b"PNG", headers={"content-type": "image/jpeg"})
+        if req.method == "POST" and u.endswith("/storage/upload"):
+            self.uploads += 1
+            self.typen = getattr(self, "typen", []) + [req.content.split(b"Content-Type: ")[1][:10]]
+            return httpx.Response(200, json={"id": 700 + self.uploads})
+        return httpx.Response(404)
+
+
+@pytest.fixture
+def bup(monkeypatch, tmp_path):
+    u = BildUpstream()
+    monkeypatch.setenv("USEAPI_TOKEN", "t")
+    monkeypatch.setenv("FLOW_JOBS_DIR", str(tmp_path / "jobs"))
+    monkeypatch.setenv("VERBRAUCH_DIR", str(tmp_path / "verbrauch"))
+    monkeypatch.setattr(fr, "_client", lambda timeout=60.0: httpx.AsyncClient(
+        transport=httpx.MockTransport(u.handler)))
+    import ai.clients.storage_client as sc
+    monkeypatch.setattr(sc, "storage_api_key", lambda: "k")
+    u.tmp = tmp_path
+    return u
+
+
+def test_bild_ohne_freigabe_und_falsche_werte_ohne_aufruf(bup, client):
+    assert client.post("/ai/genimage/flow", json={"prompt": "x"}).status_code == 403
+    assert client.post("/ai/genimage/flow", json={"prompt": "x", "model": "imagen-4",
+                                                   "confirm_api_billing": True}).status_code == 422
+    assert client.post("/ai/genimage/flow", json={"prompt": "x", "aspect_ratio": "auto",
+                                                   "confirm_api_billing": True}).status_code == 422
+    assert bup.aufrufe == []
+
+
+def test_bild_count_eins_gesendet_und_beide_formen_gesichert(bup, client):
+    r = client.post("/ai/genimage/flow", headers={"X-Agent-Name": "Story"},
+                    json={"prompt": "Haus", "aspect_ratio": "16:9", "confirm_api_billing": True})
+    assert r.status_code == 200, r.text
+    assert bup.gesendet == {"prompt": "Haus", "model": "nano-banana-2", "aspectRatio": "16:9", "count": 1}
+    b = r.json()
+    assert [i["storage_object_id"] for i in b["images"]] == [701, 702]
+    assert b["image_url"].endswith("/storage/media/701") and b["routed_via"] == "google-flow"
+    assert bup.typen[0].startswith(b"image/jpeg")
+    z = _verbrauch(bup.tmp)
+    assert len(z) == 2 and {x["agent"] for x in z} == {"Story"} and z[0]["art"] == "bild"
