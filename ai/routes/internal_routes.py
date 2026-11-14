@@ -32,7 +32,9 @@ import subprocess
 from pathlib import Path as _Path
 from typing import Any, Optional
 
-from fastapi import APIRouter, Header, HTTPException
+import hmac
+
+from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)
@@ -82,7 +84,15 @@ def _spawn(cmd: str) -> None:
     )
 
 
-@router.post("/notify-cli-update")
+def _betreiber(x_api_key: Optional[str] = Header(None, alias="X-API-KEY")) -> str:
+    """Betreiber-Schluessel (#2935): Der Endpunkt schreibt als root und startet
+    Skripte. Lazy importiert, damit internal_routes nicht von realtime_routes
+    beim Laden abhaengt."""
+    from ai.routes.realtime_routes import require_operator_key
+    return require_operator_key(x_api_key)
+
+
+@router.post("/notify-cli-update", dependencies=[Depends(_betreiber)])
 async def notify_cli_update(payload: CliUpdateNotification):
     """Fire-and-forget hook: write curated models or trigger rediscovery.
 
@@ -152,7 +162,7 @@ def _verify_shared_counter_auth(provided: Optional[str]) -> None:
             status_code=503,
             detail="shared-counter master is not configured on this host",
         )
-    if not provided or provided != expected:
+    if not provided or not hmac.compare_digest(provided, expected):
         raise HTTPException(status_code=401, detail="invalid shared counter auth")
 
 

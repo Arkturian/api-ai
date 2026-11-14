@@ -5783,7 +5783,7 @@ def _check_dev_secret(header_secret: Optional[str]) -> None:
                 ),
             },
         )
-    if not header_secret or header_secret != expected:
+    if not header_secret or not hmac.compare_digest(header_secret, expected):
         raise HTTPException(
             status_code=403,
             detail={"error": "devlog_invalid_dev_secret"},

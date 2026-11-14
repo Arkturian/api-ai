@@ -11,7 +11,7 @@ Features:
 - Job cancellation support
 """
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from typing import Optional, List, Dict, Any
@@ -20,6 +20,8 @@ import os
 import time
 import json as _json
 import asyncio
+import hmac
+import re
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -47,12 +49,84 @@ def get_api_key():
     return "placeholder"  # not verified anywhere; see #514 / auth decision
 
 
+# ── Absicherung (#2935, Befund 56) ───────────────────────────────────────
+# Die Kennung wurde ungeprueft an STATUS_DIR gehaengt; der Dienst laeuft als
+# root. `../../root/.codex/auth` las so beliebige .json-Dateien, clear_temp
+# loeschte sie. Jetzt: strenge Kennung, Pfad bleibt in STATUS_DIR, Zugriff nur
+# angemeldet und nur auf eigene Auftraege.
+_DIALOG_ID = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
+
+def _pruefe_id(req_id: Any) -> str:
+    if not isinstance(req_id, str) or not _DIALOG_ID.match(req_id):
+        raise HTTPException(status_code=422, detail={
+            "error": "invalid_dialog_id", "hint": "Erlaubt: A-Z a-z 0-9 _ -, 1 bis 64 Zeichen."})
+    return req_id
+
+
+def _status_pfad(req_id: str, endung: str) -> str:
+    """Datei in STATUS_DIR fuer diese Kennung; wirft bei jeder anderen Form."""
+    _pruefe_id(req_id)
+    pfad = os.path.join(STATUS_DIR, req_id + endung)
+    basis = os.path.realpath(STATUS_DIR) + os.sep
+    if not os.path.realpath(pfad).startswith(basis):
+        raise HTTPException(status_code=422, detail={"error": "invalid_dialog_id"})
+    return pfad
+
+
+def _dialog_aufrufer(
+    authorization: Optional[str] = Header(default=None),
+    x_api_key: Optional[str] = Header(default=None, alias="X-API-KEY"),
+) -> str:
+    """Wer ruft? Betreiber-Schluessel oder ein gepruefter JWT. Sonst 401."""
+    erwartet = os.environ.get("REALTIME_GRANT_SERVICE_KEY", "")
+    if erwartet and x_api_key and hmac.compare_digest(x_api_key, erwartet):
+        return "betreiber"
+    from ai.services import bild_verbrauch as bv
+    claims = bv._claims_geprueft(authorization)
+    name = bv.name_aus_claims(claims) if claims else None
+    if name:
+        return name
+    raise HTTPException(status_code=401, detail={
+        "error": "dialog_auth_required",
+        "hint": "Bearer-JWT der Foederation oder Betreiber-Schluessel (X-API-KEY) mitschicken."})
+
+
+def _besitzer_setzen(req_id: str, wer: str) -> None:
+    pfad = _status_pfad(req_id, ".owner")
+    try:
+        with open(pfad, "x") as f:
+            f.write(wer)
+        return
+    except FileExistsError:
+        pass
+    with open(pfad) as f:
+        alt = f.read().strip()
+    if alt != wer and wer != "betreiber":
+        raise HTTPException(status_code=409, detail={"error": "dialog_id_taken"})
+
+
+def _besitzer_pruefen(req_id: str, wer: str) -> None:
+    """Nur der Starter (oder der Betreiber) sieht oder steuert einen Auftrag.
+    Unbekannt und fremd sehen gleich aus (404), damit nichts verraten wird."""
+    pfad = _status_pfad(req_id, ".owner")
+    if wer == "betreiber":
+        return
+    try:
+        with open(pfad) as f:
+            if f.read().strip() == wer:
+                return
+    except OSError:
+        pass
+    raise HTTPException(status_code=404, detail="Dialog not found")
+
+
 def register_temp_dialog_chunks(req_id: str, items: List[Dict[str, Any]]):
     """Register temp dialog chunks in memory AND persist to disk for multi-worker access."""
     TEMP_DIALOG_REGISTRY[req_id] = items
     # Persist to disk for cross-worker visibility (uvicorn --workers 2)
     try:
-        with open(os.path.join(STATUS_DIR, f"{req_id}.chunks.json"), "w") as f:
+        with open(_status_pfad(req_id, ".chunks.json"), "w") as f:
             _json.dump(items, f)
     except Exception:
         pass
@@ -60,7 +134,7 @@ def register_temp_dialog_chunks(req_id: str, items: List[Dict[str, Any]]):
 
 def _load_chunks_from_disk(req_id: str) -> List[Dict[str, Any]]:
     """Load chunks from disk if not in memory (for multi-worker scenarios)."""
-    chunks_path = os.path.join(STATUS_DIR, f"{req_id}.chunks.json")
+    chunks_path = _status_pfad(req_id, ".chunks.json")
     if not os.path.exists(chunks_path):
         return []
     try:
@@ -80,7 +154,7 @@ def _append_status_event(req_id: str, event: Dict[str, Any]):
     TEMP_DIALOG_HISTORY[req_id] = hist
     # Append to file as JSONL for robustness
     try:
-        with open(os.path.join(STATUS_DIR, f"{req_id}.events.jsonl"), "a") as f:
+        with open(_status_pfad(req_id, ".events.jsonl"), "a") as f:
             f.write(_json.dumps(ev) + "\n")
     except Exception:
         pass
@@ -88,7 +162,7 @@ def _append_status_event(req_id: str, event: Dict[str, Any]):
 
 def _load_events_from_disk(req_id: str) -> List[Dict[str, Any]]:
     # Load all events for this req_id from file if present
-    events_path = os.path.join(STATUS_DIR, f"{req_id}.events.jsonl")
+    events_path = _status_pfad(req_id, ".events.jsonl")
     if not os.path.exists(events_path):
         return []
     try:
@@ -117,7 +191,7 @@ def set_dialog_status(req_id: str, **fields):
     _append_status_event(req_id, fields)
     # Persist to disk for multi-worker visibility
     try:
-        with open(os.path.join(STATUS_DIR, f"{req_id}.json"), "w") as f:
+        with open(_status_pfad(req_id, ".json"), "w") as f:
             _json.dump(st, f)
     except Exception:
         pass
@@ -126,14 +200,14 @@ def set_dialog_status(req_id: str, **fields):
 def set_dialog_result(req_id: str, result: Dict[str, Any]):
     TEMP_DIALOG_RESULTS[req_id] = result
     try:
-        with open(os.path.join(STATUS_DIR, f"{req_id}.result.json"), "w") as f:
+        with open(_status_pfad(req_id, ".result.json"), "w") as f:
             _json.dump(result, f)
     except Exception:
         pass
 
 
 @router.get("/tempchunk")
-def get_temp_dialog_chunk(id: str, index: int):
+def get_temp_dialog_chunk(id: str, index: int, wer: str = Depends(_dialog_aufrufer)):
     """
     Get a temporary audio chunk from dialog generation.
 
@@ -142,6 +216,7 @@ def get_temp_dialog_chunk(id: str, index: int):
 
     Note: Uses disk-based fallback to support multi-worker uvicorn deployments.
     """
+    _besitzer_pruefen(id, wer)
     try:
         # Try in-memory first, then disk fallback for multi-worker scenarios
         items = TEMP_DIALOG_REGISTRY.get(id)
@@ -167,7 +242,7 @@ def get_temp_dialog_chunk(id: str, index: int):
         if not path or not os.path.exists(path):
             raise HTTPException(status_code=404, detail="File missing")
         # Only allow files from /tmp for safety
-        if not os.path.abspath(path).startswith("/tmp/"):
+        if not os.path.realpath(path).startswith("/tmp/"):
             raise HTTPException(status_code=403, detail="Forbidden path")
         # Guess media type by extension (mp3 default)
         ext = os.path.splitext(path)[1].lower()
@@ -180,42 +255,44 @@ def get_temp_dialog_chunk(id: str, index: int):
 
 
 @router.post("/clear_temp")
-def clear_temp_dialog_chunks(id: str):
+def clear_temp_dialog_chunks(id: str, wer: str = Depends(_dialog_aufrufer)):
     """
     Clear temporary dialog chunks after job completion.
 
     Cleanup temp files to save disk space.
     """
+    _besitzer_pruefen(id, wer)
     TEMP_DIALOG_REGISTRY.pop(id, None)
     TEMP_DIALOG_STATUS.pop(id, None)
     TEMP_DIALOG_HISTORY.pop(id, None)
     try:
-        os.remove(os.path.join(STATUS_DIR, f"{id}.json"))
+        os.remove(_status_pfad(id, ".json"))
     except Exception:
         pass
     try:
-        os.remove(os.path.join(STATUS_DIR, f"{id}.events.jsonl"))
+        os.remove(_status_pfad(id, ".events.jsonl"))
     except Exception:
         pass
     try:
-        os.remove(os.path.join(STATUS_DIR, f"{id}.chunks.json"))
+        os.remove(_status_pfad(id, ".chunks.json"))
     except Exception:
         pass
     return {"status": "cleared"}
 
 
 @router.get("/status")
-def get_dialog_status(id: str):
+def get_dialog_status(id: str, wer: str = Depends(_dialog_aufrufer)):
     """
     Check status of dialog generation job.
 
     Returns status, progress, and event history.
     """
+    _besitzer_pruefen(id, wer)
     st = TEMP_DIALOG_STATUS.get(id)
     if not st:
         # Try file-backed status for other workers
         try:
-            with open(os.path.join(STATUS_DIR, f"{id}.json"), "r") as f:
+            with open(_status_pfad(id, ".json"), "r") as f:
                 st = _json.load(f)
         except Exception:
             st = {"status": "unknown"}
@@ -223,7 +300,7 @@ def get_dialog_status(id: str):
     res = TEMP_DIALOG_RESULTS.get(id)
     if not res:
         try:
-            with open(os.path.join(STATUS_DIR, f"{id}.result.json"), "r") as f:
+            with open(_status_pfad(id, ".result.json"), "r") as f:
                 res = _json.load(f)
         except Exception:
             res = None
@@ -241,12 +318,13 @@ def get_dialog_status(id: str):
 
 
 @router.post("/cancel")
-def cancel_dialog_job(id: str):
+def cancel_dialog_job(id: str, wer: str = Depends(_dialog_aufrufer)):
     """
     Cancel a running dialog generation job.
 
     Sets status to cancelled and attempts to cancel the background task.
     """
+    _besitzer_pruefen(id, wer)
     task = TASKS.get(id)
     if task and not task.done():
         try:
@@ -261,7 +339,8 @@ def cancel_dialog_job(id: str):
 @router.post("/start")
 async def start_dialog_job(
     req: SpeechRequest,
-    api_key: str = Depends(get_api_key)
+    api_key: str = Depends(get_api_key),
+    wer: str = Depends(_dialog_aufrufer),
 ):
     """
     Start a dialog generation job.
@@ -271,6 +350,7 @@ async def start_dialog_job(
     2. Create background task for audio drama generation
     3. Return job_id for status polling
     """
+    _besitzer_setzen(_pruefe_id(req.id), wer)
     if not getattr(req.config, 'dialog_mode', False):
         raise HTTPException(status_code=400, detail="dialog_mode must be true")
 
@@ -281,7 +361,7 @@ async def start_dialog_job(
         except Exception:
             # Fallback file write in case helper fails
             try:
-                with open(os.path.join(STATUS_DIR, f"{req.id}.json"), "w") as f:
+                with open(_status_pfad(req.id, ".json"), "w") as f:
                     _json.dump({"phase": "queued", "updated_at": time.time()}, f)
             except Exception:
                 pass

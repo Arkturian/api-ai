@@ -13,6 +13,7 @@ is healthy across the federation.
 from __future__ import annotations
 
 import asyncio
+import html as _html
 import json
 import logging
 import os
@@ -231,13 +232,20 @@ document.getElementById('probe').addEventListener('click', async (ev) => {{
 </body></html>"""
 
 
+def _e(wert: Any) -> str:
+    """HTML-Escape fuer alles, was aus models.json oder der CLI kommt (#2935:
+    models.json war von aussen beschreibbar -> Stored XSS auf /ai/status)."""
+    return _html.escape(str(wert), quote=True)
+
+
 def _provider_card(name: str, info: dict[str, Any]) -> str:
-    available = info.get("available") or []
-    default = info.get("default")
-    cli_rec = info.get("cli_version_recorded") or "—"
-    cli_live = info.get("cli_version_live") or "—"
+    available = [_e(m) for m in (info.get("available") or []) if m is not None]
+    default = _e(info.get("default")) if info.get("default") else None
+    cli_rec = _e(info.get("cli_version_recorded") or "—")
+    cli_live = _e(info.get("cli_version_live") or "—")
     sub_locked = info.get("subscription_locked", False)
-    method = info.get("discovery_method") or "—"
+    method = _e(info.get("discovery_method") or "—")
+    name = _e(name)
 
     # Status dot logic: green if has available models, yellow if locked
     # without models, red if no live CLI.
@@ -291,7 +299,7 @@ async def status_html() -> Response:
     if models.get("_missing"):
         banner = '<div class="banner err">models.json is MISSING — /ai/models will serve fallback</div>'
     elif models.get("_error"):
-        banner = f'<div class="banner err">models.json read error: {models["_error"]}</div>'
+        banner = f'<div class="banner err">models.json read error: {_e(models["_error"])}</div>'
     elif models.get("_age_seconds", 0) > 49 * 3600:
         banner = f'<div class="banner warn">models.json is {models["_age_seconds"] // 3600}h old (>49h) — /ai/models falls back</div>'
     elif models.get("_age_seconds", 0) > 25 * 3600:
@@ -301,10 +309,10 @@ async def status_html() -> Response:
     age = models.get("_age_seconds")
     mjson_age = f"{age//60}m ago" if age is not None else "missing"
     html = _HTML_TMPL.format(
-        host=snap["host_local"],
-        ts=snap["ts"],
-        mjson_age=mjson_age,
-        last_run=snap["last_run_marker"] or "—",
+        host=_e(snap["host_local"]),
+        ts=_e(snap["ts"]),
+        mjson_age=_e(mjson_age),
+        last_run=_e(snap["last_run_marker"] or "—"),
         banner=banner,
         cards=cards,
     )
