@@ -27,7 +27,7 @@ import os
 from ai.provider_config import providers_status as _providers_status
 
 # Import routes
-from ai.routes import text_ai_routes, image_ai_routes, audio_ai_routes, dialog_routes, video_ai_routes, narration_routes, image_generation_routes, translate_routes, internal_routes, dashboard_routes, music_ai_routes, realtime_routes, hunyuan3d_routes, kling_routes
+from ai.routes import text_ai_routes, image_ai_routes, audio_ai_routes, dialog_routes, video_ai_routes, narration_routes, image_generation_routes, translate_routes, internal_routes, dashboard_routes, music_ai_routes, realtime_routes, hunyuan3d_routes, kling_routes, flow_routes
 
 # Setup logging
 logging.basicConfig(
@@ -345,6 +345,7 @@ app.include_router(audio_mix_routes.router, prefix="/ai", tags=["Audio Mix"])
 app.include_router(music_ai_routes.router, prefix="/ai", tags=["Music AI"])
 app.include_router(hunyuan3d_routes.router, prefix="/ai", tags=["Hunyuan 3D"])
 app.include_router(kling_routes.router, prefix="/ai", tags=["Kling Video"])
+app.include_router(flow_routes.router, prefix="/ai", tags=["Google Flow Video"])
 app.include_router(translate_routes.router, prefix="/ai", tags=["Translation"])
 app.include_router(realtime_routes.router, prefix="/ai", tags=["Realtime AI"])
 app.include_router(internal_routes.router, prefix="/internal", tags=["Internal"])
