@@ -53,6 +53,10 @@ def test_status_nur_lokal_oder_betreiber(c, pfad):
     ("127.0.0.1", {"x-real-ip": "1.2.3.4"}, False),      # fremd ueber nginx
     ("127.0.0.1", {"x-forwarded-for": "127.0.0.1"}, False),  # XFF allein zaehlt nie
     ("10.0.0.5", {}, False),
+    # uvicorn: alle XFF-Eintraege vertraut -> client None (lokales nginx, 15.11. live 401)
+    (None, {"x-real-ip": "127.0.0.1", "x-forwarded-for": "127.0.0.1"}, True),
+    (None, {"x-real-ip": "1.2.3.4", "x-forwarded-for": "1.2.3.4"}, False),
+    (None, {}, False),
 ])
 def test_von_diesem_host(host, kopf, erwartet):
     req = SimpleNamespace(client=SimpleNamespace(host=host), headers=kopf)

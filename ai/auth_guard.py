@@ -34,9 +34,15 @@ def von_diesem_host(request: Optional[Request]) -> bool:
     if request is None:
         return True
     try:
-        host = request.client.host if request.client else ""
+        host = request.client.host if request.client else None
     except Exception:
         host = ""
+    # uvicorn (proxy_headers, vertraut 127.0.0.1) setzt den Client auf None,
+    # wenn JEDER Eintrag in X-Forwarded-For vertrauenswuerdig ist: das ist
+    # genau der lokale Dienst ueber das lokale nginx. Kommt jemand von aussen,
+    # haengt nginx dessen Adresse an, und uvicorn nennt sie als Client.
+    if host is None and request.headers.get("x-forwarded-for") is not None:
+        host = "127.0.0.1"
     if host not in _LOOPBACK:
         return False
     real_ip = request.headers.get("x-real-ip")
