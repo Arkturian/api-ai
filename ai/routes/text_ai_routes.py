@@ -2479,7 +2479,12 @@ def _agy_effort_vorgabe(model: str) -> Optional[str]:
         logger.warning("Effort-Vorgabe: Katalog nicht lesbar (%s)", exc)
 
     vorgabe = meta.get("default") or _AGY_EFFORT_NOTFALL
-    erlaubt = (meta.get("per_model") or {}).get(model.strip())
+    per_model = meta.get("per_model") or {}
+    erlaubt = per_model.get(model.strip())
+    if model.strip() in per_model and not erlaubt:
+        # Modell ohne Stufen (Orchestrator, agy 1.5.9): jede Stufe waere
+        # ein sicherer 502 "--effort is not supported".
+        return None
     if erlaubt and vorgabe not in erlaubt:
         # Nicht raten, welcher der erlaubten Werte gemeint waere — agy
         # nennt dem Aufrufer die gueltige Liste besser als wir.

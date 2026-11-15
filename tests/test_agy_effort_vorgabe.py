@@ -111,3 +111,21 @@ def test_variable_ist_vor_jeder_verzweigung_gebunden():
     zuweisung = quelle.index("_effort_nachgereicht: Optional[str] = None")
     erste_lesung = quelle.index("effort_applied=_effort_nachgereicht")
     assert zuweisung < erste_lesung
+
+
+def test_modell_ohne_stufen_bekommt_keine_vorgabe(katalog):
+    """agy 1.5.9 (Automation, 15.11.): gemini-pro-orchestrator lehnt
+    --effort ab; die Vorgabe machte jeden Aufruf zum 502."""
+    katalog({"default": "medium", "per_model": {"gemini-pro-orchestrator": [],
+                                                 "gemini-4-carbon": ["low", "medium", "high"]}})
+    assert t._agy_effort_vorgabe("gemini-pro-orchestrator") is None
+    assert t._agy_effort_vorgabe("gemini-4-carbon") == "medium"
+
+
+def test_erhebung_fuehrt_orchestrator_ohne_stufen():
+    from ai.services import cli_katalog as ck
+    p = ck._gemini({"modelle": [{"id": "gemini-4-carbon-low"}, {"id": "gemini-4-carbon-high"},
+                                {"id": "gemini-pro-orchestrator"}, {"id": "claude-x"}]}, {})
+    assert p["available"] == ["gemini-4-carbon", "gemini-pro-orchestrator"]
+    assert p["efforts"]["per_model"]["gemini-pro-orchestrator"] == []
+    assert p["default"] == "gemini-4-carbon"

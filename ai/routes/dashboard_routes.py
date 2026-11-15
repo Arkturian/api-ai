@@ -65,10 +65,17 @@ def _read_last_run() -> str | None:
 
 
 def _cli_version(cli: str) -> str:
-    """Best-effort `<cli> --version`. Returns short string."""
+    """Best-effort `<cli> --version`. Returns short string.
+
+    codex geht ueber codex_als_benutzer: auch `--version` legt Hilfslinks
+    unter CODEX_HOME/tmp/arg0-linux an. Als root lag danach ein root-eigenes
+    Verzeichnis in Alex' codex-Home (Automation, 15.11. 00:16, ausgeloest
+    von einem Abruf der Statusseite).
+    """
     try:
+        from ai.routes.text_ai_routes import codex_als_benutzer
         out = subprocess.run(
-            [cli, "--version"],
+            codex_als_benutzer([cli, "--version"], dict(os.environ)),
             capture_output=True, text=True, timeout=6,
         )
         return (out.stdout or out.stderr).strip().split("\n")[0] or "(empty)"

@@ -118,9 +118,15 @@ def _gemini(eintrag: dict, basis: dict) -> Optional[dict]:
     Frage des Regelwerks in cloud-api, nicht dieses Endpunkts)."""
     familien: Dict[str, list] = {}
     for m in eintrag.get("modelle") or []:
-        t = _AGY_SLUG.match(str(m.get("id") or ""))
+        mid = str(m.get("id") or "")
+        t = _AGY_SLUG.match(mid)
         if t and t["familie"].startswith("gemini-"):
             familien.setdefault(t["familie"], []).append(t["stufe"])
+        elif mid.startswith("gemini-"):
+            # Ohne Stufen-Suffix (agy 1.5.9: gemini-pro-orchestrator[-argon]):
+            # agy lehnt --effort dort ab ("--effort is not supported").
+            # Leere Liste = keine Stufen, _agy_effort_vorgabe reicht nichts nach.
+            familien.setdefault(mid, [])
     if not familien:
         return None
     p = copy.deepcopy(basis)
