@@ -224,7 +224,7 @@ def test_storage_ids_werden_zu_eigenen_adressen():
     "https://[::ffff:188.65.73.164]/x",              # IPv4-mapped
     "https://[::188.65.73.164]/x",                   # IPv4-kompatibel
     "https://62.225.187.68/x", "https://62.225.187.66/x",   # oneal
-    "https://172.104.235.73/x", "https://217.149.160.166/x",  # pdrei, tommy
+    "https://217.149.167.157/x",                              # tommy
     "https://[64:ff9b::bc41:49a4]/x", "https://[2002:bc41:49a4::1]/x",  # arkserver in NAT64/6to4
 ])
 def test_eigene_knoten_sind_gesperrt(url):
@@ -298,3 +298,10 @@ def test_fremde_ziele_nur_auf_443(port):
 @pytest.mark.parametrize("url", ["https://10.192.26.50/x", "https://172.17.0.1/x"])
 def test_lan_und_docker_gesperrt(url):
     assert _gesperrt(url) == "internal_address"
+
+
+def test_fremde_alte_adressen_sind_nicht_eigen():
+    """pdrei ist abgemeldet, 172.104.235.73 gehoert jetzt jemand anderem
+    (Cloud, 15.11., #2595); tommys alte Adresse ebenso nicht mehr."""
+    for alt in ("172.104.235.73", "217.149.160.166"):
+        assert not s.ist_eigene_adresse(s.ipaddress.ip_address(alt))

@@ -332,14 +332,15 @@ def ist_freigegeben(url: str) -> bool:
 # "global", aber eine Anfrage dorthin landet auf unseren eigenen Hosts. Dort
 # erreicht sie Dienste, die ohne nginx auf 0.0.0.0 lauschen, oder nginx-
 # Freigaben, die diesen Adressen trauen. Gleiche Liste wie
-# share-proxy/safe_fetch.php, dazu pdrei, tommy und arkturians IPv6.
+# share-proxy/safe_fetch.php, dazu tommy und arkturians IPv6 (Stand Cloud,
+# 15.11.). pdrei ist abgemeldet, seine alte Adresse 172.104.235.73 gehoert
+# inzwischen jemand anderem (#2595) und steht deshalb NICHT hier.
 # Ergaenzen ohne Release: AI_EIGENE_IPS (Komma-Liste, IPs oder Netze).
 _EIGENE_IPS = (
     "192.46.232.130", "2a01:7e01::f03c:94ff:feb3:d807",   # arkturian (Hub)
-    "188.65.73.164",                                        # arkserver
+    "188.65.73.164",                                        # arkserver, mac-NAT
     "62.225.187.68", "62.225.187.66",                       # oneal
-    "172.104.235.73",                                       # pdrei
-    "217.149.160.166",                                      # tommy (NAT)
+    "217.149.167.157",                                      # tommy (NAT)
 )
 # IPv6-Praefixe, die eine beliebige IPv4-Adresse einbetten: NAT64 (RFC 6052,
 # RFC 8215). Python zaehlt 64:ff9b::/96 als global.
