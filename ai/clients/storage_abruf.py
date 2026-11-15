@@ -340,7 +340,10 @@ _EIGENE_IPS = (
     "192.46.232.130", "2a01:7e01::f03c:94ff:feb3:d807",   # arkturian (Hub)
     "188.65.73.164",                                        # arkserver, mac-NAT
     "62.225.187.68", "62.225.187.66",                       # oneal
-    "217.149.167.157",                                      # tommy (NAT)
+    # tommy: NAT mit wechselnder Adresse im Bereich, beide gesehen (Cloud,
+    # 15.11.). Regel: im Zweifel drinlassen; nur fremd vergebene Adressen
+    # (pdrei) muessen raus.
+    "217.149.167.157", "217.149.160.166",                   # tommy (NAT)
 )
 # IPv6-Praefixe, die eine beliebige IPv4-Adresse einbetten: NAT64 (RFC 6052,
 # RFC 8215). Python zaehlt 64:ff9b::/96 als global.

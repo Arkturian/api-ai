@@ -300,8 +300,12 @@ def test_lan_und_docker_gesperrt(url):
     assert _gesperrt(url) == "internal_address"
 
 
-def test_fremde_alte_adressen_sind_nicht_eigen():
+def test_pdrei_ist_nicht_mehr_eigen():
     """pdrei ist abgemeldet, 172.104.235.73 gehoert jetzt jemand anderem
-    (Cloud, 15.11., #2595); tommys alte Adresse ebenso nicht mehr."""
-    for alt in ("172.104.235.73", "217.149.160.166"):
-        assert not s.ist_eigene_adresse(s.ipaddress.ip_address(alt))
+    (Cloud, 15.11., #2595)."""
+    assert not s.ist_eigene_adresse(s.ipaddress.ip_address("172.104.235.73"))
+
+
+def test_beide_tommy_adressen_sind_eigen():
+    for a in ("217.149.167.157", "217.149.160.166"):
+        assert s.ist_eigene_adresse(s.ipaddress.ip_address(a))
