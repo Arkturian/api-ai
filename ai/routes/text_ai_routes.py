@@ -2850,10 +2850,13 @@ async def gemini_endpoint(
             prompt_text = prompt_text.replace(_u, "@" + _p)
         if _imgs:
             logger.info("agy: localized %d storage image(s) -> @path" % len(_imgs))
-        # agy requires an explicit -p/--print flag for non-interactive mode;
-        # without it the CLI tries to open a TTY (bubbletea) and aborts in
-        # the service context with "could not open TTY: /dev/tty".
-        cmd.extend(["-p", prompt_text])
+        # Prompt ueber stdin, nicht als -p-Argument (#2937, Cloud 15.11.): sudo
+        # schreibt die volle Befehlszeile ins Journal, mit -p stand dort der
+        # Kundentext. agy 1.5.9 geht ohne -p in den Druckmodus, sobald stdin
+        # keine TTY ist (gemessen: pong, auch mit @-Bildpfad). `-p -` liest
+        # NICHT von stdin, sondern nimmt "-" als Prompt. stdin bekommt der
+        # Aufruf unten ueber input=.
+        agy_eingabe = prompt_text
 
         # Call gemini in subprocess
         def run_gemini_cli():
@@ -2882,7 +2885,7 @@ async def gemini_endpoint(
                 # jeden Schluessel, Arbeitsbereich im Home des Benutzers.
                 neutral_cwd = _agy_arbeitsbereich(_agy_home, _agy_user)
                 return _run_cli_with_pgid(_agy_als_benutzer(cmd, _agy_user, _agy_home, env),
-                                          env=env, timeout=300, cwd=neutral_cwd)
+                                          env=env, timeout=300, cwd=neutral_cwd, input=agy_eingabe)
 
             # Hardening 2026-05-30 (GCP cost incident, 209.56 EUR Mai):
             # The previous conditional `if google_key: env["GEMINI_API_KEY"] = google_key`
@@ -2895,7 +2898,7 @@ async def gemini_endpoint(
             # Own-pgid + killpg-on-timeout — critical for gemini-cli
             # specifically because it forks helper procs (model router,
             # telemetry) that won't die with a plain proc.kill()
-            result = _run_cli_with_pgid(cmd, env=env, timeout=300, cwd=neutral_cwd)
+            result = _run_cli_with_pgid(cmd, env=env, timeout=300, cwd=neutral_cwd, input=agy_eingabe)
             return result
 
         sem = await _acquire_cli_slot("gemini")

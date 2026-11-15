@@ -22,7 +22,8 @@ class Fang:
 
     def __call__(self, cmd, env=None, **k):
         self.cmd, self.env = list(cmd), dict(env or {})
-        p = cmd[cmd.index("-p") + 1]
+        self.eingabe = k.get("input")
+        p = self.eingabe or ""
         self.dateien_waehrend = [w[1:] for w in p.split() if w.startswith("@")]
         self.existierten = [os.path.exists(d) for d in self.dateien_waehrend]
         return SimpleNamespace(returncode=1, stdout="", stderr="boom")
@@ -112,7 +113,7 @@ def test_lokales_bild_wird_in_den_arbeitsbereich_kopiert_und_danach_geloescht(fa
     kopie = fang.dateien_waehrend[0]
     assert kopie.startswith(str(tmp_path / "home" / ".aiapi-neutral" / ".vision"))
     assert fang.existierten == [True] and not os.path.exists(kopie)
-    assert str(bild) not in fang.cmd[fang.cmd.index("-p") + 1]
+    assert str(bild) not in fang.eingabe
     assert _modell(fang.cmd) == "gemini-4-carbon-medium"
 
 
@@ -148,3 +149,12 @@ def test_symlink_aus_der_wurzel_heraus_zaehlt_als_ausserhalb(fang, monkeypatch, 
     with pytest.raises(HTTPException) as e:
         _direkt([str(wurzel / "link.jpg")])
     assert "path_outside_allowed_roots" in e.value.detail["reason"]
+
+
+def test_prompt_geht_ueber_stdin_nicht_in_argv(fang):
+    """#2937: sudo protokolliert argv ins Journal - der Kundentext gehoert nicht dorthin."""
+    TestClient(main.app).post("/ai/gemini", json={"prompt": "GEHEIMER-KUNDENTEXT-4711"})
+    assert fang.cmd is not None
+    assert "-p" not in fang.cmd and "--print" not in fang.cmd
+    assert not any("GEHEIMER-KUNDENTEXT-4711" in a for a in fang.cmd)
+    assert "GEHEIMER-KUNDENTEXT-4711" in fang.eingabe
