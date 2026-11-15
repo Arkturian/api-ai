@@ -1,0 +1,95 @@
+#!/bin/bash
+# /usr/local/libexec/api-ai/codex-als-alex   root:root 0755   (#2937)
+# Einziger Weg von apiai zu alex fuer codex (sudoers erlaubt nur diese Datei).
+# Feste Umgebung (env -i), Optionen nur aus einer Liste, Prompt nur ueber stdin.
+set -euo pipefail
+umask 027
+fehler() { echo "codex-als-alex: $*" >&2; exit 64; }
+WURZEL=/var/lib/api-ai-cli
+BIN=/home/alex/.local/bin/codex
+
+HAUPT=/home/alex/.codex
+
+# Schlankes Text-Home: auth.json ist ein Link auf die Anmeldung im Haupt-Home.
+# Erneuert codex das Token, ersetzt es den Link durch eine Datei; die neuere
+# Anmeldung gehoert dann zurueck ins Haupt-Home, sonst gilt dort ein
+# verbrauchtes Refresh-Token (frueher _codex_text_anmeldung_heilen in api-ai,
+# das als apiai nicht mehr in /home/alex kommt).
+text_home_heilen() {
+  local link="$CH/auth.json" echt
+  echt=$(realpath -- "$HAUPT/auth.json")
+  if [[ -f "$link" && ! -L "$link" ]]; then
+    if [[ "$link" -nt "$echt" ]]; then
+      cp -p -- "$link" "$echt.neu" && mv -f -- "$echt.neu" "$echt"
+    fi
+    rm -f -- "$link"
+  fi
+  [[ -L "$link" ]] || ln -s -- "$HAUPT/auth.json" "$link"
+  # Abo-Bilder liegen nach dem Hochladen im Storage; apiai darf hier nicht
+  # loeschen (kein Gruppen-Schreibrecht), deshalb raeumt der Wrapper auf.
+  find "$CH/generated_images" -type f -mmin +120 -delete 2>/dev/null || true
+}
+
+case "${1:-}" in
+  haupt) CH=$HAUPT ;;
+  text)  CH=$WURZEL/codex-text ;;
+  konfig)  # nur Modell und Effort aus dem Top-Level-Block, nie den Rest (MCP-Zugaenge o. ae.)
+    awk '/^[[:space:]]*\[/{exit} /^(model|model_reasoning_effort)[[:space:]]*=/{print}' "$HAUPT/config.toml"
+    exit 0 ;;
+  *) fehler "erstes Argument: haupt, text oder konfig" ;;
+esac
+shift
+
+erlaubt_c() {
+  case "$1" in
+    features.shell_tool=false|features.unified_exec=false|features.code_mode_host=false|\
+    features.apps=false|features.plugins=false|include_environment_context=false|\
+    include_permissions_instructions=false|include_apps_instructions=false|\
+    model_instructions_file=/var/www/api-ai.arkturian.com/ai/data/codex_text_anweisung.md) return 0 ;;
+    model_reasoning_effort=*) [[ "${1#*=}" =~ ^[a-z]{1,12}$ ]] ;;
+    *) return 1 ;;
+  esac
+}
+pfad_ok() {
+  local p
+  p=$(realpath -m -- "$1")
+  [[ "$p" == "$WURZEL"/eingang/* || "$p" == "$WURZEL"/arbeit/* ]]
+}
+
+args=("$@"); n=${#args[@]}
+if [[ $n -eq 1 && "${args[0]}" == "--version" ]]; then
+  :
+elif [[ $n -eq 2 && "${args[0]}" == debug && "${args[1]}" == models ]]; then
+  :
+elif [[ $n -ge 2 && "${args[0]}" == exec ]]; then
+  i=1; ende=0; sandbox=0
+  while (( i < n )); do
+    a=${args[i]}
+    if (( ende )); then
+      [[ "$a" == "-" && $((i+1)) -eq n ]] || fehler "nach -- nur noch -"
+      i=$((i+1)); continue
+    fi
+    case "$a" in
+      --json|--skip-git-repo-check|--ephemeral) ;;
+      -s) i=$((i+1)); [[ "${args[i]:-}" == read-only ]] || fehler "-s nur read-only"; sandbox=1 ;;
+      -C) i=$((i+1)); pfad_ok "${args[i]:-}" || fehler "-C ausserhalb von $WURZEL/arbeit" ;;
+      -i) i=$((i+1)); pfad_ok "${args[i]:-}" || fehler "-i ausserhalb von $WURZEL/eingang" ;;
+      -m|--model) i=$((i+1)); [[ "${args[i]:-}" =~ ^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$ ]] || fehler "Modellname" ;;
+      -c) i=$((i+1)); erlaubt_c "${args[i]:-}" || fehler "-c ${args[i]:-} nicht erlaubt" ;;
+      --) ende=1 ;;
+      -) [[ $((i+1)) -eq n ]] || fehler "- nur am Ende" ;;
+      *) fehler "Option nicht erlaubt: $a" ;;
+    esac
+    i=$((i+1))
+  done
+  [[ "${args[n-1]}" == "-" ]] || fehler "Prompt nur ueber stdin (-)"
+  # Ohne -s gilt immer read-only, auch im Betreiber-Modus mit Werkzeugen.
+  (( sandbox )) || args=(exec -s read-only "${args[@]:1}")
+else
+  fehler "nur --version, debug models oder exec"
+fi
+
+[[ "$CH" == "$HAUPT" ]] || text_home_heilen
+
+exec env -i HOME=/home/alex PATH=/home/alex/.local/bin:/usr/local/bin:/usr/bin:/bin \
+  NO_COLOR=1 LANG=C.UTF-8 CODEX_HOME="$CH" "$BIN" "${args[@]}"

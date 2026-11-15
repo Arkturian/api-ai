@@ -86,6 +86,10 @@ def codex_als_benutzer(cmd, env):
     user = (os.getenv("CODEX_RUN_AS_USER") or "").strip()
     if not user or not cmd or os.path.basename(str(cmd[0])) != "codex":
         return list(cmd)
+    from ai.services import cli_dienst
+    if cli_dienst.aktiv():
+        # #2937: als apiai nur ueber den root-eigenen Wrapper, ohne Umgebung.
+        return cli_dienst.codex_befehl(user, cmd, env)
     binaer = shutil.which("codex", path=env.get("PATH")) or cmd[0]
     umgebung = [f"{k}={env[k]}" for k in ("CODEX_HOME", "PATH", "NO_COLOR", "HOME") if env.get(k)]
     if not env.get("HOME") or env.get("HOME") == "/root":
@@ -123,10 +127,17 @@ def bilder_fuer_codex_benutzer(pfade):
         raise RuntimeError(f"CODEX_RUN_AS_USER={user} existiert nicht")
     if pw.pw_uid == os.geteuid():
         return list(pfade), []
-    basis = os.getenv("CODEX_VISION_DIR") or f"/var/lib/api-ai/vision-{user}"
-    os.makedirs(basis, mode=0o700, exist_ok=True)
-    os.chown(basis, pw.pw_uid, pw.pw_gid)
-    os.chmod(basis, 0o700)
+    from ai.services import cli_dienst
+    dienst = cli_dienst.aktiv()
+    if dienst:
+        # #2937: apiai darf nicht chown-en; der setgid-Eingang (Gruppe
+        # apiai-cli) macht die Kopie ueber die Gruppe lesbar.
+        basis = cli_dienst.eingang()
+    else:
+        basis = os.getenv("CODEX_VISION_DIR") or f"/var/lib/api-ai/vision-{user}"
+        os.makedirs(basis, mode=0o700, exist_ok=True)
+        os.chown(basis, pw.pw_uid, pw.pw_gid)
+        os.chmod(basis, 0o700)
     neu, kopien = [], []
     for quelle in pfade:
         q = str(quelle)
@@ -146,8 +157,11 @@ def bilder_fuer_codex_benutzer(pfade):
             raise HTTPException(status_code=422, detail={"error": "local_path_rejected", "reason": grund})
         ziel = os.path.join(basis, "aiimg_" + uuid.uuid4().hex[:12] + os.path.splitext(q)[1])
         shutil.copyfile(q, ziel)
-        os.chown(ziel, pw.pw_uid, pw.pw_gid)
-        os.chmod(ziel, 0o600)
+        if dienst:
+            cli_dienst.gruppenlesbar_ablegen(ziel)
+        else:
+            os.chown(ziel, pw.pw_uid, pw.pw_gid)
+            os.chmod(ziel, 0o600)
         neu.append(ziel)
         kopien.append(ziel)
     return neu, kopien
@@ -974,7 +988,14 @@ def _codex_text_home(haupt: str) -> Optional[str]:
     der beiden Seiten meldet sich dann mit 401. Der Link folgt auch einem
     Kontowechsel im Hauptverzeichnis. Scheitert etwas, None: der Aufruf
     laeuft dann wie bisher im Hauptverzeichnis.
+
+    Als apiai (#2937) kommt der Dienst nicht in /home/alex: Den Link legt root
+    beim Cutover einmal an, das Heilen nach einer Token-Erneuerung macht der
+    codex-Wrapper als alex. Hier nur der feste Pfad.
     """
+    from ai.services import cli_dienst
+    if cli_dienst.aktiv():
+        return cli_dienst.codex_text_home()
     try:
         ziel = (os.getenv("CODEX_TEXT_HOME") or "").strip() or haupt.rstrip("/") + "-text"
         quelle = os.path.join(haupt, "auth.json")
@@ -1597,6 +1618,13 @@ def _codex_config_effort(config_path: Optional[str] = None) -> Optional[str]:
     codex OHNE `-c` nimmt. Sie schlaegt das `default_reasoning_level` des
     Modells (gemessen 02.09.: config sagt "high", Katalog "medium" — ohne
     Angabe rechnet codex mit high). Rangfolge: -c > config.toml > Modell."""
+    from ai.services import cli_dienst
+    _user = (os.getenv("CODEX_RUN_AS_USER") or "").strip()
+    if cli_dienst.aktiv() and _user and not config_path:
+        # #2937: apiai liest alex' config.toml nicht; der Wrapper gibt nur
+        # model und model_reasoning_effort aus.
+        _e = cli_dienst.codex_konfig(_user)[1]
+        return _e.strip().lower() if _e else None
     try:
         # Dieselbe Aufloesung wie der CLI-Lauf (run_codex_cli): CODEX_HOME,
         # sonst <CLI_HOME oder pw_dir>/.codex — NICHT expanduser("~"), das
@@ -2588,6 +2616,11 @@ def _agy_benutzer():
 
 def _agy_arbeitsbereich(home: str, user: str) -> str:
     import pwd
+    from ai.services import cli_dienst
+    if cli_dienst.aktiv():
+        # #2937: apiai kommt nicht in das Home des agy-Kontos (0700). Popen
+        # startet in arbeit/, der Wrapper wechselt selbst in seinen Ordner.
+        return cli_dienst.arbeit()
     pw = pwd.getpwnam(user)
     pfad = os.path.join(home, ".aiapi-neutral")
     for d in (pfad, os.path.join(pfad, ".vision")):
@@ -2603,14 +2636,20 @@ def _agy_bilder_uebergeben(imgs, home: str, user: str):
     import pwd
     import shutil
     import uuid
+    from ai.services import cli_dienst
+    dienst = cli_dienst.aktiv()
     pw = pwd.getpwnam(user)
-    ziel_dir = os.path.join(_agy_arbeitsbereich(home, user), ".vision")
+    # #2937: als apiai in den setgid-Eingang (Gruppe apiai-cli), ohne chown.
+    ziel_dir = cli_dienst.eingang() if dienst else os.path.join(_agy_arbeitsbereich(home, user), ".vision")
     out = []
     for u, p in imgs:
         ziel = os.path.join(ziel_dir, "ailoc_" + uuid.uuid4().hex[:12] + os.path.splitext(p)[1])
         shutil.copyfile(p, ziel)
-        os.chown(ziel, pw.pw_uid, pw.pw_gid)
-        os.chmod(ziel, 0o600)
+        if dienst:
+            cli_dienst.gruppenlesbar_ablegen(ziel)
+        else:
+            os.chown(ziel, pw.pw_uid, pw.pw_gid)
+            os.chmod(ziel, 0o600)
         try:
             os.remove(p)
         except OSError:
@@ -2623,6 +2662,9 @@ def _agy_als_benutzer(cmd, user: str, home: str, env: dict) -> list:
     """sudo -n -u <user> env HOME=... PATH=... NO_COLOR=1 agy ... - die Umgebung
     wird nicht geerbt, also kommt auch kein Google-Schluessel mit."""
     import shutil
+    from ai.services import cli_dienst
+    if cli_dienst.aktiv():
+        return cli_dienst.agy_befehl(user, cmd)
     pfad = f"{home}/.local/bin:/usr/local/bin:/usr/bin:/bin"
     binaer = shutil.which("agy", path=pfad) or cmd[0]
     return (["sudo", "-n", "-u", user, "-H", "env", f"HOME={home}", f"PATH={pfad}", "NO_COLOR=1", binaer]

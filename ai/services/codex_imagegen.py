@@ -274,7 +274,12 @@ async def generate_with_codex_imagegen(
     # Werkzeug laeuft ueber codex' eigene Verbindung (gemessen: unter
     # workspace-write scheiterte jeder Dateischreibversuch, das Bild kam
     # trotzdem). Der Prompt ist fremder Text in einer werkzeugfaehigen CLI.
-    with tempfile.TemporaryDirectory(prefix="codex-imagegen-") as arbeitsdir:
+    # #2937: als apiai muss alex den Arbeitsordner betreten koennen; /tmp mit
+    # 0700 fuer apiai ginge nicht. Ohne Dienstmodus wie bisher.
+    from ai.services import cli_dienst
+    _ordner = (cli_dienst.arbeitsordner_kontext("codex-imagegen-") if cli_dienst.aktiv()
+               else tempfile.TemporaryDirectory(prefix="codex-imagegen-"))
+    with _ordner as arbeitsdir:
         cmd = ["codex", "exec", "--json", "--skip-git-repo-check", "-s", "read-only",
                "-C", arbeitsdir]
         if cfg_modell:

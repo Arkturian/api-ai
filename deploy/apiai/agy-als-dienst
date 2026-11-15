@@ -1,0 +1,33 @@
+#!/bin/bash
+# /usr/local/libexec/api-ai/agy-als-dienst   root:root 0755   (#2937)
+# Einziger Weg von apiai zum Dienstkonto apiai-agy fuer agy. Immer --sandbox, nie skip-permissions.
+set -euo pipefail
+umask 027
+fehler() { echo "agy-als-dienst: $*" >&2; exit 64; }
+WURZEL=/var/lib/api-ai-cli
+BIN=/usr/local/lib/api-ai/agy
+
+args=("$@"); n=${#args[@]}
+if [[ $n -eq 1 && ( "${args[0]}" == "--version" || "${args[0]}" == models ) ]]; then
+  :
+else
+  i=0; sandbox=0
+  while (( i < n )); do
+    a=${args[i]}
+    case "$a" in
+      --output-format) i=$((i+1)); [[ "${args[i]:-}" == json ]] || fehler "--output-format nur json" ;;
+      --sandbox) sandbox=1 ;;
+      --model) i=$((i+1)); [[ "${args[i]:-}" =~ ^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$ ]] || fehler "Modellname" ;;
+      --effort) i=$((i+1)); [[ "${args[i]:-}" =~ ^[a-z]{1,12}$ ]] || fehler "Effort" ;;
+      *) fehler "Option nicht erlaubt: $a" ;;
+    esac
+    i=$((i+1))
+  done
+  (( sandbox )) || fehler "--sandbox fehlt"
+  # Prompt nur ueber stdin (#2937): argv landet ueber sudo im Journal.
+  [[ ! -t 0 ]] || fehler "Prompt ueber stdin erwartet"
+fi
+
+cd /var/lib/apiai-agy/arbeit
+exec env -i HOME=/var/lib/apiai-agy PATH=/usr/local/bin:/usr/bin:/bin \
+  NO_COLOR=1 LANG=C.UTF-8 "$BIN" "${args[@]}"

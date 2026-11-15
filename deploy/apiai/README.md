@@ -1,0 +1,18 @@
+# api-ai als Dienstbenutzer `apiai` (#2937, Beitrag 6150)
+
+Diese Dateien werden erst beim Cutover installiert, root-eigen:
+
+| Datei | Ziel | Rechte |
+|---|---|---|
+| `codex-als-alex` | `/usr/local/libexec/api-ai/codex-als-alex` | root:root 0755 |
+| `agy-als-dienst` | `/usr/local/libexec/api-ai/agy-als-dienst` | root:root 0755 |
+| `sudoers-api-ai` | `/etc/sudoers.d/api-ai` | root:root 0440, `visudo -c` |
+
+Den Code-Pfad schaltet `API_AI_CLI_WRAPPER_DIR=/usr/local/libexec/api-ai` im
+Drop-in der Unit ein. Fehlt die Variable, laeuft api-ai wie bisher als root.
+Dazu im Cutover-Drop-in: `CLI_HOME=/var/lib/api-ai`, `HOME=/var/lib/api-ai`
+(zz-decouple setzt heute /root), `CODEX_TEXT_HOME=/var/lib/api-ai-cli/codex-text`.
+
+Die Tests `tests/test_2937_dienstmodus.py` pruefen die Wrapper gegen die echten
+und gegen feindliche Argumentlisten. Benutzer, Gruppen, Verzeichnisse und Unit:
+siehe Beitrag 6150.

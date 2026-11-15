@@ -83,6 +83,12 @@ def codex_config(codex_home: Optional[str] = None) -> Tuple[Optional[str], Optio
     home = codex_home or os.getenv("CODEX_HOME") or "/home/alex/.codex"
     try:
         cfg = tomllib.loads((Path(home) / "config.toml").read_text())
+    except PermissionError:
+        # #2937: als apiai ist alex' Home zu; der codex-Wrapper liefert genau
+        # diese beiden Werte.
+        from ai.services import cli_dienst
+        user = (os.getenv("CODEX_RUN_AS_USER") or "").strip()
+        return cli_dienst.codex_konfig(user) if (cli_dienst.aktiv() and user) else (None, None)
     except Exception:
         return None, None
     m, e = cfg.get("model"), cfg.get("model_reasoning_effort")

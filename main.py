@@ -15,7 +15,12 @@ Author: Arkturian Team
 """
 
 from dotenv import load_dotenv
-load_dotenv()  # Load environment variables from .env file
+try:
+    load_dotenv()  # Load environment variables from .env file
+except PermissionError:
+    # #2937: als apiai ist die .env (0600 root) nicht lesbar; systemd laedt
+    # sie ohnehin als EnvironmentFile (Drop-in env-file.conf).
+    pass
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
