@@ -32,6 +32,7 @@ from ai.clients.storage_client import storage_api_key
 
 UMLEITUNGEN = (301, 302, 303, 307, 308)
 MAX_SPRUENGE = 3
+logger = logging.getLogger(__name__)
 PRIVATE_MEDIA_HINWEIS = (
     "Private Datei: Der Dienstschluessel liest sie nicht. Als Aufrufer mit "
     "Bindung eine signierte Adresse holen (assets_download) und diese "
@@ -259,7 +260,8 @@ class ZielGesperrt(Exception):
 
 
 ZIEL_GESPERRT_HINWEIS = (
-    "Nur https-Adressen auf oeffentliche Ziele. Interne Quellen gibt die "
+    "Nur https-Adressen auf Port 443 und oeffentliche Ziele, nicht auf die "
+    "eigenen Knoten der Foederation. Interne Quellen gibt die "
     "Instanz ueber AI_REFERENZ_FREIGABE frei; Referenzbilder gehen auch als "
     "Storage-ID."
 )
@@ -326,10 +328,109 @@ def ist_freigegeben(url: str) -> bool:
     return False
 
 
-def _ip_oeffentlich(ip) -> bool:
-    if getattr(ip, "ipv4_mapped", None):
-        ip = ip.ipv4_mapped
+# Eigene oeffentliche Knoten-Adressen (#3033, Befund 108): nach Bereich
+# "global", aber eine Anfrage dorthin landet auf unseren eigenen Hosts. Dort
+# erreicht sie Dienste, die ohne nginx auf 0.0.0.0 lauschen, oder nginx-
+# Freigaben, die diesen Adressen trauen. Gleiche Liste wie
+# share-proxy/safe_fetch.php, dazu pdrei, tommy und arkturians IPv6.
+# Ergaenzen ohne Release: AI_EIGENE_IPS (Komma-Liste, IPs oder Netze).
+_EIGENE_IPS = (
+    "192.46.232.130", "2a01:7e01::f03c:94ff:feb3:d807",   # arkturian (Hub)
+    "188.65.73.164",                                        # arkserver
+    "62.225.187.68", "62.225.187.66",                       # oneal
+    "172.104.235.73",                                       # pdrei
+    "217.149.160.166",                                      # tommy (NAT)
+)
+# IPv6-Praefixe, die eine beliebige IPv4-Adresse einbetten: NAT64 (RFC 6052,
+# RFC 8215). Python zaehlt 64:ff9b::/96 als global.
+_V4_EINBETTEND = (ipaddress.ip_network("64:ff9b::/96"), ipaddress.ip_network("64:ff9b:1::/48"),
+                  ipaddress.ip_network("2002::/16"))
+_lokale_cache: Optional[list] = None
+
+
+def _lokale_adressen() -> list:
+    """Adressen der eigenen Schnittstellen (IPv4 per ioctl, IPv6 aus /proc)."""
+    global _lokale_cache
+    if _lokale_cache is not None:
+        return _lokale_cache
+    out = []
+    try:
+        import fcntl
+        import struct
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sk:
+            for _i, name in socket.if_nameindex():
+                try:
+                    roh = fcntl.ioctl(sk.fileno(), 0x8915, struct.pack("256s", name[:15].encode()))
+                    out.append(socket.inet_ntoa(roh[20:24]))
+                except OSError:
+                    pass
+    except Exception:
+        pass
+    try:
+        with open("/proc/net/if_inet6") as fh:
+            for zeile in fh:
+                h = zeile.split()[0]
+                out.append(str(ipaddress.IPv6Address(int(h, 16))))
+    except Exception:
+        pass
+    _lokale_cache = out
+    return out
+
+
+def _eigene_netze() -> list:
+    netze = []
+    roh = list(_EIGENE_IPS) + [x.strip() for x in (os.getenv("AI_EIGENE_IPS", "") or "").split(",")]
+    for eintrag in roh + _lokale_adressen():
+        if not eintrag:
+            continue
+        try:
+            netze.append(ipaddress.ip_network(eintrag, strict=False))
+        except ValueError:
+            logger.warning("AI_EIGENE_IPS: %r ist keine Adresse", eintrag)
+    return netze
+
+
+def _als_v4(ip):
+    """::ffff:a.b.c.d und ::a.b.c.d (IPv4-kompatibel, veraltet) -> IPv4."""
+    if ip.version == 6:
+        if ip.ipv4_mapped:
+            return ip.ipv4_mapped
+        n = int(ip)
+        if n >> 32 == 0 and n > 1:
+            return ipaddress.IPv4Address(n & 0xFFFFFFFF)
+    return ip
+
+
+def _eingebettet(ip):
+    """Wie _als_v4, dazu NAT64 (letzte 32 Bit) und 6to4 (Bits 16-48)."""
+    ip = _als_v4(ip)
+    if ip.version == 6:
+        if ip in _V4_EINBETTEND[0]:
+            return ipaddress.IPv4Address(int(ip) & 0xFFFFFFFF)
+        if ip.sixtofour:
+            return ip.sixtofour
+    return ip
+
+
+def ist_eigene_adresse(ip) -> bool:
+    """Eigene Knoten oder eigene Schnittstelle, auch eingebettet in IPv6.
+    Nur oeffentliche Bereiche zaehlen hier; Schleife und LAN meldet die
+    Bereichspruefung als internal_address."""
+    ip = _eingebettet(ip)
+    if not (ip.is_global and not ip.is_unspecified):
+        return False
+    return any(ip.version == n.version and ip in n for n in _eigene_netze())
+
+
+def _bereich_oeffentlich(ip) -> bool:
+    ip = _als_v4(ip)
+    if ip.version == 6 and any(ip in n for n in _V4_EINBETTEND):
+        return False
     return ip.is_global and not ip.is_multicast and not ip.is_reserved and not ip.is_unspecified
+
+
+def _ip_oeffentlich(ip) -> bool:
+    return not ist_eigene_adresse(ip) and _bereich_oeffentlich(ip)
 
 
 def _aufloesen(host: str, port: int) -> list:
@@ -367,8 +468,14 @@ def ziel_pruefen(url: str) -> tuple:
                 ip = ipaddress.ip_address(roh.split("%")[0])
             except ValueError:
                 raise ZielGesperrt(url, "internal_address")
-            if not _ip_oeffentlich(ip):
+            if ist_eigene_adresse(ip):
+                raise ZielGesperrt(url, "own_node_address")
+            if not _bereich_oeffentlich(ip):
                 raise ZielGesperrt(url, "internal_address")
+        if port != 443:
+            # Wie storage-api safe_fetch (#3033): fremde Ziele nur auf 443.
+            # Ein oeffentlicher Host auf 22/6379/5432 ist nie eine Bildquelle.
+            raise ZielGesperrt(url, "port_not_allowed")
     ip = ips[0]
     netloc_ip = f"[{ip}]" if ":" in ip else ip
     if p.port:

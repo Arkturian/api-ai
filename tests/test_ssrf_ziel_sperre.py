@@ -213,3 +213,88 @@ def test_storage_ids_werden_zu_eigenen_adressen():
         "https://api-storage.arkturian.com/storage/media/13?variant=full",
     ]
     assert r.reference_storage_ids is None
+
+
+# --- #3033 (Befund 108): eigene Knoten-Adressen, NAT64, Pinning ----------
+
+@pytest.mark.parametrize("url", [
+    "https://188.65.73.164/x",                       # arkserver
+    "https://192.46.232.130/x",                      # arkturian
+    "https://[2a01:7e01::f03c:94ff:feb3:d807]/x",    # arkturian IPv6
+    "https://[::ffff:188.65.73.164]/x",              # IPv4-mapped
+    "https://[::188.65.73.164]/x",                   # IPv4-kompatibel
+    "https://62.225.187.68/x", "https://62.225.187.66/x",   # oneal
+    "https://172.104.235.73/x", "https://217.149.160.166/x",  # pdrei, tommy
+    "https://[64:ff9b::bc41:49a4]/x", "https://[2002:bc41:49a4::1]/x",  # arkserver in NAT64/6to4
+])
+def test_eigene_knoten_sind_gesperrt(url):
+    assert _gesperrt(url) == "own_node_address"
+
+
+def test_eigener_knoten_hinter_fremdem_namen(monkeypatch):
+    DNS["rebind.example"] = ["188.65.73.164"]
+    try:
+        assert _gesperrt("https://rebind.example/a.png") == "own_node_address"
+    finally:
+        DNS.pop("rebind.example")
+
+
+@pytest.mark.parametrize("url", [
+    "https://[64:ff9b::7f00:1]/x", "https://[64:ff9b::bc41:49a4]/x",   # NAT64
+    "https://[64:ff9b:1::1]/x", "https://[2002:7f00:1::1]/x",          # lokales NAT64, 6to4
+    "https://[::7f00:1]/x",                                            # ::127.0.0.1
+])
+def test_v4_einbettende_ipv6_sind_gesperrt(url):  # noqa
+    assert _gesperrt(url) in ("internal_address", "own_node_address")
+
+
+def test_weitere_eigene_adressen_per_umgebung(monkeypatch):
+    monkeypatch.setenv("AI_EIGENE_IPS", "93.184.216.0/24")
+    assert _gesperrt("https://bilder.example/a.png") == "own_node_address"
+
+
+def test_lokale_schnittstellen_zaehlen_als_eigen(monkeypatch):
+    monkeypatch.setattr(s, "_lokale_cache", ["203.0.114.7"])
+    assert _gesperrt("https://203.0.114.7/x") == "own_node_address"
+
+
+def test_freigegebener_storage_bleibt_erlaubt(monkeypatch):
+    monkeypatch.setenv("AI_REFERENZ_FREIGABE", "https://files.example/")
+    DNS["files.example"] = ["188.65.73.164"]
+    try:
+        verbinden, _k, _e = s.ziel_pruefen("https://files.example/1/a.png")
+        assert verbinden == "https://188.65.73.164/1/a.png"
+    finally:
+        DNS.pop("files.example")
+
+
+def test_umleitung_auf_eigenen_knoten_wird_neu_geprueft(monkeypatch):
+    import asyncio
+    DNS["sprung.example"] = [OEFFENTLICH]
+    gesehen = []
+
+    def antwort(req):
+        gesehen.append(str(req.url))
+        return httpx.Response(302, headers={"location": "https://188.65.73.164/internal/x"})
+
+    async def lauf():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(antwort), follow_redirects=False) as c:
+            async with s.oeffne(c, "https://sprung.example/a.png"):
+                pass
+    try:
+        with pytest.raises(s.ZielGesperrt) as e:
+            asyncio.run(lauf())
+        assert e.value.grund == "own_node_address"
+        assert gesehen == [f"https://{OEFFENTLICH}/a.png"]
+    finally:
+        DNS.pop("sprung.example")
+
+
+@pytest.mark.parametrize("port", [22, 80, 6379, 8080, 5432, 8443])
+def test_fremde_ziele_nur_auf_443(port):
+    assert _gesperrt(f"https://bilder.example:{port}/a.png") == "port_not_allowed"
+
+
+@pytest.mark.parametrize("url", ["https://10.192.26.50/x", "https://172.17.0.1/x"])
+def test_lan_und_docker_gesperrt(url):
+    assert _gesperrt(url) == "internal_address"
