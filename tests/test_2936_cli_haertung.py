@@ -86,14 +86,24 @@ def test_root_kopie_nur_fuer_erlaubte_dateien(monkeypatch, tmp_path):
 
 def test_tools_ohne_betreiber_403(fang):
     r = TestClient(main.app).post("/ai/chatgpt", json={"prompt": "x", "tools": True})
-    assert r.status_code == 403 and r.json()["detail"]["error"] == "tools_require_operator_key"
+    assert r.status_code == 403 and r.json()["detail"]["error"] == "tools_disabled"
     assert fang.cmd is None
 
 
-def test_tools_mit_betreiber_laufen(fang):
-    TestClient(main.app).post("/ai/chatgpt", json={"prompt": "x", "tools": True},
-                              headers={"X-API-KEY": SCHLUESSEL})
-    assert fang.cmd is not None and "features.shell_tool=false" not in " ".join(fang.cmd)
+def test_tools_auch_mit_betreiber_gesperrt(fang):
+    """#2937: codex als alex liest mit Werkzeugen alex' Dateien, auch read-only."""
+    r = TestClient(main.app).post("/ai/chatgpt", json={"prompt": "x", "tools": True},
+                                  headers={"X-API-KEY": SCHLUESSEL})
+    assert r.status_code == 403 and r.json()["detail"]["error"] == "tools_disabled"
+    assert fang.cmd is None
+
+
+def test_tools_ueber_claude_umleitung_gesperrt(fang, monkeypatch):
+    monkeypatch.setenv("CLAUDE_ROUTE", "codex")
+    r = TestClient(main.app).post("/ai/claude", json={"prompt": "x", "tools": True},
+                                  headers={"X-API-KEY": SCHLUESSEL})
+    assert r.status_code == 403
+    assert fang.cmd is None
 
 
 def test_vorgabe_ohne_werkzeuge_und_read_only(fang):

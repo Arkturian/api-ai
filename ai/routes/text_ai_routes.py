@@ -1787,10 +1787,14 @@ async def chatgpt_endpoint(
 
 async def _chatgpt_mit_rechten(prompt, model, api_key):
     _lokale_pfade_pruefen(_bildpfade(prompt))
-    if prompt.tools is True and not _AUFRUF_RECHTE.get().get("betreiber"):
+    # #2937 (Cloud, 15.11.): Werkzeuge ganz aus, auch mit Betreiber-Schluessel.
+    # codex laeuft als alex; mit Werkzeugen liest es auch unter read-only jede
+    # Datei, die alex lesen kann (~/.ssh, auth.json, Developer-.env). Seit dem
+    # Betreiber-Tor (14.11.) hat kein Aufrufer tools=true geschickt.
+    if prompt.tools is True:
         raise HTTPException(status_code=403, detail={
-            "error": "tools_require_operator_key",
-            "hint": "Werkzeuge (Shell, Code) nur mit dem Betreiber-Schluessel (X-API-KEY). "
+            "error": "tools_disabled",
+            "hint": "Werkzeuge (Shell, Lesen, Code) sind auf api-ai abgeschaltet (#2937). "
                     "Ohne tools laeuft der Aufruf als reiner Text."})
     from ai.services import narrate_jobs as nj
     rid = prompt.request_id
