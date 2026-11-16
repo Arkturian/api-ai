@@ -115,7 +115,7 @@ def test_private_gilt_auch_mit_referenz(aufbau):
 def test_kopien_fuer_den_codex_benutzer_werden_aufgeraeumt(aufbau, monkeypatch, tmp_path):
     kopie = tmp_path / "kopie.png"
 
-    def fake_kopieren(pfade):
+    def fake_kopieren(pfade, eigene_ordner=()):
         kopie.write_bytes(b"BILD0")
         return [str(kopie)], [str(kopie)]
     monkeypatch.setattr(t, "bilder_fuer_codex_benutzer", fake_kopieren)

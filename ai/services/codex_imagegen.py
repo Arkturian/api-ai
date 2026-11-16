@@ -305,7 +305,7 @@ async def generate_with_codex_imagegen(
                     with open(ziel, "wb") as fh:
                         fh.write(daten)
                     lokale.append(ziel)
-                lokale, kopien = bilder_fuer_codex_benutzer(lokale)
+                lokale, kopien = bilder_fuer_codex_benutzer(lokale, eigene_ordner=(arbeitsdir,))
                 for pfad_ref in lokale:
                     cmd += ["-i", pfad_ref]
                 cmd.append("--")

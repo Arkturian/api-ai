@@ -97,7 +97,7 @@ def codex_als_benutzer(cmd, env):
     return ["sudo", "-n", "-u", user, "-H", "env"] + umgebung + [binaer] + list(cmd[1:])
 
 
-def bilder_fuer_codex_benutzer(pfade):
+def bilder_fuer_codex_benutzer(pfade, eigene_ordner=()):
     """Macht lokale Bilder fuer den Benutzer lesbar, als der codex laeuft.
 
     Anlass (YouTube-Pipeline, 11.10.): seit codex_als_benutzer (13.09.)
@@ -147,7 +147,12 @@ def bilder_fuer_codex_benutzer(pfade):
         # #2936: als root wird nur kopiert, was ein Medium unter den erlaubten
         # Wurzeln oder im eigenen Vision-Ordner ist, nie /etc/shadow & Co.
         _cli_home = os.getenv("CLI_HOME") or pwd.getpwuid(os.getuid()).pw_dir
-        grund = _lokaler_pfad_erlaubt(q, zusatz=(os.path.join(_cli_home, ".aiapi-neutral", ".vision"),))
+        # eigene_ordner: Ablagen, die der Aufrufer selbst gerade angelegt hat
+        # (codex-imagegen laedt Referenzen in seinen Arbeitsordner, im
+        # Dienstmodus unter arbeit/ statt /tmp, #2937). Nur genau dieser
+        # Ordner, nicht ganz arbeit/: dort liegen auch fremde Laeufe.
+        grund = _lokaler_pfad_erlaubt(q, zusatz=(os.path.join(_cli_home, ".aiapi-neutral", ".vision"),
+                                                 *eigene_ordner))
         if grund:
             for k in kopien:
                 try:
