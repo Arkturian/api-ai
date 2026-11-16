@@ -261,3 +261,49 @@ def test_sudoers_nur_zwei_programme_ohne_setenv():
     assert len(regeln) == 2 and all("NOSETENV:" in z and " ALL\n" not in z for z in regeln)
     assert {z.split()[-1] for z in regeln} == {f"{WRAPPER}/codex-als-alex", f"{WRAPPER}/agy-als-dienst"}
     assert any("!setenv" in z and "env_reset" in z for z in zeilen if z.startswith("Defaults:apiai"))
+
+
+def _heilen(tmp_path, ziel_schreibbar=True):
+    """text_home_heilen aus dem echten Wrapper gegen ein Abbild von alex' Home:
+    haupt/auth.json -> konten/apopovic/auth.json, Text-Home mit einer frisch
+    von codex erneuerten Datei statt des Links."""
+    s = (REPO / "deploy" / "apiai" / "codex-als-alex").read_text()
+    a = s.index("text_home_heilen() {")
+    fn = s[a:s.index("\n}\n", a) + 3]
+    konten = tmp_path / "konten" / "apopovic"
+    konten.mkdir(parents=True)
+    echt = konten / "auth.json"
+    echt.write_text("alt")
+    os.utime(echt, (1, 1))
+    haupt = tmp_path / "haupt"
+    haupt.mkdir()
+    (haupt / "auth.json").symlink_to(echt)
+    ch = tmp_path / "text"
+    ch.mkdir()
+    link = ch / "auth.json"
+    link.write_text("frisch")
+    if not ziel_schreibbar:
+        konten.chmod(0o500)  # wie EROFS unter ProtectHome=read-only
+    try:
+        r = subprocess.run(["bash", "-c", f"set -euo pipefail\nHAUPT={haupt}\nCH={ch}\n{fn}\ntext_home_heilen\necho OK"],
+                           capture_output=True, text=True)
+    finally:
+        konten.chmod(0o700)
+    return r, echt, link
+
+
+def test_heilen_schreibt_frische_anmeldung_zurueck(tmp_path):
+    r, echt, link = _heilen(tmp_path)
+    assert r.stdout.strip() == "OK", r.stderr
+    assert echt.read_text() == "frisch" and link.is_symlink()
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root schreibt trotz 0500")
+def test_heilen_loescht_nie_die_einzige_frische_anmeldung(tmp_path):
+    """Cloud 16.11.: cp scheiterte (EROFS), rm loeschte danach den Text-Home-
+    Stand, das Haupt-Home behielt das verbrauchte Refresh-Token."""
+    r, echt, link = _heilen(tmp_path, ziel_schreibbar=False)
+    assert r.stdout.strip() == "OK", r.stderr
+    assert not link.is_symlink() and link.read_text() == "frisch"
+    assert echt.read_text() == "alt"
+    assert "nicht" in r.stderr and "zurueckgeschrieben" in r.stderr

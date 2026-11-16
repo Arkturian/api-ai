@@ -26,11 +26,21 @@ text_home_heilen() {
   echt=$(realpath -- "$HAUPT/auth.json")
   if [[ -f "$link" && ! -L "$link" ]]; then
     if [[ "$link" -nt "$echt" ]]; then
-      cp -p -- "$link" "$echt.neu" && mv -f -- "$echt.neu" "$echt"
+      # Nur loeschen, wenn das Zurueckschreiben gelungen ist (Cloud 16.11.:
+      # unter ProtectHome=read-only gab cp EROFS, rm loeschte danach die
+      # einzige frische Anmeldung). Scheitert es, bleibt sie im Text-Home,
+      # codex arbeitet damit weiter, der naechste Aufruf versucht es erneut.
+      if cp -p -- "$link" "$echt.neu" && mv -f -- "$echt.neu" "$echt"; then
+        rm -f -- "$link"
+      else
+        rm -f -- "$echt.neu" 2>/dev/null || true
+        echo "codex-als-alex: erneuerte Anmeldung nicht nach $echt zurueckgeschrieben, bleibt in $link" >&2
+      fi
+    else
+      rm -f -- "$link"
     fi
-    rm -f -- "$link"
   fi
-  [[ -L "$link" ]] || ln -s -- "$HAUPT/auth.json" "$link"
+  [[ -e "$link" || -L "$link" ]] || ln -s -- "$HAUPT/auth.json" "$link"
   # Abo-Bilder liegen nach dem Hochladen im Storage; apiai darf hier nicht
   # loeschen (kein Gruppen-Schreibrecht), deshalb raeumt der Wrapper auf.
   find "$CH/generated_images" -type f -mmin +120 -delete 2>/dev/null || true
