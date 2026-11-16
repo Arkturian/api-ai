@@ -203,7 +203,42 @@ def test_codex_wrapper_weist_angriffe_ab(tmp_path, args):
 
 def test_codex_wrapper_erzwingt_read_only(tmp_path):
     r = _lauf(_wrapper(tmp_path, "codex-als-alex"), "haupt", "exec", "--json", "-")
-    assert "exec -s read-only --json -" in r.stdout
+    assert " -s read-only --json -" in r.stdout
+
+
+def _gesperrt_im_wrapper():
+    import re
+    s = (REPO / "deploy" / "apiai" / "codex-als-alex").read_text()
+    return re.search(r"GESPERRT=\(([^)]*)\)", s).group(1).split()
+
+
+@pytest.mark.parametrize("modus", ["haupt", "text"])
+def test_3165_wrapper_erzwingt_werkzeuge_aus_in_jedem_modus(tmp_path, modus):
+    """Vorher erlaubte der Wrapper features.*=false nur; im Modus haupt las
+    codex als alex per Shell jede Datei von alex (Kanarienprobe 16.11.)."""
+    r = _lauf(_wrapper(tmp_path, "codex-als-alex"), modus, "exec", "--json", "-")
+    assert r.returncode == 0, r.stderr
+    kopf = r.stdout.split(" exec ", 1)[1]
+    for f in ("shell_tool", "unified_exec", "plugins", "apps", "browser_use", "view_image",
+              "computer_use", "code_mode_host"):
+        assert f"-c features.{f}=false" in kopf
+
+
+def test_3165_wrapper_und_code_sperren_dasselbe():
+    from ai.routes.text_ai_routes import CODEX_GESPERRT
+    assert set(_gesperrt_im_wrapper()) == set(CODEX_GESPERRT)
+
+
+@pytest.mark.parametrize("f", ["browser_use", "view_image", "plugins", "computer_use"])
+def test_3165_wrapper_laesst_einschalten_nicht_zu(tmp_path, f):
+    r = _lauf(_wrapper(tmp_path, "codex-als-alex"), "haupt", "exec", "-c", f"features.{f}=true", "-")
+    assert r.returncode == 64 and "START" not in r.stdout
+
+
+def test_3165_code_sperren_passieren_den_wrapper(tmp_path):
+    from ai.routes.text_ai_routes import CODEX_OHNE_WERKZEUGE
+    r = _lauf(_wrapper(tmp_path, "codex-als-alex"), "text", "exec", "--json", *CODEX_OHNE_WERKZEUGE, "-")
+    assert r.returncode == 0, r.stderr
 
 
 def test_agy_wrapper(tmp_path):

@@ -9,6 +9,10 @@ WURZEL=/var/lib/api-ai-cli
 BIN=/home/alex/.local/bin/codex
 
 HAUPT=/home/alex/.codex
+# #3165: Werkzeuge, die codex als alex nie bekommt (codex features list, 16.11.)
+GESPERRT=(shell_tool unified_exec code_mode_host apps plugins remote_plugin
+          browser_use browser_use_external browser_use_full_cdp_access in_app_browser
+          computer_use view_image hooks multi_agent skill_mcp_dependency_install)
 
 # Schlankes Text-Home: auth.json ist ein Link auf die Anmeldung im Haupt-Home.
 # Erneuert codex das Token, ersetzt es den Link durch eine Datei; die neuere
@@ -40,7 +44,13 @@ case "${1:-}" in
 esac
 shift
 
+gesperrt_aus() {  # features.<name>=false fuer jeden Namen aus GESPERRT
+  local f
+  for f in "${GESPERRT[@]}"; do [[ "$1" == "features.$f=false" ]] && return 0; done
+  return 1
+}
 erlaubt_c() {
+  gesperrt_aus "$1" && return 0
   case "$1" in
     features.shell_tool=false|features.unified_exec=false|features.code_mode_host=false|\
     features.apps=false|features.plugins=false|include_environment_context=false|\
@@ -85,6 +95,16 @@ elif [[ $n -ge 2 && "${args[0]}" == exec ]]; then
   [[ "${args[n-1]}" == "-" ]] || fehler "Prompt nur ueber stdin (-)"
   # Ohne -s gilt immer read-only, auch im Betreiber-Modus mit Werkzeugen.
   (( sandbox )) || args=(exec -s read-only "${args[@]:1}")
+  # #3165: Werkzeuge immer aus, in jedem Modus. read-only verhindert nur das
+  # Schreiben; mit Shell liest codex als alex jede Datei von alex (~/.ssh,
+  # .env), mit Plugins erreicht es alex' Gmail und GitHub, mit Browser oder
+  # view_image liest es file://-Adressen bzw. Bilder aus /home/alex. Gesperrt
+  # wird vor den Aufrufer-Optionen; erlaubt_c laesst fuer diese Schluessel
+  # nur =false zu, ein spaeteres -c schaltet sie also nicht wieder ein.
+  # image_generation bleibt an (Abo-Bilder).
+  sperren=()
+  for f in "${GESPERRT[@]}"; do sperren+=(-c "features.$f=false"); done
+  args=(exec "${sperren[@]}" "${args[@]:1}")
 else
   fehler "nur --version, debug models oder exec"
 fi

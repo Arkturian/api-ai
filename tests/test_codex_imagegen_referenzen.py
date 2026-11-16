@@ -142,3 +142,17 @@ def test_bild_startet_im_schlanken_home_mit_modell_aus_der_hauptkonfiguration(au
     assert cmd[cmd.index("-m") + 1] == "gpt-5.6-sol"
     assert "model_reasoning_effort=high" in cmd
     assert out["storage_object_id"] == 42                     # Pfad im schlanken Home wird angenommen
+
+
+def test_3165_abo_bild_ohne_werkzeuge(aufbau):
+    """codex laeuft als alex; vorher lief die Abo-Bilderzeugung mit Shell,
+    Plugins (alex' Gmail/GitHub) und Browser. Nur die Bilderzeugung bleibt."""
+    from ai.routes.text_ai_routes import CODEX_GESPERRT
+    _lauf()
+    cmd = aufbau["cmd"]
+    for f in ("shell_tool", "plugins", "browser_use", "view_image", "computer_use"):
+        assert f in CODEX_GESPERRT
+    for f in CODEX_GESPERRT:
+        i = cmd.index(f"features.{f}=false")
+        assert cmd[i - 1] == "-c"
+    assert not any("image_generation" in c for c in cmd)
