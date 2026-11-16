@@ -10,7 +10,9 @@ BIN=/home/alex/.local/bin/codex
 
 HAUPT=/home/alex/.codex
 # #3165: Werkzeuge, die codex als alex nie bekommt (codex features list, 16.11.)
-GESPERRT=(shell_tool unified_exec code_mode_host apps plugins remote_plugin
+# code_mode_host bleibt erlaubt: image_gen laeuft in dieser codex-Fassung ueber den
+# Code-Modus, und der hat ohne Shell keinen Dateizugriff (Kanarienprobe 16.11.).
+GESPERRT=(shell_tool unified_exec apps plugins remote_plugin
           browser_use browser_use_external browser_use_full_cdp_access in_app_browser
           computer_use view_image hooks multi_agent skill_mcp_dependency_install)
 

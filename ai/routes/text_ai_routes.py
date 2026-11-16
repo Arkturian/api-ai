@@ -954,11 +954,17 @@ def _pruefe_response_format(prompt: "Prompt", endpoint: str) -> Optional[Dict[st
 # #3165: codex laeuft als alex. Jedes Werkzeug, das Dateien von alex lesen
 # oder seine Zugaenge nutzen kann, ist aus (Liste wie GESPERRT im Wrapper
 # deploy/apiai/codex-als-alex, der sie im Dienstmodus zusaetzlich erzwingt).
-CODEX_GESPERRT = ("shell_tool", "unified_exec", "code_mode_host", "apps", "plugins",
+# code_mode_host ist nicht dabei: image_gen braucht den Code-Modus, und der hat
+# ohne Shell keinen Dateizugriff (Kanarienprobe 16.11.). Reine Textaufrufe
+# schalten ihn trotzdem ab (CODEX_OHNE_WERKZEUGE).
+CODEX_GESPERRT = ("shell_tool", "unified_exec", "apps", "plugins",
                   "remote_plugin", "browser_use", "browser_use_external",
                   "browser_use_full_cdp_access", "in_app_browser", "computer_use",
                   "view_image", "hooks", "multi_agent", "skill_mcp_dependency_install")
-CODEX_OHNE_WERKZEUGE = [x for f in CODEX_GESPERRT for x in ("-c", f"features.{f}=false")]
+CODEX_SPERR_ARGS = [x for f in CODEX_GESPERRT for x in ("-c", f"features.{f}=false")]
+_TEXT_ZUERST = ("shell_tool", "unified_exec", "code_mode_host", "apps", "plugins")
+CODEX_OHNE_WERKZEUGE = [x for f in _TEXT_ZUERST + tuple(g for g in CODEX_GESPERRT if g not in _TEXT_ZUERST)
+                        for x in ("-c", f"features.{f}=false")]
 
 
 # Reiner Textaufruf (CloudV2, 11.11.): eigene Minimal-Instruktion statt des

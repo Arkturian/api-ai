@@ -220,8 +220,10 @@ def test_3165_wrapper_erzwingt_werkzeuge_aus_in_jedem_modus(tmp_path, modus):
     assert r.returncode == 0, r.stderr
     kopf = r.stdout.split(" exec ", 1)[1]
     for f in ("shell_tool", "unified_exec", "plugins", "apps", "browser_use", "view_image",
-              "computer_use", "code_mode_host"):
+              "computer_use"):
         assert f"-c features.{f}=false" in kopf
+    # image_gen laeuft ueber den Code-Modus: nicht erzwungen aus
+    assert "features.code_mode_host=false" not in kopf
 
 
 def test_3165_wrapper_und_code_sperren_dasselbe():

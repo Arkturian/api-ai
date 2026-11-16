@@ -156,3 +156,5 @@ def test_3165_abo_bild_ohne_werkzeuge(aufbau):
         i = cmd.index(f"features.{f}=false")
         assert cmd[i - 1] == "-c"
     assert not any("image_generation" in c for c in cmd)
+    # Regression 16.11.: mit code_mode_host=false kam kein Bild mehr
+    assert "features.code_mode_host=false" not in cmd

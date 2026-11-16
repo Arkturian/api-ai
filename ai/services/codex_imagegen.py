@@ -280,10 +280,11 @@ async def generate_with_codex_imagegen(
     _ordner = (cli_dienst.arbeitsordner_kontext("codex-imagegen-") if cli_dienst.aktiv()
                else tempfile.TemporaryDirectory(prefix="codex-imagegen-"))
     with _ordner as arbeitsdir:
-        from ai.routes.text_ai_routes import CODEX_OHNE_WERKZEUGE
-        # #3165: der Prompt ist fremder Text; ausser der Bilderzeugung kein Werkzeug.
+        from ai.routes.text_ai_routes import CODEX_SPERR_ARGS
+        # #3165: der Prompt ist fremder Text; ausser der Bilderzeugung (ueber den
+        # Code-Modus) kein Werkzeug.
         cmd = ["codex", "exec", "--json", "--skip-git-repo-check", "-s", "read-only",
-               "-C", arbeitsdir, *CODEX_OHNE_WERKZEUGE]
+               "-C", arbeitsdir, *CODEX_SPERR_ARGS]
         if cfg_modell:
             cmd += ["-m", cfg_modell]
         if cfg_effort:
