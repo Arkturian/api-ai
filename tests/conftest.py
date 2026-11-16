@@ -96,3 +96,14 @@ def _verbrauch_in_tmp(monkeypatch, tmp_path):
     """Der Bildverbrauch (13.11.2026) schreibt nach VERBRAUCH_DIR. Kein Test
     darf in /var/lib/api-ai/verbrauch landen und echte Zahlen verfaelschen."""
     monkeypatch.setenv("VERBRAUCH_DIR", str(tmp_path / "verbrauch"))
+
+
+@pytest.fixture(autouse=True)
+def _agentos_jwt_in_tmp(monkeypatch, tmp_path):
+    """#3155: der Widerrufsstand gehoert nie nach /var/lib, und jeder Test
+    beginnt mit frischen Pruefern."""
+    monkeypatch.setenv("AGENTOS_JWT_STATE_DIR", str(tmp_path / "agentos_jwt"))
+    from ai.services import jwt_pruefung as jp
+    jp._zuruecksetzen()
+    yield
+    jp._zuruecksetzen()

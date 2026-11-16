@@ -51,7 +51,6 @@ from ai.services.realtime_identity import kurz_id
 import certifi
 import httpx
 import jwt
-from jwt import PyJWKClient
 
 logger = logging.getLogger(__name__)
 
@@ -226,19 +225,7 @@ class VerifiedGrant:
         return scope in self.scopes
 
 
-# ── JWKS client (in-memory cache, kid-pinned, re-fetch on miss) ───────
-
-
-_jwks_client: Optional[PyJWKClient] = None
-
-
-def _jwks() -> PyJWKClient:
-    global _jwks_client
-    if _jwks_client is None:
-        # PyJWKClient handles in-memory caching + re-fetch on unknown kid
-        # internally (cache_keys=True). Overlap-rotation friendly.
-        _jwks_client = PyJWKClient(JWKS_URL, cache_keys=True, lifespan=300)
-    return _jwks_client
+# Lokale Pruefung des Grants: agentos_jwt ueber ai.services.jwt_pruefung (#3155).
 
 
 # ── Server-to-server grant exchange ───────────────────────────────────
@@ -364,46 +351,23 @@ def _verify_grant_jwt(grant_token: str, allowed_profile_ids: set) -> VerifiedGra
     comma-separated list (PR #91, AuthAPI's service-user pattern for
     Tscheppaschlucht-HP, Section #1245).
     """
+    # agentos_jwt (#3155): RS256, kid-Pflicht, Aussteller, type
+    # realtime_grant und aud ai-realtime:<profil> aus der erlaubten Menge.
+    from ai.agentos_jwt import KeysUnavailable, RevocationUnknown, TokenRejected
+    from ai.services import jwt_pruefung as jp
     try:
-        signing_key = _jwks().get_signing_key_from_jwt(grant_token)
-    except Exception as exc:
-        raise GrantUnverifiable(
-            "realtime_grant_jwks_lookup_failed",
-            f"{type(exc).__name__}",
-        ) from exc
-
-    # Audience verification is done manually below against our allowed
-    # set — pyjwt can only verify against a single expected aud.
-    try:
-        claims = jwt.decode(
-            grant_token,
-            signing_key.key,
-            algorithms=list(ALG_ALLOWLIST),
-            issuer=AUTH_ISSUER,
-            options={
-                "require": ["iss", "aud", "sub", "exp", "iat"],
-                "verify_aud": False,
-            },
-        )
-    except jwt.ExpiredSignatureError as exc:
-        raise GrantUnverifiable("realtime_grant_expired", "exp passed") from exc
-    except jwt.InvalidTokenError as exc:
-        raise GrantUnverifiable(
-            "realtime_grant_invalid",
-            f"{type(exc).__name__}",
-        ) from exc
-
-    # Manual audience check against the allowed-profile set. Grant's aud
-    # may be a single string or a list — normalize both to a set.
-    aud_claim = claims.get("aud")
-    if isinstance(aud_claim, str):
-        aud_set = {aud_claim}
-    elif isinstance(aud_claim, list):
-        aud_set = {str(a) for a in aud_claim}
-    else:
-        raise GrantWrongProfile()
-    expected_auds = {f"{AUD_PREFIX}{pid}" for pid in allowed_profile_ids}
-    if not (aud_set & expected_auds):
+        claims = jp.grant(allowed_profile_ids).verify(grant_token)
+    except TokenRejected as exc:
+        if exc.reason == "aud_mismatch":
+            raise GrantWrongProfile() from exc
+        if exc.reason == "expired":
+            raise GrantUnverifiable("realtime_grant_expired", "exp passed") from exc
+        if exc.reason == "unknown_kid":
+            raise GrantUnverifiable("realtime_grant_jwks_lookup_failed", "unknown_kid") from exc
+        raise GrantUnverifiable("realtime_grant_invalid", exc.reason) from exc
+    except (KeysUnavailable, RevocationUnknown) as exc:
+        raise GrantUnverifiable("realtime_grant_jwks_lookup_failed", type(exc).__name__) from exc
+    if not claims.get("aud"):
         raise GrantWrongProfile()
 
     grant_profile = claims.get("profile_id")

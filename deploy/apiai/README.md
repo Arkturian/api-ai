@@ -18,6 +18,10 @@ auf `root:apiai 0640` stellen, sonst sperrt der jeweilige Weg (fail-closed).
 - `/etc/api-ai/google-ultra.env` (#2867, Gemini-Schluessel fuer das
   Ultra-Guthaben, bis 13.12.2026; danach loeschen). Ohne Leserecht: 503.
 
+Verzeichnisse, in die der Prozess schreibt: beim Cutover `apiai:apiai 0700`.
+- `/var/lib/api-ai/agentos_jwt` (#3155, Widerrufsstand von agentos_jwt).
+  Ohne Schreibrecht: JWT-Pruefung 503, Etiketten „unbekannt“.
+
 Die Tests `tests/test_2937_dienstmodus.py` pruefen die Wrapper gegen die echten
 und gegen feindliche Argumentlisten. Benutzer, Gruppen, Verzeichnisse und Unit:
 siehe Beitrag 6150.

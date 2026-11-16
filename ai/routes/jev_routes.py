@@ -50,22 +50,17 @@ def _pruefen(req: JevRequest) -> None:
 
 
 def _jwt_sub_geprueft(authorization: Optional[str]) -> Optional[str]:
-    """`sub` eines Agenten-JWT, NUR nach Signatur- und Ausstellerpruefung
-    gegen die gepinnte auth-api-JWKS (dieselbe wie beim Realtime-Grant).
+    """`sub` eines JWT, NUR nach agentos_jwt (Signatur, Aussteller,
+    Token-Klasse, Widerruf; #3155).
     Ungepruefte Claims waeren ein freies Textfeld. Nur Etikett, nie Recht."""
     if not authorization or not authorization.lower().startswith("bearer "):
         return None
-    token = authorization.split(" ", 1)[1].strip()
-    try:
-        import jwt
-        from ai.services import realtime_grant_verifier as v
-        key = v._jwks().get_signing_key_from_jwt(token)
-        claims = jwt.decode(token, key.key, algorithms=["RS256"], issuer=v.AUTH_ISSUER,
-                            options={"verify_aud": False})
-        sub = str(claims.get("sub") or "").strip()
-        return sub[:64] or None
-    except Exception:
+    from ai.services import jwt_pruefung as jp
+    claims = jp.claims_oder_none(authorization)
+    if not claims:
         return None
+    sub = str(claims.get("sub") or "").strip()
+    return sub[:64] or None
 
 
 @router.post("/jev")

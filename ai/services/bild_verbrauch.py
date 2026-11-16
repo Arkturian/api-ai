@@ -41,19 +41,23 @@ def verzeichnis() -> Path:
 # --- Wer ruft? ------------------------------------------------------------
 
 def _claims_geprueft(authorization: Optional[str]) -> Optional[dict]:
-    """Claims eines JWT NUR nach Signatur- und Ausstellerpruefung gegen die
-    gepinnte auth-api-JWKS (wie /ai/jev). Ungeprueft waere es Freitext."""
-    if not isinstance(authorization, str) or not authorization.lower().startswith("bearer "):
-        return None
-    token = authorization.split(" ", 1)[1].strip()
-    if not token:
-        return None
+    """Claims eines JWT nach agentos_jwt (#3155): Signatur, Aussteller,
+    Token-Klasse und Widerruf. Abgelehnt oder kein Bearer: None. Ist die
+    Pruefung gerade unmoeglich (auth-api nie erreicht), kommt 503."""
+    from fastapi import HTTPException
+    from ai.services import jwt_pruefung as jp
     try:
-        import jwt
-        from ai.services import realtime_grant_verifier as v
-        key = v._jwks().get_signing_key_from_jwt(token)
-        return jwt.decode(token, key.key, algorithms=["RS256"], issuer=v.AUTH_ISSUER,
-                          options={"verify_aud": False})
+        return jp.pruefen(authorization)
+    except HTTPException as e:
+        if e.status_code == 401:
+            return None
+        raise
+
+
+def _claims_etikett(authorization: Optional[str]) -> Optional[dict]:
+    """Nur fuers Etikett: nie eine Ausnahme, ein Ausfall heisst unbekannt."""
+    try:
+        return _claims_geprueft(authorization)
     except Exception:
         return None
 
@@ -68,7 +72,7 @@ def name_aus_claims(claims: dict) -> Optional[str]:
 
 def aufrufer(authorization: Optional[str], x_agent_name: Optional[str]) -> Tuple[str, str]:
     """(name, quelle). Das gepruefte JWT gewinnt gegen den Kopf."""
-    claims = _claims_geprueft(authorization)
+    claims = _claims_etikett(authorization)
     if claims:
         n = name_aus_claims(claims)
         if n:
