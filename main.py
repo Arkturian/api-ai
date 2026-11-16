@@ -448,8 +448,17 @@ def _codex_auth_status() -> dict:
         if not expected:
             base["note"] = ("codex auf dieser Instanz bewusst ohne Anmeldung — kein "
                             "Konsument (Entscheid 2026-09-09, AiApi/Automation)")
-        if not os.path.exists(path):
+        # os.path.exists sagt bei fehlendem Leserecht still False. Als apiai
+        # (#2937) ist /home/alex 0700: das ist "nicht lesbar", nicht "fehlt",
+        # sonst meldet /health eine fehlende Anmeldung, die da ist.
+        try:
+            os.stat(path)
+        except FileNotFoundError:
             return {**base, "ok": False, "reason": "absent", "path": path}
+        except PermissionError:
+            return {**base, "ok": None, "reason": "not_readable_by_service", "path": path,
+                    "note": "Dienst laeuft ohne Leserecht auf die codex-Anmeldung (#2937); "
+                            "ob codex angemeldet ist, zeigt der Aufruf selbst."}
         d = _json.load(open(path, "r", encoding="utf-8"))
         tokens = d.get("tokens") or {}
         exp = None
