@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import ssl
 import time
 from dataclasses import dataclass
@@ -126,6 +127,7 @@ GRANT_URL = os.getenv(
 ALG_ALLOWLIST = ("RS256",)
 AUD_PREFIX = "ai-realtime:"
 GRANT_TIMEOUT_SEC = 5.0
+_BEARER_RE = re.compile(r"[Bb][Ee][Aa][Rr][Ee][Rr] [\x21-\x7e]+")
 
 REALTIME_PROFILE_ID_ENV = "REALTIME_PROFILE_ID"
 SERVICE_KEY_ENV = "REALTIME_GRANT_SERVICE_KEY"
@@ -274,6 +276,13 @@ async def _exchange_user_jwt_for_grant(authorization_header: str) -> dict:
     service_key = os.environ.get(SERVICE_KEY_ENV)
     if not service_key:
         raise ServiceKeyMissing()
+    # #3188: „Bearer “ ohne Token (oder mit Steuerzeichen) ging bis an
+    # httpx, das den Header als ungueltig ablehnte: 500 statt 401. Ein
+    # Token ist ein Wort ohne Leer- und Steuerzeichen; alles andere ist
+    # eine fehlende Anmeldung und kostet keinen Aufruf bei auth-api.
+    if not _BEARER_RE.fullmatch(authorization_header or ""):
+        raise GrantDenied("realtime_user_jwt_required", "bearer ohne gueltiges token",
+                          status_code=401)
     headers = {
         "Authorization": authorization_header,
         SERVICE_KEY_HEADER: service_key,
@@ -290,6 +299,10 @@ async def _exchange_user_jwt_for_grant(authorization_header: str) -> dict:
             resp = await client.post(GRANT_URL, headers=headers)
     except (httpx.ConnectError, httpx.ReadTimeout, httpx.RemoteProtocolError) as exc:
         raise AuthDown(f"grant exchange transport: {type(exc).__name__}") from exc
+    except httpx.LocalProtocolError as exc:
+        # Header, den httpx nicht senden will: Fehler des Aufrufers, nicht von auth-api.
+        raise GrantDenied("realtime_user_jwt_required", f"header: {type(exc).__name__}",
+                          status_code=401) from exc
 
     if resp.status_code == 401:
         # auth-api rejected service or user auth. Bubble out as deny —
