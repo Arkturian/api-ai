@@ -8,7 +8,7 @@ Endpoints for audio generation:
 - Music Generation
 """
 
-from fastapi import APIRouter, Depends, HTTPException, File, Form, Query, UploadFile
+from fastapi import APIRouter, Depends, HTTPException, File, Form, Query, UploadFile, Header
 from fastapi.responses import JSONResponse
 from fastapi.encoders import jsonable_encoder
 from pydantic import BaseModel
@@ -461,6 +461,8 @@ async def transcribe_audio(
     # carry this opt-in form-field set to "true" / "1" / "yes". Whisper
     # and gpt-4o models route to OpenAI and are unaffected by this flag.
     confirm_api_billing: Optional[str] = Form(None),
+    authorization: Optional[str] = Header(None),
+    x_agent_name: Optional[str] = Header(None, alias="X-Agent-Name"),
     api_key: str = Depends(get_api_key)
 ):
     """
@@ -472,8 +474,9 @@ async def transcribe_audio(
     - gpt-4o-transcribe-diarize: transcription WITH speaker separation —
       use with response_format="diarized_json" to get speaker-labeled segments
 
-    Models (Google):
-    - gemini-1.5-flash / gemini-1.5-pro / gemini-2.0-flash-exp
+    Models (Google, nur bis 12.12.2026 auf dem Ultra-Guthaben, #2867;
+    confirm_api_billing=true Pflicht):
+    - gemini-3.5-transcribe (Vorgabe fuer Gemini), gemini-3.5-flash-lite
 
     Parameters:
     - language (optional): ISO code like "de", "en" — improves accuracy
@@ -514,7 +517,9 @@ async def transcribe_audio(
             from .text_ai_routes import _check_api_billing_gate
             confirmed_bool = str(confirm_api_billing).lower() in ("true", "1", "yes", "y")
             _check_api_billing_gate(confirmed_bool, endpoint="transcribe-gemini")
-            return await _transcribe_with_gemini(file, model, prompt)
+            from ai.services.bild_verbrauch import aufrufer as _aufrufer
+            wer, _q = _aufrufer(authorization, x_agent_name)
+            return await _transcribe_with_gemini(file, model, prompt, aufrufer=wer)
         else:
             return await _transcribe_with_whisper(
                 file, model, prompt,
@@ -541,8 +546,7 @@ async def transcribe_audio(
                 status_code=429,
                 detail={
                     "error": "OpenAI quota exhausted or rate-limited. "
-                             "Top up the OPENAI billing balance or switch model to "
-                             "'gemini-2.0-flash-exp' (no API cost on free tier).",
+                             "Top up the OPENAI billing balance or retry later.",
                     "code": "openai_quota_exhausted",
                     "upstream": msg[:500],
                 },
@@ -953,51 +957,45 @@ async def _sprecher_referenzen_bauen(spec: list, data: bytes) -> tuple[list, lis
 async def _transcribe_with_gemini(
     file: UploadFile,
     model: str,
-    prompt: Optional[str] = None
+    prompt: Optional[str] = None,
+    aufrufer: str = "(unbekannt)",
 ):
-    """Transcribe audio using Google Gemini"""
+    """Transkription ueber die Gemini-API auf dem Ultra-Guthaben (#2867).
+
+    Nur die Modelle aus google_ultra.MODELLE["transcribe"], nur bis
+    GOOGLE_ULTRA_BIS, mit Tages- und Gesamtdeckel. Der Betrag wird vor dem
+    Aufruf nach der Aufnahmedauer reserviert und danach berichtigt."""
     import tempfile
     from pathlib import Path
-    from ai.services.cost_tracker import cost_tracker
+    from ai.services import google_ultra as gu
 
-    if not os.getenv("GOOGLE_API_KEY"):
-        raise provider_missing("google")
+    model = gu.freigabe("transcribe", model)
 
-    # Check budget before processing
-    if cost_tracker.should_block_request():
-        status = cost_tracker.get_status()
-        raise HTTPException(
-            status_code=429,
-            detail=f"Monthly Gemini API budget exceeded: {status['total_cost_eur']:.2f}/{status['monthly_budget_eur']:.2f} EUR."
-        )
+    data = await file.read()
+    if not data:
+        raise HTTPException(status_code=400, detail="Uploaded audio file is empty.")
+    dauer = _audio_duration_seconds(data)
+    if not dauer:
+        raise HTTPException(status_code=422, detail={
+            "error": "audio_dauer_unbekannt",
+            "hint": "Die Dauer der Aufnahme liess sich nicht lesen; ohne sie "
+                    "kann der Betrag nicht vorab geprueft werden.",
+        })
+    minuten = dauer / 60.0
+    res = gu.reservieren("transcribe", model, minuten, aufrufer=aufrufer)
 
     try:
-        # NOTE: switched from the deprecated `google-generativeai` SDK to the
-        # new `google-genai` SDK. The old package is EOL'd by Google and its
-        # `upload_file` attribute has been stripped in recent installs (we hit
-        # AttributeError at runtime even though dir() listed it). The new SDK
-        # uses Client().files.upload + client.models.generate_content.
         from google import genai as genai_new
+        client = genai_new.Client(api_key=gu.schluessel())
 
-        client = genai_new.Client(api_key=os.getenv("GOOGLE_API_KEY"))
-
-        # Read audio data
-        data = await file.read()
-        if not data:
-            raise HTTPException(status_code=400, detail="Uploaded audio file is empty.")
-
-        # Save to temporary file (Gemini's file-upload API expects a path)
         suffix = Path(file.filename).suffix if file.filename else ".mp3"
         with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as temp_file:
             temp_file.write(data)
             temp_path = Path(temp_file.name)
 
+        uploaded = None
         try:
-            # Upload to Gemini File API
-            logger.info(f"Uploading audio file to Gemini: {temp_path}")
             uploaded = client.files.upload(file=str(temp_path))
-
-            # Build the prompt
             transcription_prompt = (
                 "Transcribe this audio file accurately. "
                 "Provide only the transcription text."
@@ -1005,77 +1003,50 @@ async def _transcribe_with_gemini(
             if prompt:
                 transcription_prompt = f"{prompt}\n\nTranscribe this audio file accurately."
 
-            logger.info(f"Starting Gemini transcription with model: {model}")
+            logger.info(f"Gemini transcription: model={model} dauer={dauer}s aufrufer={aufrufer}")
             response = client.models.generate_content(
                 model=model,
                 contents=[transcription_prompt, uploaded],
             )
-
-            # Extract text. The new SDK exposes `.text` the same way; if not
-            # present we fall back to the first candidate part.
-            transcription_text = getattr(response, "text", None) or ""
-            if not transcription_text and getattr(response, "candidates", None):
-                try:
-                    parts = response.candidates[0].content.parts
-                    transcription_text = "".join(
-                        getattr(p, "text", "") or "" for p in parts
-                    )
-                except Exception:
-                    transcription_text = ""
-            transcription_text = (transcription_text or "").strip()
-
+            transcription_text = (getattr(response, "text", None) or "").strip()
             if not transcription_text:
-                raise HTTPException(status_code=500, detail="Gemini returned empty response.")
+                raise HTTPException(status_code=502, detail={"error": "gemini_leere_antwort"})
 
-            # Track usage - extract token counts if available
-            input_tokens = 0
-            output_tokens = 0
             usage = getattr(response, "usage_metadata", None)
+            tokens = {}
             if usage:
-                input_tokens = getattr(usage, "prompt_token_count", 0) or 0
-                output_tokens = getattr(usage, "candidates_token_count", 0) or 0
-                logger.info(f"Gemini STT tokens: {input_tokens}in/{output_tokens}out")
-
-            model_key = f"{model}-audio" if not model.endswith("-audio") else model
-            if input_tokens > 0 or output_tokens > 0:
-                cost_tracker.track_usage(model_key, input_tokens, output_tokens)
-            else:
-                audio_size_mb = len(data) / (1024 * 1024)
-                estimated_input = int(audio_size_mb * 5000)  # ~5000 tokens per MB
-                estimated_output = len(transcription_text) // 4  # ~4 chars per token
-                cost_tracker.track_usage(model_key, estimated_input, estimated_output)
-                logger.info(
-                    f"Gemini STT estimated tokens: {estimated_input}in/{estimated_output}out"
-                )
-
-            logger.info(f"Gemini transcription completed: {len(transcription_text)} characters")
-
+                tokens = {"tokens_in": getattr(usage, "prompt_token_count", 0) or 0,
+                          "tokens_out": getattr(usage, "candidates_token_count", 0) or 0}
+            ist = gu.abrechnen(res, minuten, **tokens)
             return {
                 "text": transcription_text,
                 "model": model,
                 "prompt": prompt,
                 "filename": file.filename,
                 "provider": "gemini",
+                "duration_s": dauer,
+                "kosten_usd": ist,
+                "abrechnung": "google-ultra-guthaben",
             }
-
         finally:
-            # Best-effort cleanup of the uploaded file on Gemini-side + local
-            try:
-                client.files.delete(name=uploaded.name)
-            except Exception:
-                pass
+            if uploaded is not None:
+                try:
+                    client.files.delete(name=uploaded.name)
+                except Exception:
+                    pass
             temp_path.unlink(missing_ok=True)
 
-    except ImportError:
-        raise HTTPException(
-            status_code=500,
-            detail="google-genai package not installed. Run: pip install google-genai",
-        )
+    except HTTPException as e:
+        if e.status_code >= 500:
+            gu.stornieren(res, grund=str(e.detail)[:200])
+        raise
     except Exception as e:
-        logger.error(f"Gemini transcription error: {e}")
-        import traceback
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"Gemini transcription failed: {str(e)}")
+        gu.stornieren(res, grund=type(e).__name__)
+        logger.error(f"Gemini transcription error: {type(e).__name__}: {str(e)[:300]}")
+        raise HTTPException(status_code=502, detail={
+            "error": "gemini_transkription_fehlgeschlagen",
+            "upstream": str(e)[:300],
+        })
 
 
 @router.post("/genmusic", response_model=AudioResponse)

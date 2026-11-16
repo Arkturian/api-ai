@@ -7,6 +7,8 @@ POST /ai/tts/minimax                 — Direct MiniMax Speech-02 TTS (no dramat
 POST /ai/tts/clone                   — MiniMax voice-cloning: ref-audio + name → voice_id — pay-as-you-go
 POST /ai/tts/design                  — MiniMax voice design: text description → voice_id — pay-as-you-go
 GET  /ai/tts/elevenlabs/subscription — quota/tier proxy so batch scripts can pre-flight without the key
+POST /ai/tts/gemini                  — Gemini-TTS auf dem Ultra-Guthaben, nur bis 12.12.2026 (#2867)
+GET  /ai/tts/gemini/stand            — Verbrauch und Deckel des Ultra-Guthabens (Betreiber)
 """
 import logging
 from typing import Optional
@@ -723,3 +725,145 @@ async def tts_voice_design(
             "call /tts/design again with a refined prompt."
         ),
     }
+
+
+# ── Gemini TTS auf dem Ultra-Guthaben (#2867) ─────────────────────────
+#
+# Nur bis GOOGLE_ULTRA_BIS (13.12.2026), Tages- und Gesamtdeckel in
+# ai.services.google_ultra. Gemini liefert PCM s16le 24 kHz mono; wir
+# wandeln in MP3 und legen es im Storage ab.
+
+GEMINI_TTS_MAX_ZEICHEN = 5000
+# Vorab-Schaetzung der Sprechdauer: lieber zu lang als zu kurz, damit die
+# Reservierung den Deckel nicht unterlaeuft (gesprochen ~14 Zeichen/s).
+GEMINI_TTS_ZEICHEN_JE_MINUTE = 600
+
+
+class GeminiTTSRequest(BaseModel):
+    text: str = Field(..., description="Zu sprechender Text, hoechstens 5000 Zeichen")
+    model: Optional[str] = Field(default=None, description="gemini-3.8-flash-tts (Vorgabe) | gemini-3.8-flash-lite-tts")
+    voice: str = Field(default="Kore", description="Vorgefertigte Gemini-Stimme, z. B. Kore, Puck, Charon, Aoede")
+    style: Optional[str] = Field(default=None, description="Optionale Sprechanweisung, z. B. 'ruhig und warm'")
+    collection_id: str = Field(default="tts-audio")
+    link_id: Optional[str] = Field(default=None)
+    confirm_api_billing: bool = Field(default=False, description="Pflicht: true (Ultra-Guthaben, #2867)")
+
+
+def _pcm_zu_mp3(pcm: bytes, rate: int = 24000) -> bytes:
+    import subprocess
+    r = subprocess.run(
+        ["ffmpeg", "-v", "error", "-f", "s16le", "-ar", str(rate), "-ac", "1",
+         "-i", "pipe:0", "-codec:a", "libmp3lame", "-b:a", "128k", "-f", "mp3", "pipe:1"],
+        input=pcm, capture_output=True, timeout=120,
+    )
+    if r.returncode != 0 or not r.stdout:
+        raise HTTPException(status_code=502, detail={"error": "mp3_wandlung_fehlgeschlagen",
+                                                     "stderr": r.stderr.decode("utf-8", "ignore")[:300]})
+    return r.stdout
+
+
+@router.post("/tts/gemini")
+async def tts_gemini(
+    req: GeminiTTSRequest,
+    authorization: Optional[str] = Header(None),
+    x_agent_name: Optional[str] = Header(None, alias="X-Agent-Name"),
+    api_key: str = Depends(get_api_key),
+):
+    """Gemini-TTS ueber die Gemini-API, bezahlt aus dem Ultra-Guthaben (#2867).
+
+    Nur bis 12.12.2026. confirm_api_billing=true ist Pflicht. Tages- und
+    Gesamtdeckel: GET /ai/tts/gemini/stand."""
+    from ai.services import google_ultra as gu
+    from ai.services.bild_verbrauch import aufrufer as _aufrufer
+    from ai.clients.storage_client import save_file_and_record
+
+    if not req.confirm_api_billing:
+        raise HTTPException(status_code=403, detail={
+            "error": "api_billing_confirmation_required", "endpoint": "tts-gemini",
+            "hint": "Bezahlt aus dem Google-Ultra-Guthaben. confirm_api_billing: true senden.",
+        })
+    modell = gu.freigabe("tts", req.model)
+    text = (req.text or "").strip()
+    if not text:
+        raise HTTPException(status_code=422, detail={"error": "text_leer"})
+    if len(text) > GEMINI_TTS_MAX_ZEICHEN:
+        raise HTTPException(status_code=422, detail={"error": "text_zu_lang", "max_zeichen": GEMINI_TTS_MAX_ZEICHEN,
+                                                     "zeichen": len(text)})
+    wer, _q = _aufrufer(authorization, x_agent_name)
+    res = gu.reservieren("tts", modell, len(text) / GEMINI_TTS_ZEICHEN_JE_MINUTE, aufrufer=wer)
+
+    try:
+        from google import genai
+        from google.genai import types
+        client = genai.Client(api_key=gu.schluessel())
+        inhalt = f"{req.style.strip()}: {text}" if req.style and req.style.strip() else text
+        antwort = client.models.generate_content(
+            model=modell,
+            contents=inhalt,
+            config=types.GenerateContentConfig(
+                response_modalities=["AUDIO"],
+                speech_config=types.SpeechConfig(
+                    voice_config=types.VoiceConfig(
+                        prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name=req.voice)
+                    )
+                ),
+            ),
+        )
+        pcm = b""
+        mime = ""
+        for kand in (antwort.candidates or []):
+            for teil in ((kand.content and kand.content.parts) or []):
+                daten = getattr(teil, "inline_data", None)
+                if daten and daten.data:
+                    pcm += daten.data
+                    mime = mime or (daten.mime_type or "")
+        if not pcm:
+            raise HTTPException(status_code=502, detail={"error": "gemini_kein_audio"})
+        rate = 24000
+        if "rate=" in mime:
+            try:
+                rate = int(mime.split("rate=")[1].split(";")[0])
+            except ValueError:
+                pass
+        sekunden = len(pcm) / (rate * 2)
+        mp3 = _pcm_zu_mp3(pcm, rate)
+    except HTTPException as e:
+        if e.status_code >= 500:
+            gu.stornieren(res, grund=str(e.detail)[:200])
+        raise
+    except Exception as e:
+        gu.stornieren(res, grund=type(e).__name__)
+        logger.error(f"Gemini-TTS: {type(e).__name__}: {str(e)[:300]}")
+        raise HTTPException(status_code=502, detail={"error": "gemini_tts_fehlgeschlagen",
+                                                     "upstream": str(e)[:300]})
+
+    # Abgerechnet ist ab hier: Google hat geliefert. Scheitert die Ablage,
+    # bleibt die Buchung stehen.
+    ist = gu.abrechnen(res, sekunden / 60.0, zeichen=len(text))
+    gespeichert = await save_file_and_record(
+        data=mp3,
+        original_filename=f"tts_gemini_{res.id}.mp3",
+        context="tts-generation",
+        is_public=True,
+        collection_id=req.collection_id,
+        link_id=req.link_id,
+    )
+    return {
+        "id": gespeichert.id,
+        "audio_url": gespeichert.file_url,
+        "file_url": gespeichert.file_url,
+        "storage_object_id": gespeichert.id,
+        "model": modell,
+        "voice": req.voice,
+        "char_count": len(text),
+        "duration_s": round(sekunden, 2),
+        "kosten_usd": ist,
+        "abrechnung": "google-ultra-guthaben",
+    }
+
+
+@router.get("/tts/gemini/stand", dependencies=[Depends(_ag.betreiber)])
+async def tts_gemini_stand():
+    """Verbrauch des Ultra-Guthabens (Transkription + TTS), Deckel, Ablauf."""
+    from ai.services import google_ultra as gu
+    return gu.stand()

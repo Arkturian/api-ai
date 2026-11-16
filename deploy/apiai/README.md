@@ -13,6 +13,11 @@ Drop-in der Unit ein. Fehlt die Variable, laeuft api-ai wie bisher als root.
 Dazu im Cutover-Drop-in: `CLI_HOME=/var/lib/api-ai`, `HOME=/var/lib/api-ai`
 (zz-decouple setzt heute /root), `CODEX_TEXT_HOME=/var/lib/api-ai-cli/codex-text`.
 
+Laufzeit-Dateien, die der Prozess selbst liest (nicht systemd): beim Cutover
+auf `root:apiai 0640` stellen, sonst sperrt der jeweilige Weg (fail-closed).
+- `/etc/api-ai/google-ultra.env` (#2867, Gemini-Schluessel fuer das
+  Ultra-Guthaben, bis 13.12.2026; danach loeschen). Ohne Leserecht: 503.
+
 Die Tests `tests/test_2937_dienstmodus.py` pruefen die Wrapper gegen die echten
 und gegen feindliche Argumentlisten. Benutzer, Gruppen, Verzeichnisse und Unit:
 siehe Beitrag 6150.
