@@ -20,6 +20,7 @@ import io
 import os
 import json
 import base64
+import asyncio
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -985,56 +986,46 @@ async def _transcribe_with_gemini(
     res = gu.reservieren("transcribe", model, minuten, aufrufer=aufrufer)
 
     try:
-        from google import genai as genai_new
-        client = genai_new.Client(api_key=gu.schluessel())
-
-        suffix = Path(file.filename).suffix if file.filename else ".mp3"
-        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as temp_file:
-            temp_file.write(data)
-            temp_path = Path(temp_file.name)
-
-        uploaded = None
+        import mimetypes
+        from pathlib import Path as _P
+        mime = (file.content_type or "").split(";")[0].strip()
+        if not mime.startswith("audio/"):
+            mime = mimetypes.guess_type(file.filename or "")[0] or "audio/mpeg"
+        hinweis = prompt or ("Transcribe this audio file accurately. "
+                             "Provide only the transcription text.")
+        # REST statt SDK: gemini-3.5-transcribe liefert den Text in
+        # parts[].audioTranscription.text, das kennt google-genai 2.6.0 nicht
+        # und verwirft es still (16.11., leere Antwort am Ziel).
+        datei_name = None
+        if len(data) <= gu.INLINE_MAX_BYTES:
+            audio_teil = {"inline_data": {"mime_type": mime,
+                                          "data": base64.b64encode(data).decode("ascii")}}
+        else:
+            datei_name, uri = await asyncio.to_thread(gu.hochladen, data, mime,
+                                                      _P(file.filename or "a.mp3").suffix)
+            audio_teil = {"file_data": {"mime_type": mime, "file_uri": uri}}
         try:
-            uploaded = client.files.upload(file=str(temp_path))
-            transcription_prompt = (
-                "Transcribe this audio file accurately. "
-                "Provide only the transcription text."
-            )
-            if prompt:
-                transcription_prompt = f"{prompt}\n\nTranscribe this audio file accurately."
-
             logger.info(f"Gemini transcription: model={model} dauer={dauer}s aufrufer={aufrufer}")
-            response = client.models.generate_content(
-                model=model,
-                contents=[transcription_prompt, uploaded],
-            )
-            transcription_text = (getattr(response, "text", None) or "").strip()
-            if not transcription_text:
-                raise HTTPException(status_code=502, detail={"error": "gemini_leere_antwort"})
-
-            usage = getattr(response, "usage_metadata", None)
-            tokens = {}
-            if usage:
-                tokens = {"tokens_in": getattr(usage, "prompt_token_count", 0) or 0,
-                          "tokens_out": getattr(usage, "candidates_token_count", 0) or 0}
-            ist = gu.abrechnen(res, minuten, **tokens)
-            return {
-                "text": transcription_text,
-                "model": model,
-                "prompt": prompt,
-                "filename": file.filename,
-                "provider": "gemini",
-                "duration_s": dauer,
-                "kosten_usd": ist,
-                "abrechnung": "google-ultra-guthaben",
-            }
+            antwort = await gu.generate(model, {"contents": [{"parts": [{"text": hinweis}, audio_teil]}]})
         finally:
-            if uploaded is not None:
-                try:
-                    client.files.delete(name=uploaded.name)
-                except Exception:
-                    pass
-            temp_path.unlink(missing_ok=True)
+            if datei_name:
+                await asyncio.to_thread(gu.datei_loeschen, datei_name)
+        transcription_text = gu.text_aus_antwort(antwort)
+        if not transcription_text:
+            raise HTTPException(status_code=502, detail={"error": "gemini_leere_antwort"})
+        usage = antwort.get("usageMetadata") or {}
+        ist = gu.abrechnen(res, minuten, tokens_in=usage.get("promptTokenCount", 0),
+                           tokens_out=usage.get("candidatesTokenCount", 0))
+        return {
+            "text": transcription_text,
+            "model": model,
+            "prompt": prompt,
+            "filename": file.filename,
+            "provider": "gemini",
+            "duration_s": dauer,
+            "kosten_usd": ist,
+            "abrechnung": "google-ultra-guthaben",
+        }
 
     except HTTPException as e:
         if e.status_code >= 500:

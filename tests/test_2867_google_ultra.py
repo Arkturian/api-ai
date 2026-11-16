@@ -141,29 +141,68 @@ def _upload():
     return UploadFile(filename="a.mp3", file=io.BytesIO(b"audio"))
 
 
+# Echte Antwort von gemini-3.5-transcribe am 16.11. (gekuerzt): der Text
+# steht in audioTranscription, nicht in text. Das SDK 2.6.0 verwarf ihn.
+ANTWORT_TRANSCRIBE = {"candidates": [{"content": {"parts": [{"audioTranscription": {
+    "text": "Guten Morgen. Das ist ein kurzer Test."}}], "role": "model"},
+    "finishReason": "STOP"}],
+    "usageMetadata": {"promptTokenCount": 146, "candidatesTokenCount": 24}}
+ANTWORT_FLASH_LITE = {"candidates": [{"content": {"parts": [
+    {"text": "gedacht", "thought": True}, {"text": "Guten Morgen."}]}}]}
+
+
+def test_text_aus_beiden_antwortformen():
+    assert gu.text_aus_antwort(ANTWORT_TRANSCRIBE) == "Guten Morgen. Das ist ein kurzer Test."
+    assert gu.text_aus_antwort(ANTWORT_FLASH_LITE) == "Guten Morgen."
+    assert gu.text_aus_antwort({}) == ""
+
+
+def _rest(monkeypatch, antwort=None, fehler=None):
+    aufrufe = []
+
+    async def generate(modell, rumpf, timeout=300.0):
+        aufrufe.append((modell, rumpf))
+        if fehler:
+            raise fehler
+        return antwort
+
+    monkeypatch.setattr(gu, "generate", generate)
+    return aufrufe
+
+
 def test_transkription_bucht_nach_dauer(schluessel, monkeypatch):
     monkeypatch.setattr(a, "_audio_duration_seconds", lambda d: 120.0)
-    modelle = _Modelle(antwort=types.SimpleNamespace(text="hallo welt", usage_metadata=None))
-    gesehen = _genai(monkeypatch, modelle)
+    aufrufe = _rest(monkeypatch, ANTWORT_TRANSCRIBE)
     r = asyncio.run(a._transcribe_with_gemini(_upload(), "gemini-3.5-transcribe", aufrufer="Comm"))
-    assert r["text"] == "hallo welt" and r["kosten_usd"] == 0.0102
-    assert gesehen["api_key"] == "testschluessel"
-    assert modelle.aufrufe[0]["model"] == "gemini-3.5-transcribe"
+    assert r["text"] == "Guten Morgen. Das ist ein kurzer Test." and r["kosten_usd"] == 0.0102
+    modell, rumpf = aufrufe[0]
+    assert modell == "gemini-3.5-transcribe"
+    teile = rumpf["contents"][0]["parts"]
+    assert teile[1]["inline_data"]["mime_type"] == "audio/mpeg"
     assert gu.stand()["gesamt_usd"] == 0.0102
     assert _buchungen()[0]["aufrufer"] == "Comm"
+    assert _buchungen()[1]["tokens_in"] == 146
 
 
 def test_transkription_altes_modell_422_ohne_aufruf(schluessel, monkeypatch):
-    modelle = _Modelle()
-    _genai(monkeypatch, modelle)
+    aufrufe = _rest(monkeypatch)
     with pytest.raises(HTTPException) as e:
         asyncio.run(a._transcribe_with_gemini(_upload(), "gemini-2.0-flash-exp"))
-    assert e.value.status_code == 422 and modelle.aufrufe == []
+    assert e.value.status_code == 422 and aufrufe == []
 
 
 def test_transkription_fehler_storniert(schluessel, monkeypatch):
     monkeypatch.setattr(a, "_audio_duration_seconds", lambda d: 60.0)
-    _genai(monkeypatch, _Modelle(fehler=RuntimeError("quota")))
+    _rest(monkeypatch, fehler=RuntimeError("quota"))
+    with pytest.raises(HTTPException) as e:
+        asyncio.run(a._transcribe_with_gemini(_upload(), "gemini-3.5-transcribe"))
+    assert e.value.status_code == 502
+    assert gu.stand()["gesamt_usd"] == 0.0
+
+
+def test_transkription_leere_antwort_storniert(schluessel, monkeypatch):
+    monkeypatch.setattr(a, "_audio_duration_seconds", lambda d: 60.0)
+    _rest(monkeypatch, {"candidates": [{"content": {"parts": [{}]}}]})
     with pytest.raises(HTTPException) as e:
         asyncio.run(a._transcribe_with_gemini(_upload(), "gemini-3.5-transcribe"))
     assert e.value.status_code == 502
@@ -172,11 +211,28 @@ def test_transkription_fehler_storniert(schluessel, monkeypatch):
 
 def test_transkription_ohne_dauer_kein_aufruf(schluessel, monkeypatch):
     monkeypatch.setattr(a, "_audio_duration_seconds", lambda d: None)
-    modelle = _Modelle()
-    _genai(monkeypatch, modelle)
+    aufrufe = _rest(monkeypatch)
     with pytest.raises(HTTPException) as e:
         asyncio.run(a._transcribe_with_gemini(_upload(), "gemini-3.5-transcribe"))
-    assert e.value.status_code == 422 and modelle.aufrufe == []
+    assert e.value.status_code == 422 and aufrufe == []
+
+
+def test_schluessel_nur_im_kopf_nie_in_der_adresse(schluessel, monkeypatch):
+    import httpx
+    gesehen = {}
+
+    class C:
+        def __init__(self, **kw): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return False
+        async def post(self, url, headers=None, json=None):
+            gesehen.update(url=url, headers=headers)
+            return httpx.Response(200, json=ANTWORT_TRANSCRIBE)
+
+    monkeypatch.setattr(httpx, "AsyncClient", C)
+    asyncio.run(gu.generate("gemini-3.5-transcribe", {}))
+    assert "testschluessel" not in gesehen["url"]
+    assert gesehen["headers"]["x-goog-api-key"] == "testschluessel"
 
 
 # --- TTS ------------------------------------------------------------------------

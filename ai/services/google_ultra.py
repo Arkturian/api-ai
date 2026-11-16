@@ -216,6 +216,71 @@ def stornieren(r: Reservierung, grund: str = "") -> None:
                 "status": "storniert", "grund": grund[:200]})
 
 
+# --- Gemini-REST ---------------------------------------------------------------
+
+API_BASIS = "https://generativelanguage.googleapis.com/v1beta"
+# Anfrage-Grenze der Gemini-API liegt bei 20 MB; Base64 blaeht um ein Drittel.
+INLINE_MAX_BYTES = 14 * 1024 * 1024
+
+
+async def generate(modell: str, rumpf: dict, timeout: float = 300.0) -> dict:
+    """generateContent ueber REST. Der Schluessel geht im Kopf mit, nie in der
+    Adresse (sonst stuende er in Fehlermeldungen und Protokollen)."""
+    import httpx
+    async with httpx.AsyncClient(timeout=timeout) as c:
+        r = await c.post(f"{API_BASIS}/models/{modell}:generateContent",
+                         headers={"x-goog-api-key": schluessel() or ""}, json=rumpf)
+    if r.status_code != 200:
+        try:
+            meldung = (r.json().get("error") or {}).get("message", "")
+        except ValueError:
+            meldung = r.text
+        raise HTTPException(status_code=502, detail={
+            "error": "gemini_fehler", "upstream_status": r.status_code,
+            "upstream": str(meldung)[:300]})
+    return r.json()
+
+
+def text_aus_antwort(antwort: dict) -> str:
+    """Text aus generateContent. gemini-3.5-transcribe legt ihn in
+    parts[].audioTranscription.text, die anderen Modelle in parts[].text."""
+    stuecke = []
+    for kand in antwort.get("candidates") or []:
+        for teil in ((kand.get("content") or {}).get("parts") or []):
+            if teil.get("thought"):
+                continue
+            if isinstance(teil.get("text"), str):
+                stuecke.append(teil["text"])
+            elif isinstance((teil.get("audioTranscription") or {}).get("text"), str):
+                stuecke.append(teil["audioTranscription"]["text"])
+    return "".join(stuecke).strip()
+
+
+def hochladen(data: bytes, mime: str, endung: str = ".mp3") -> tuple:
+    """Grosse Aufnahmen ueber die File-API (SDK). Liefert (name, uri)."""
+    import tempfile
+    from google import genai
+    c = genai.Client(api_key=schluessel())
+    with tempfile.NamedTemporaryFile(suffix=endung or ".mp3") as tf:
+        tf.write(data)
+        tf.flush()
+        f = c.files.upload(file=tf.name, config={"mime_type": mime})
+    for _ in range(60):
+        if str(getattr(f, "state", "")).endswith("ACTIVE"):
+            break
+        time.sleep(2)
+        f = c.files.get(name=f.name)
+    return f.name, f.uri
+
+
+def datei_loeschen(name: str) -> None:
+    try:
+        from google import genai
+        genai.Client(api_key=schluessel()).files.delete(name=name)
+    except Exception:
+        pass
+
+
 def stand() -> dict:
     heute = _jetzt().date().isoformat()
     try:
