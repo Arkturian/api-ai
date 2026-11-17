@@ -49,36 +49,27 @@ class GrantNichtGebunden(Exception):
 # Storage API Configuration
 STORAGE_API_URL = os.getenv("STORAGE_API_URL", "https://api-storage.arkturian.com")
 
-# Legacy shim: the storage key literal used to be copy-pasted into 12 call
-# sites across routes/ and services/, which is why rotating it had no effect
-# (#514) — the env var could be changed all day while every module kept
-# falling back to the baked-in string. Single source of truth now; rotating
-# means setting STORAGE_API_KEY, and dropping the fallback is a one-line
-# change here instead of a 12-file sweep.
-_STORAGE_KEY_LEGACY_FALLBACK = "Inetpass1"
-_warned_fallback = False
+# #1960: Der fest eingebaute Rueckfall-Schluessel ist entfernt. Jeder Host
+# bekommt seinen eigenen Storage-Schluessel ueber STORAGE_API_KEY (Datei,
+# EnvironmentFile). Fehlt er, gibt es keinen Ersatz: Storage antwortet 401,
+# und das Log sagt einmal laut, warum. Frueher (#514) verdeckte der Rueckfall
+# jede Rotation.
+_warned_missing = False
 
 
 def storage_api_key() -> str:
-    """Return the storage-api key. Prefers STORAGE_API_KEY, then API_KEY.
-
-    Falls back to the historical literal so nothing breaks where the env
-    var is not set yet (the dev .env has it empty) — but logs a warning
-    once, so the fallback stops being invisible. Remove the fallback
-    together with the rotation.
-    """
-    global _warned_fallback
-    key = os.getenv("STORAGE_API_KEY") or os.getenv("API_KEY")
+    """Return the storage-api key from STORAGE_API_KEY, else API_KEY. No literal fallback."""
+    global _warned_missing
+    key = (os.getenv("STORAGE_API_KEY") or os.getenv("API_KEY") or "").strip()
     if key:
         return key
-    if not _warned_fallback:
-        _warned_fallback = True
-        logging.getLogger(__name__).warning(
-            "STORAGE_API_KEY/API_KEY unset — using the legacy hardcoded "
-            "fallback. Key rotation will NOT take effect until the env var "
-            "is set on this host (#514)."
+    if not _warned_missing:
+        _warned_missing = True
+        logging.getLogger(__name__).error(
+            "STORAGE_API_KEY ist nicht gesetzt: Aufrufe an storage-api laufen "
+            "ohne Schluessel und scheitern (#1960)."
         )
-    return _STORAGE_KEY_LEGACY_FALLBACK
+    return ""
 
 
 # Back-compat for modules importing the constant directly.
