@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import fcntl
+import hashlib
 import json
 import logging
 import os
@@ -186,6 +187,30 @@ def _schreiben(job_id: str, daten: Dict[str, Any]) -> None:
 
 _SAFETY_TAKT_S = 5.0
 
+# Vertrauliche Ergebnisse (EDERA-EDWARD, 17.11.2026: Produkt-Renderings).
+# private=true legt das Ergebnis mit private_media ab und bindet es an den
+# Scope des angemeldeten Agenten, damit er es ueber assets_download lesen
+# kann. Gleiche Abbildung wie storage-MCP und cloud-api (Post #5250).
+_SCOPE_ID_RE = re.compile(r"[A-Za-z0-9._-]+")
+
+
+def scope_fuer(agent: str) -> Optional[str]:
+    if not agent:
+        return None
+    if len(agent) <= 120 and _SCOPE_ID_RE.fullmatch(agent):
+        return f"cloud-session:{agent}"
+    roh = agent.encode("utf-8")
+    if 2 * len(roh) <= 120:
+        return f"cloud-session-x:{roh.hex()}"
+    return f"cloud-session-x:h{hashlib.sha256(roh).hexdigest()}"
+
+
+def privat_ablage(privat: bool, agent: str, quelle: str) -> Dict[str, Any]:
+    """Ablage-Optionen fuer _datei_sichern. Gebunden wird nur an ein geprueftes JWT."""
+    if not privat:
+        return {}
+    return {"privat": True, "grant_scope": scope_fuer(agent) if quelle == "jwt" else None}
+
 
 def _bild_adresse(wert: str) -> str:
     """Storage-ID oder Adresse -> Adresse."""
@@ -245,13 +270,13 @@ async def _bild_hochladen(wert: str) -> str:
 # --- Ergebnis sichern --------------------------------------------------------
 
 async def _video_sichern(url: str, collection_id: Optional[str], link_id: Optional[str],
-                         name: str) -> Dict[str, Any]:
-    return await _datei_sichern(url, None, "video/mp4", collection_id, link_id, name)
+                         name: str, **ablage) -> Dict[str, Any]:
+    return await _datei_sichern(url, None, "video/mp4", collection_id, link_id, name, **ablage)
 
 
 async def _datei_sichern(url: Optional[str], inhalt: Optional[bytes], mime: str,
                          collection_id: Optional[str], link_id: Optional[str], name: str,
-                         privat: bool = False) -> Dict[str, Any]:
+                         privat: bool = False, grant_scope: Optional[str] = None) -> Dict[str, Any]:
     """Ergebnis von Google (Link oder Bytes) in den Storage legen."""
     from ai.clients.storage_client import storage_api_key
     storage_url = os.getenv("STORAGE_API_URL", "https://api-storage.arkturian.com")
@@ -273,6 +298,8 @@ async def _datei_sichern(url: Optional[str], inhalt: Optional[bytes], mime: str,
                      "reuse_existing": "false"}
             if privat:
                 daten["private"] = "true"
+                if grant_scope:
+                    daten["grant_scope"] = grant_scope
             if collection_id:
                 daten["collection_id"] = collection_id
             if link_id:
@@ -281,9 +308,17 @@ async def _datei_sichern(url: Optional[str], inhalt: Optional[bytes], mime: str,
                               files={"file": (name, bytes(buf), mime)},
                               data=daten, headers={"X-API-KEY": storage_api_key()})
             up.raise_for_status()
-            sid = up.json().get("id")
-            return {"storage_object_id": sid,
-                    "storage_url": f"https://api-storage.arkturian.com/storage/media/{sid}" if sid else None}
+            antwort = up.json()
+            sid = antwort.get("id")
+            out = {"storage_object_id": sid,
+                   "storage_url": f"https://api-storage.arkturian.com/storage/media/{sid}" if sid else None}
+            if privat:
+                out["private"] = True
+                out["grant_scope"] = antwort.get("grant_scope")  # was Storage wirklich gebunden hat
+                if not antwort.get("grant_scope"):
+                    out["hint"] = ("Privat abgelegt, aber an keinen Agenten gebunden (kein JWT): "
+                                   "lesen nur Besitzer und Admins.")
+            return out
     except Exception as e:
         logger.warning("flow: Sichern fehlgeschlagen: %s", type(e).__name__)
         return {"storage_object_id": None, "save_error": type(e).__name__}
@@ -311,7 +346,9 @@ async def _abschliessen(job_id: str, job: Dict[str, Any], *, sichern: bool,
                 offen = True  # Google liefert den Link manchmal spaeter nach
                 continue
             gesichert[mid] = await _video_sichern(m["videoUrl"], akte.get("collection_id", collection_id),
-                                                  akte.get("link_id", link_id), f"flow_{i}_{int(time.time())}.mp4")
+                                                  akte.get("link_id", link_id), f"flow_{i}_{int(time.time())}.mp4",
+                                                  **privat_ablage(bool(akte.get("private")),
+                                                                  akte.get("agent") or "", akte.get("quelle") or ""))
         akte["gesichert"] = gesichert
         if not akte.get("gebucht") and _clips(job):
             from ai.services import bild_verbrauch as bv
@@ -333,11 +370,15 @@ def _antwort(job_id: str, job: Dict[str, Any], extra: Optional[dict] = None) -> 
     for i, m in enumerate(_clips(job)):
         mid = m.get("mediaGenerationId") or f"clip{i}"
         g = gesichert.get(mid) or {}
-        clips.append({"media_generation_id": m.get("mediaGenerationId"),
-                      "storage_object_id": g.get("storage_object_id"),
-                      "storage_url": g.get("storage_url"),
-                      "flow_url": m.get("videoUrl"),
-                      "save_error": g.get("save_error")})
+        clip = {"media_generation_id": m.get("mediaGenerationId"),
+                "storage_object_id": g.get("storage_object_id"),
+                "storage_url": g.get("storage_url"),
+                "flow_url": m.get("videoUrl"),
+                "save_error": g.get("save_error")}
+        for k in ("private", "grant_scope", "hint"):
+            if k in g:
+                clip[k] = g[k]
+        clips.append(clip)
     if clips:
         out["clips"] = clips
     resp = job.get("response") or {}
@@ -370,6 +411,7 @@ class FlowVideoRequest(BaseModel):
     collection_id: Optional[str] = Field(default="ai-generated-video")
     link_id: Optional[str] = None
     max_credits: Optional[int] = Field(default=None, description="Abbruch vor dem Auftrag, wenn die Schaetzung hoeher liegt")
+    private: bool = Field(default=False, description="true = Clips vertraulich ablegen (anonym 403), an den angemeldeten Agenten gebunden")
     confirm_api_billing: Optional[bool] = Field(
         default=False, description="Pflicht true: verbraucht Flow-Credits des Ultra-Kontos und Captcha-Loesungen")
 
@@ -426,6 +468,7 @@ async def flow_video(request: FlowVideoRequest,
     async with _gesperrt(job_id):
         _schreiben(job_id, {"agent": agent, "quelle": quelle, "model": modell,
                             "collection_id": request.collection_id, "link_id": request.link_id,
+                            "private": bool(request.private),
                             "angelegt": time.time(), "estimated_credits": schaetzung})
     logger.info("flow: Auftrag %s (%s, %ss, x%d) von %s", job_id, modell, request.duration,
                 request.count, agent)
@@ -507,6 +550,7 @@ class FlowImageRequest(BaseModel):
     collection_id: Optional[str] = Field(default="ai-generated-image")
     link_id: Optional[str] = None
     upscale: Optional[str] = Field(default=None, description="2k | 4k: Flow skaliert kostenlos hoch (je Bild eine weitere Captcha-Loesung)")
+    private: bool = Field(default=False, description="true = Bilder vertraulich ablegen (anonym 403), an den angemeldeten Agenten gebunden")
     confirm_api_billing: Optional[bool] = Field(
         default=False, description="Pflicht true: je Auftrag eine Captcha-Loesung (300 frei), ggf. Flow-Credits")
 
@@ -566,12 +610,16 @@ async def flow_image(request: FlowImageRequest,
         if not g.get("fifeUrl") and g.get("encodedImage"):
             import base64
             inhalt = base64.b64decode(g["encodedImage"])
+        ablage = privat_ablage(bool(request.private), agent, quelle)
         gesichert = await _datei_sichern(g.get("fifeUrl"), inhalt, "image/png", request.collection_id,
-                                         request.link_id, f"flow_{modell}_{i}_{int(time.time())}.png")
+                                         request.link_id, f"flow_{modell}_{i}_{int(time.time())}.png", **ablage)
         eintrag = {"storage_object_id": gesichert.get("storage_object_id"),
                    "image_url": gesichert.get("storage_url"),
                    "media_generation_id": g.get("mediaGenerationId"),
                    "seed": g.get("seed"), "save_error": gesichert.get("save_error")}
+        for k in ("private", "grant_scope", "hint"):
+            if k in gesichert:
+                eintrag[k] = gesichert[k]
         if hoch and g.get("mediaGenerationId"):
             # Hochskalieren kostet keine Flow-Credits; scheitert es, bleibt das 1K-Bild.
             try:
@@ -582,7 +630,7 @@ async def flow_image(request: FlowImageRequest,
                 if not roh:
                     raise ValueError("leer")
                 g2 = await _datei_sichern(None, roh, "image/jpeg", request.collection_id, request.link_id,
-                                          f"flow_{modell}_{i}_{hoch}_{int(time.time())}.jpg")
+                                          f"flow_{modell}_{i}_{hoch}_{int(time.time())}.jpg", **ablage)
                 if g2.get("storage_object_id"):
                     eintrag.update({"original_storage_object_id": eintrag["storage_object_id"],
                                     "original_url": eintrag["image_url"],

@@ -292,3 +292,94 @@ def test_bild_hochskaliert_und_faellt_sonst_auf_1k_zurueck(bup, client, monkeypa
 def test_bild_falscher_upscale_ohne_aufruf(bup, client):
     r = client.post("/ai/genimage/flow", json={"prompt": "x", "upscale": "8k", "confirm_api_billing": True})
     assert r.status_code == 422 and bup.aufrufe == []
+
+
+# --- Vertrauliche Ergebnisse (EDERA-EDWARD, 17.11.2026) ------------------------
+
+def _formular(req: httpx.Request) -> dict:
+    """Textfelder aus dem multipart-Upload (ohne die Datei)."""
+    import re as _re
+    felder = {}
+    for name, wert in _re.findall(rb'name="([^"]+)"\r\n\r\n([^\r]*)\r\n', req.content):
+        felder[name.decode()] = wert.decode()
+    return felder
+
+
+def _mit_formular(u):
+    alt = u.handler
+    u.formulare = []
+
+    def h(req):
+        if req.method == "POST" and str(req.url).endswith("/storage/upload"):
+            f = _formular(req)
+            u.formulare.append(f)
+            r = alt(req)
+            d = r.json()
+            if f.get("grant_scope"):
+                d["grant_scope"] = f["grant_scope"]
+            return httpx.Response(200, json=d)
+        return alt(req)
+    return h
+
+
+def _als_jwt_agent(monkeypatch, name="EDERA-EDWARD"):
+    from ai.services import bild_verbrauch as bv
+    monkeypatch.setattr(bv, "aufrufer", lambda a, x: (name, "jwt"))
+
+
+def test_video_privat_bindet_an_den_angemeldeten_agenten(up, client, monkeypatch):
+    h = _mit_formular(up)
+    monkeypatch.setattr(fr, "_client", lambda timeout=60.0: httpx.AsyncClient(
+        transport=httpx.MockTransport(h)))
+    _als_jwt_agent(monkeypatch)
+    r = client.post("/ai/genvideo/flow", json={"prompt": "x", "private": True, "confirm_api_billing": True})
+    assert r.status_code == 200, r.text
+    assert "private" not in up.gesendet  # geht nicht an Google
+    _fertig(up)
+    b = client.get(f"/ai/genvideo/flow/status/{up.job['jobid']}").json()
+    f = up.formulare[0]
+    assert f["is_public"] == "false" and f["private"] == "true"
+    assert f["grant_scope"] == "cloud-session:EDERA-EDWARD"
+    assert b["clips"][0]["private"] is True and b["clips"][0]["grant_scope"] == "cloud-session:EDERA-EDWARD"
+
+
+def test_video_ohne_private_bleibt_oeffentlich_und_ungebunden(up, client, monkeypatch):
+    h = _mit_formular(up)
+    monkeypatch.setattr(fr, "_client", lambda timeout=60.0: httpx.AsyncClient(
+        transport=httpx.MockTransport(h)))
+    _als_jwt_agent(monkeypatch)
+    client.post("/ai/genvideo/flow", json={"prompt": "x", "confirm_api_billing": True})
+    _fertig(up)
+    b = client.get(f"/ai/genvideo/flow/status/{up.job['jobid']}").json()
+    f = up.formulare[0]
+    assert f["is_public"] == "true" and "private" not in f and "grant_scope" not in f
+    assert "private" not in b["clips"][0]
+
+
+def test_bild_privat_auch_beim_hochskalieren_und_nur_mit_jwt_gebunden(bup, client, monkeypatch):
+    import base64
+    alt = bup.handler
+
+    def mit_upscale(req):
+        if str(req.url).endswith("/images/upscale"):
+            return httpx.Response(200, json={"encodedImage": base64.b64encode(b"JPG").decode()})
+        return alt(req)
+    bup.handler = mit_upscale
+    h = _mit_formular(bup)
+    monkeypatch.setattr(fr, "_client", lambda timeout=60.0: httpx.AsyncClient(
+        transport=httpx.MockTransport(h)))
+    # Nur Kopfzeile, kein JWT: privat ja, Bindung nein (Kopf ist faelschbar).
+    r = client.post("/ai/genimage/flow", headers={"X-Agent-Name": "EDERA-EDWARD"},
+                    json={"prompt": "x", "private": True, "upscale": "4k", "confirm_api_billing": True})
+    assert r.status_code == 200, r.text
+    assert len(bup.formulare) == 4  # 2 Bilder (Mock liefert zwei) + 2 Hochskalierte
+    assert all(f["private"] == "true" and f["is_public"] == "false" for f in bup.formulare)
+    assert all("grant_scope" not in f for f in bup.formulare)
+    assert all(i["private"] is True and "hint" in i for i in r.json()["images"])
+
+
+def test_scope_fuer_wie_storage_mcp():
+    assert fr.scope_fuer("EDERA-EDWARD") == "cloud-session:EDERA-EDWARD"
+    assert fr.scope_fuer("Ä b") == "cloud-session-x:" + "Ä b".encode().hex()
+    assert fr.privat_ablage(True, "A", "header") == {"privat": True, "grant_scope": None}
+    assert fr.privat_ablage(False, "A", "jwt") == {}
