@@ -70,7 +70,7 @@ async def ausfuehren(body: dict, caller: str, versuche: int = 3) -> dict:
     if not s.schluessel():
         raise HTTPException(503, {"error": "openai_key_missing"})
     try:
-        s.budget_pruefen()
+        s.budget_pruefen(caller)
     except s.DecisionsBudget as e:
         from datetime import datetime as _dt
         warte = max(1, int((_dt.fromisoformat(e.detail["resets_at"]) - _dt.now().astimezone()).total_seconds()))

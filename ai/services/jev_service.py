@@ -97,13 +97,20 @@ def _schreiben(d: dict) -> None:
     tmp.replace(p)
 
 
-def budget_pruefen() -> None:
-    """Vor dem Aufruf: Tagesgrenze erreicht -> JevBudget."""
+def budget_pruefen(caller: Optional[str] = None) -> None:
+    """Vor dem Aufruf: Tagesgrenze des Hosts oder der eigenen Kennung erreicht -> JevBudget."""
     max_req, max_usd = _grenzen()
     with _sperre():
         d = _lesen()
     if (max_req > 0 and d["requests"] >= max_req) or (max_usd > 0 and d["cost_usd"] >= max_usd):
         raise JevBudget(d["requests"], round(d["cost_usd"], 6), max_req, max_usd)
+    from ai.services.decisions_service import _aufrufer_grenzen
+    eigen = _aufrufer_grenzen("JEV_CALLER_LIMITS", caller)
+    if eigen:
+        c = (d.get("by_caller") or {}).get(caller) or {}
+        r, u = int(c.get("requests") or 0), float(c.get("cost_usd") or 0.0)
+        if (eigen[0] > 0 and r >= eigen[0]) or (eigen[1] > 0 and u >= eigen[1]):
+            raise JevBudget(r, round(u, 6), eigen[0], eigen[1], caller=caller)
 
 
 def buchen(caller: str, model: Optional[str], input_tokens: int, output_tokens: int,
@@ -154,9 +161,10 @@ def status() -> dict:
 
 
 class JevBudget(Exception):
-    def __init__(self, requests, cost_usd, max_req, max_usd):
+    def __init__(self, requests, cost_usd, max_req, max_usd, caller: Optional[str] = None):
         super().__init__("jev daily budget")
-        self.detail = {"error": "jev_daily_budget_exceeded", "requests_today": requests,
+        self.detail = {"error": "jev_caller_budget_exceeded" if caller else "jev_daily_budget_exceeded",
+                       **({"caller": caller} if caller else {}), "requests_today": requests,
                        "cost_usd_today": cost_usd, "max_requests_per_day": max_req,
                        "max_usd_per_day": max_usd, "resets_at": rueckstellung(),
                        "hint": "Schutz gegen Endlosschleifen; Grenzen per JEV_DAILY_MAX_REQUESTS/JEV_DAILY_MAX_USD."}

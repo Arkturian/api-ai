@@ -109,27 +109,52 @@ def _schreiben(d: dict) -> None:
     tmp.replace(p)
 
 
+def _aufrufer_grenzen(env: str, caller: Optional[str]) -> Optional[tuple]:
+    """Eigene Tagesgrenze je gepruefter Kennung (Alex 18.11.2026: storage-api
+    bekommt eine eigene Kennung, damit Kosten und Rechte getrennt sind).
+    Env als JSON, z. B. {"service:storage-api": {"requests": 2000, "usd": 0.1}}.
+    Kaputtes JSON gilt als nicht gesetzt (die Hostgrenze bleibt)."""
+    if not caller:
+        return None
+    try:
+        tabelle = json.loads(os.getenv(env) or "{}")
+        g = tabelle.get(caller) if isinstance(tabelle, dict) else None
+    except ValueError:
+        logger.error("%s ist kein gueltiges JSON, ignoriert", env)
+        return None
+    if not isinstance(g, dict):
+        return None
+    return int(g.get("requests") or 0), float(g.get("usd") or 0.0)
+
+
 def rueckstellung() -> str:
     jetzt = datetime.now().astimezone()
     return (jetzt + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
 
 
 class DecisionsBudget(Exception):
-    def __init__(self, requests, cost_usd, max_req, max_usd):
+    def __init__(self, requests, cost_usd, max_req, max_usd, caller: Optional[str] = None):
         super().__init__("decisions daily budget")
-        self.detail = {"error": "decisions_daily_budget_exceeded", "requests_today": requests,
+        self.detail = {"error": "decisions_caller_budget_exceeded" if caller else "decisions_daily_budget_exceeded",
+                       **({"caller": caller} if caller else {}), "requests_today": requests,
                        "cost_usd_today": cost_usd, "max_requests_per_day": max_req,
                        "max_usd_per_day": max_usd, "resets_at": rueckstellung(),
                        "hint": "Schutz gegen Endlosschleifen; Grenzen per "
                                "DECISIONS_DAILY_MAX_REQUESTS/DECISIONS_DAILY_MAX_USD."}
 
 
-def budget_pruefen() -> None:
+def budget_pruefen(caller: Optional[str] = None) -> None:
     max_req, max_usd = _grenzen()
     with _sperre():
         d = _lesen()
     if (max_req > 0 and d["requests"] >= max_req) or (max_usd > 0 and d["cost_usd"] >= max_usd):
         raise DecisionsBudget(d["requests"], round(d["cost_usd"], 6), max_req, max_usd)
+    eigen = _aufrufer_grenzen("DECISIONS_CALLER_LIMITS", caller)
+    if eigen:
+        c = (d.get("by_caller") or {}).get(caller) or {}
+        r, u = int(c.get("requests") or 0), float(c.get("cost_usd") or 0.0)
+        if (eigen[0] > 0 and r >= eigen[0]) or (eigen[1] > 0 and u >= eigen[1]):
+            raise DecisionsBudget(r, round(u, 6), eigen[0], eigen[1], caller=caller)
 
 
 def buchen(caller: str, fragen: int, usage: Optional[dict], cost_usd: float,

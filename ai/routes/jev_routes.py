@@ -89,12 +89,6 @@ async def jev_endpoint(req: JevRequest, x_agent_name: Optional[str] = Header(def
                                   "hint": "Jev: 64k Tokens je Anfrage, davon 32k fuer state + laengste Frage."})
     if not s.schluessel():
         raise HTTPException(503, {"error": "typesafe_key_missing"})
-    try:
-        s.budget_pruefen()
-    except s.JevBudget as e:
-        from datetime import datetime as _dt
-        warte = max(1, int((_dt.fromisoformat(e.detail["resets_at"]) - _dt.now().astimezone()).total_seconds()))
-        raise HTTPException(429, e.detail, headers={"Retry-After": str(warte)})
     # Etikett fuers Nutzungslog, nie Recht. Vorrang hat der `sub` des hier
     # geprueften JWT (Cloud 29.09.: X-Agent-Name ist frei setzbar, ein
     # angemeldeter Aufrufer duerfte sich sonst als anderer ausgeben). Das
@@ -115,6 +109,12 @@ async def jev_endpoint(req: JevRequest, x_agent_name: Optional[str] = Header(def
     if caller.startswith("agent:"):
         caller = caller[len("agent:"):]
     caller = caller or "(unbekannt)"
+    try:
+        s.budget_pruefen(caller)   # Host-Grenze und, falls gesetzt, die der Kennung (JEV_CALLER_LIMITS)
+    except s.JevBudget as e:
+        from datetime import datetime as _dt
+        warte = max(1, int((_dt.fromisoformat(e.detail["resets_at"]) - _dt.now().astimezone()).total_seconds()))
+        raise HTTPException(429, e.detail, headers={"Retry-After": str(warte)})
     t0 = time.monotonic()
     try:
         code, data, _hdr = await s.aufrufen(body, versuche=max_attempts)

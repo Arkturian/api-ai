@@ -207,3 +207,29 @@ def test_max_attempts_1_wiederholt_nicht(umgebung):
     with pytest.raises(HTTPException) as e:
         asyncio.run(j.jev_endpoint(_req(), x_agent_name=None, max_attempts=1))
     assert e.value.status_code == 429 and len(calls) == 1 and schlaf == []
+
+
+def test_eigene_grenze_der_kennung_greift_nur_fuer_sie(umgebung, monkeypatch):
+    """Alex 18.11.: storage-api bekommt eine eigene Kennung mit eigenem Budget.
+    Die Grenze haengt am geprueften sub, nicht am frei setzbaren Kopf."""
+    calls, _, _ = umgebung
+    monkeypatch.setenv("JEV_DAILY_MAX_REQUESTS", "50")
+    monkeypatch.setenv("JEV_CALLER_LIMITS", '{"service:storage-api": {"requests": 2, "usd": 1}}')
+    monkeypatch.setattr(j, "_jwt_sub_geprueft",
+                        lambda a: {"Bearer st": "service:storage-api", "Bearer ag": "agent:Cloud"}.get(a))
+    for _ in range(2):
+        asyncio.run(j.jev_endpoint(_req(), authorization="Bearer st"))
+    with pytest.raises(HTTPException) as e:
+        asyncio.run(j.jev_endpoint(_req(), authorization="Bearer st"))
+    assert e.value.status_code == 429
+    assert e.value.detail["error"] == "jev_caller_budget_exceeded" and e.value.detail["caller"] == "service:storage-api"
+    assert len(calls) == 2
+    # andere Kennung laeuft weiter, auch mit gefaelschtem Kopf
+    asyncio.run(j.jev_endpoint(_req(), authorization="Bearer ag", x_agent_name="service:storage-api"))
+    assert len(calls) == 3
+
+
+def test_kaputte_grenzen_tabelle_gilt_als_nicht_gesetzt(umgebung, monkeypatch):
+    monkeypatch.setenv("JEV_CALLER_LIMITS", "{kaputt")
+    monkeypatch.setattr(j, "_jwt_sub_geprueft", lambda a: "service:storage-api")
+    asyncio.run(j.jev_endpoint(_req(), authorization="Bearer st"))

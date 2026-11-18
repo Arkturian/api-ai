@@ -161,3 +161,18 @@ def test_betreiber_schaltet_motor_per_env(client, monkeypatch):
     monkeypatch.setenv("JEV_DEFAULT_ENGINE", "openai")
     r = client.post("/ai/jev", json=JEV_BODY, headers=GUT)
     assert r.status_code == 200 and r.json()["engine"] == "openai"
+
+
+def test_eigene_grenze_der_kennung(client, monkeypatch):
+    """storage-api (Missbrauchspruefung, 18.11.) hat ein eigenes Tagesbudget."""
+    monkeypatch.setenv("DECISIONS_DAILY_MAX_REQUESTS", "50")
+    monkeypatch.setenv("DECISIONS_CALLER_LIMITS", '{"service:storage-api": {"requests": 1}}')
+    monkeypatch.setattr(j, "_jwt_sub_geprueft",
+                        lambda a: {"Bearer st": "service:storage-api", "Bearer gut": "agent:Test"}.get(a))
+    st = {"Authorization": "Bearer st"}
+    assert client.post("/ai/decisions", json=NATIV, headers=st).status_code == 200
+    r = client.post("/ai/decisions", json=NATIV, headers=st)
+    assert r.status_code == 429 and r.json()["detail"]["error"] == "decisions_caller_budget_exceeded"
+    assert r.headers.get("Retry-After")
+    assert client.post("/ai/decisions", json=NATIV, headers=GUT).status_code == 200
+    assert len(client.aufrufe) == 2
