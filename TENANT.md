@@ -52,9 +52,26 @@ meldet sich mit dem Schlüssel des Betreibers gegen dessen storage-api an —
 still, mit einer einzigen Warnzeile.
 
 ```bash
-# --- Realtime (nur wenn Sprache genutzt wird) ---------------------------
+# --- Eigene auth-api: PFLICHT auf jeder Instanz (seit fffc7f3, 16.11.) ---
 REALTIME_AUTH_ISSUER=<kunde>.example.com
 REALTIME_AUTH_JWKS_URL=http://127.0.0.1:8010/api/v1/auth/.well-known/jwks.json
+REALTIME_AUTH_GRANT_URL=http://127.0.0.1:8010/api/v1/auth/realtime-grant
+AGENTOS_JWT_STATE_DIR=/var/lib/api-ai/agentos_jwt   # beschreibbar fuer den Dienst
+```
+
+Trotz des Namens gelten diese drei nicht mehr nur fuer Sprache. Ab
+`fffc7f3` prueft api-ai **jedes** mitgeschickte JWT gegen sie (`agentos_jwt`):
+/ai/jev, /ai/decisions, /ai/genimage (Zuordnung) und /ai/verbrauch (Admin-
+Pruefung ueber `<GRANT_URL ohne letztes Segment>/me`). Die Widerrufsliste kommt
+von `<JWKS_URL ohne letztes Segment>/revoked-agent-jtis`
+(`AGENTOS_JWT_REVOCATION_URL` ueberschreibt).
+**Ohne sie faellt die Instanz auf auth-api.arkturian.com zurueck:**
+Sie nimmt dann JWTs des Betreibers an, holt Schluessel und Sperrliste bei ihm,
+und /ai/verbrauch schickt das Bearer-Token des Kunden an die auth-api des
+Betreibers.
+
+```bash
+# --- Realtime (nur wenn Sprache genutzt wird) ---------------------------
 REALTIME_PROFILE_ID=<profil[,profil]>
 REALTIME_GRANT_SERVICE_KEY=<identisch mit der lokalen auth-api>
 OPENAI_REALTIME_MONTHLY_BUDGET_EUR=<UNTER dem Guthaben des Kunden>
@@ -67,6 +84,17 @@ aussieht.
 
 **Das Monatsbudget hat die Vorgabe 100.** Liegt das Guthaben des Kunden
 darunter, bremst der Wächter erst, wenn das Anbieterkonto längst leer ist.
+
+```bash
+# --- Urteile (nur wenn genutzt, #3580) -----------------------------------
+JEV_DEFAULT_ENGINE=jev|openai     # Vorgabe jev; "aus" kennt api-ai NICHT
+TYPESAFE_API_KEY=…                # eigener Vertrag, sonst 503 typesafe_key_missing
+# engine=openai (/ai/decisions) nutzt OPENAI_API_KEY der Instanz
+```
+
+„aus“ ist kein Wert fuer `JEV_DEFAULT_ENGINE` (unbekannte Werte laufen wie
+`jev`). Abschalten heisst: den Aufrufer nicht anbieten (cloud-api/MCP) bzw.
+ohne Schluessel lassen — dann antwortet api-ai laut mit 503.
 
 ## Verify-Checkliste
 
@@ -89,7 +117,8 @@ curl -s -X POST http://127.0.0.1:8000/ai/realtime/token \
 
 # 4 Umgebung im LAUFENDEN Prozess, nicht in der Datei
 PID=$(systemctl show -p MainPID --value <dienst>)
-tr '\0' '\n' < /proc/$PID/environ | grep -E '^(REALTIME_AUTH_|API_ACCESS_KEY|STORAGE_API_KEY)' 
+tr '\0' '\n' < /proc/$PID/environ | grep -E '^(REALTIME_AUTH_|AGENTOS_JWT_|API_ACCESS_KEY|STORAGE_API_KEY)' | sed -E 's/=.*/=…/'
+#   erwartet: REALTIME_AUTH_ISSUER, _JWKS_URL und _GRANT_URL alle drei gesetzt
 ```
 
 Punkt 4 ist kein Formalismus: Eine Variable in der `.env`, die der Dienst
