@@ -355,6 +355,8 @@ from ai.routes import decisions_routes  # noqa: E402
 app.include_router(decisions_routes.router, prefix="/ai", tags=["Decisions (OpenAI)"])
 from ai.routes import verbrauch_routes  # noqa: E402
 app.include_router(verbrauch_routes.router, prefix="/ai", tags=["Verbrauch"])
+from ai.routes import codex_konten_routes  # noqa: E402
+app.include_router(codex_konten_routes.router, prefix="/ai", tags=["Codex-Konten"])
 from ai.routes import audio_mix_routes  # noqa: E402
 app.include_router(audio_mix_routes.router, prefix="/ai", tags=["Audio Mix"])
 app.include_router(music_ai_routes.router, prefix="/ai", tags=["Music AI"])
@@ -435,6 +437,18 @@ def _codex_auth_status() -> dict:
     import pwd as _pwd
     import time as _t
     try:
+        from ai.services import cli_dienst
+        if cli_dienst.konto_modus():
+            # #3165: eigene Anmeldungen je Konto, nur apiai-codex liest sie. Den
+            # Stand liefert die Messung der Kontowahl (account/read).
+            from ai.services import codex_konten
+            u = codex_konten.uebersicht()
+            aktiv = next((k for k in u["konten"] if k["name"] == u["aktiv"]), {})
+            st = aktiv.get("state") or "unbekannt"
+            return {"expected": True, "konto_modus": True, "aktiv": u["aktiv"],
+                    "ok": True if st == "ok" else (None if st in ("unbekannt", "probe_error") else False),
+                    "reason": None if st == "ok" else st,
+                    "konten": {k["name"]: k["state"] for k in u["konten"]}}
         cli_home = os.getenv("CLI_HOME") or _pwd.getpwuid(os.getuid()).pw_dir
         home = os.getenv("CODEX_HOME") or os.path.join(cli_home, ".codex")
         path = os.path.join(home, "auth.json")
@@ -600,6 +614,12 @@ async def global_exception_handler(request: Request, exc: Exception):
 async def startup_event():
     """Startup tasks"""
     logger.info("🚀 Arkturian AI API starting up...")
+    # #3165: eigene codex-Konten messen und ggf. wechseln (nur im Kontomodus)
+    from ai.services import cli_dienst
+    if cli_dienst.konto_modus():
+        import asyncio as _asyncio
+        _asyncio.get_event_loop().create_task(codex_konten_routes.mess_schleife())
+        logger.info("codex-konten: Messschleife gestartet")
     logger.info("✅ All AI services initialized")
 
 @app.on_event("shutdown")

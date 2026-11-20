@@ -1,0 +1,6 @@
+# /etc/sudoers.d/api-ai   root:root 0440   (#3165, ersetzt die Fassung aus #2937)
+# apiai startet genau zwei Programme unter fremdem Konto: codex als apiai-codex,
+# agy als apiai-agy. Kein Weg mehr zu alex. Kein SETENV, keine Shell.
+Defaults:apiai env_reset, !setenv, !requiretty, umask=0027
+apiai ALL=(apiai-codex) NOPASSWD: NOSETENV: /usr/local/libexec/api-ai/codex-als-dienst
+apiai ALL=(apiai-agy) NOPASSWD: NOSETENV: /usr/local/libexec/api-ai/agy-als-dienst

@@ -21,7 +21,18 @@ import tomllib
 from typing import List, Optional, Tuple
 
 CODEX_WRAPPER = "codex-als-alex"
+CODEX_DIENST_WRAPPER = "codex-als-dienst"   # #3165: eigener Benutzer apiai-codex, Konto als 1. Argument
 AGY_WRAPPER = "agy-als-dienst"
+
+
+def konto_modus() -> bool:
+    """#3165: codex als apiai-codex mit eigenen Konten (API_AI_CODEX_KONTEN)."""
+    from ai.services import codex_konten
+    return aktiv() and codex_konten.aktiv_modus()
+
+
+def codex_wrapper() -> str:
+    return CODEX_DIENST_WRAPPER if konto_modus() else CODEX_WRAPPER
 
 
 def wrapper_dir() -> Optional[str]:
@@ -42,12 +53,23 @@ def arbeit() -> str:
 
 
 def codex_text_home() -> str:
+    if konto_modus():
+        # #3165: ein Home je Konto, fuer Text, Bild und Vision dasselbe
+        from ai.services import codex_konten
+        return codex_konten.aktiv_home()
     return (os.getenv("CODEX_TEXT_HOME") or "/var/lib/api-ai-cli/codex-text").rstrip("/")
 
 
 def codex_befehl(user: str, cmd: List[str], env: dict) -> List[str]:
     """sudo -n -u <user> <wrapper> haupt|text <codex-Argumente>. Welches
     CODEX_HOME gilt, entscheidet der Wrapper aus einer festen Liste."""
+    if konto_modus():
+        # #3165: Das Konto steht im CODEX_HOME, das der Aufrufer gewaehlt hat
+        # (imagegen sucht das Bild spaeter genau dort). Sonst das aktive.
+        from ai.services import codex_konten
+        konto = codex_konten.konto_aus_home(env.get("CODEX_HOME")) or codex_konten.aktiv()
+        return ["sudo", "-n", "-u", user, os.path.join(wrapper_dir(), CODEX_DIENST_WRAPPER), konto, "text"] \
+            + list(cmd[1:])
     art = "text" if (env.get("CODEX_HOME") or "").rstrip("/") == codex_text_home() else "haupt"
     return ["sudo", "-n", "-u", user, os.path.join(wrapper_dir(), CODEX_WRAPPER), art] + list(cmd[1:])
 
@@ -72,11 +94,17 @@ def arbeitsordner(prefix: str) -> str:
     return d
 
 
-def codex_konfig(user: str) -> Tuple[Optional[str], Optional[str]]:
-    """model und model_reasoning_effort aus alex' config.toml ueber den
-    Wrapper (`konfig` gibt nur diese beiden Zeilen aus)."""
+def codex_konfig(user: str, konto: Optional[str] = None) -> Tuple[Optional[str], Optional[str]]:
+    """model und model_reasoning_effort aus der config.toml ueber den
+    Wrapper (`konfig` gibt nur diese beiden Zeilen aus). Im Kontomodus
+    (#3165) die des Kontos, sonst alex'."""
+    if konto_modus():
+        from ai.services import codex_konten
+        befehl = [os.path.join(wrapper_dir(), CODEX_DIENST_WRAPPER), konto or codex_konten.aktiv(), "konfig"]
+    else:
+        befehl = [os.path.join(wrapper_dir(), CODEX_WRAPPER), "konfig"]
     try:
-        r = subprocess.run(["sudo", "-n", "-u", user, os.path.join(wrapper_dir(), CODEX_WRAPPER), "konfig"],
+        r = subprocess.run(["sudo", "-n", "-u", user] + befehl,
                            capture_output=True, text=True, timeout=10)
         cfg = tomllib.loads(r.stdout or "") if r.returncode == 0 else {}
     except Exception:

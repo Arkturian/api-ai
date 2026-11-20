@@ -1,0 +1,138 @@
+#!/bin/bash
+# /usr/local/libexec/api-ai/codex-als-dienst   root:root 0755   (#3165)
+# Einziger Weg von apiai zum Dienstkonto apiai-codex fuer codex. Ersetzt
+# codex-als-alex: kein sudo mehr zu alex, keine Anmeldung aus /home/alex.
+# Feste Umgebung (env -i), Optionen nur aus einer Liste, Prompt nur ueber stdin.
+#
+#   codex-als-dienst <konto> haupt|text <codex-Argumente>
+#   codex-als-dienst <konto> konfig     # nur model und model_reasoning_effort
+#   codex-als-dienst <konto> limits     # account/read + account/rateLimits/read als JSON-Zeilen
+#
+# Je ChatGPT-Konto ein eigenes CODEX_HOME unter $KONTEN/<konto> mit einer
+# EIGENEN Geraetecode-Anmeldung (eigene Token-Kette; nie eine Kopie, zwei
+# Kopien verbrauchen sich gegenseitig das Refresh-Token).
+# Rechte: $KONTEN und $KONTEN/<konto> 0710 apiai-codex:apiai-cli (apiai darf
+# hindurch, aber nichts auflisten), auth.json/config.toml 0600, Zustand mit
+# der Hauptgruppe apiai-codex; nur generated_images (2750, Gruppe apiai-cli)
+# ist fuer apiai lesbar, damit api-ai das Abo-Bild abholen kann.
+set -euo pipefail
+umask 027
+fehler() { echo "codex-als-dienst: $*" >&2; exit 64; }
+WURZEL=/var/lib/api-ai-cli
+KONTEN=/var/lib/api-ai-codex/konten
+BIN=/usr/local/lib/api-ai/codex/bin/codex.js
+NODE=/usr/bin/node
+
+# #3165: Werkzeuge, die codex hier nie bekommt (wie codex-als-alex).
+# code_mode_host bleibt erlaubt: image_gen laeuft ueber den Code-Modus, und
+# der hat ohne Shell keinen Dateizugriff (Kanarienprobe 16.11.).
+GESPERRT=(shell_tool unified_exec apps plugins remote_plugin
+          browser_use browser_use_external browser_use_full_cdp_access in_app_browser
+          computer_use view_image hooks multi_agent skill_mcp_dependency_install)
+
+konto=${1:-}
+[[ "$konto" =~ ^[a-z][a-z0-9]{1,31}$ ]] || fehler "erstes Argument: Kontoname"
+CH=$KONTEN/$konto
+[[ -d "$CH" && ! -L "$CH" ]] || fehler "Konto $konto nicht eingerichtet"
+shift
+
+starte() {  # codex mit fester Umgebung
+  exec env -i HOME=/var/lib/api-ai-codex PATH=/usr/local/bin:/usr/bin:/bin \
+    NO_COLOR=1 LANG=C.UTF-8 CODEX_HOME="$CH" "$NODE" "$BIN" "$@"
+}
+
+aufraeumen() {
+  # Abo-Bilder liegen nach dem Hochladen im Storage; apiai darf hier nicht
+  # loeschen (kein Schreibrecht), deshalb raeumt der Wrapper auf. Dazu die
+  # Sitzungsprotokolle (Prompts!) nach einem Tag.
+  find "$CH/generated_images" -type f -mmin +120 -delete 2>/dev/null || true
+  find "$CH/sessions" -type f -mmin +1440 -delete 2>/dev/null || true
+}
+
+case "${1:-}" in
+  haupt|text) shift ;;
+  konfig)
+    [[ $# -eq 1 ]] || fehler "konfig ohne weitere Argumente"
+    [[ -f "$CH/config.toml" ]] || exit 0
+    awk '/^[[:space:]]*\[/{exit} /^(model|model_reasoning_effort)[[:space:]]*=/{print}' "$CH/config.toml"
+    exit 0 ;;
+  limits)
+    [[ $# -eq 1 ]] || fehler "limits ohne weitere Argumente"
+    # Feste Anfragen, nie Eingaben des Aufrufers: der app-server nimmt auf
+    # stdin beliebige JSON-RPC-Befehle an, auch solche, die etwas ausfuehren.
+    # Ausgegeben werden nur die Antworten auf id 2 und 3.
+    exec 0</dev/null
+    {
+      printf '%s\n' '{"id":1,"method":"initialize","params":{"clientInfo":{"name":"api-ai-konten","version":"1"}}}' \
+                    '{"method":"initialized"}' \
+                    '{"id":2,"method":"account/read","params":{"refreshToken":false}}' \
+                    '{"id":3,"method":"account/rateLimits/read"}'
+      sleep 20
+    } | timeout 20 env -i HOME=/var/lib/api-ai-codex PATH=/usr/local/bin:/usr/bin:/bin \
+          NO_COLOR=1 LANG=C.UTF-8 CODEX_HOME="$CH" "$NODE" "$BIN" app-server 2>/dev/null \
+      | awk '/"id":[ ]*[23][,}]/ {print; fflush(); n++} n>=2 {exit}' || true
+    exit 0 ;;
+  *) fehler "zweites Argument: haupt, text, konfig oder limits" ;;
+esac
+
+gesperrt_aus() {  # features.<name>=false fuer jeden Namen aus GESPERRT
+  local f
+  for f in "${GESPERRT[@]}"; do [[ "$1" == "features.$f=false" ]] && return 0; done
+  return 1
+}
+erlaubt_c() {
+  gesperrt_aus "$1" && return 0
+  case "$1" in
+    features.shell_tool=false|features.unified_exec=false|features.code_mode_host=false|\
+    features.apps=false|features.plugins=false|include_environment_context=false|\
+    include_permissions_instructions=false|include_apps_instructions=false|\
+    model_instructions_file=/var/www/api-ai.arkturian.com/ai/data/codex_text_anweisung.md) return 0 ;;
+    model_reasoning_effort=*) [[ "${1#*=}" =~ ^[a-z]{1,12}$ ]] ;;
+    *) return 1 ;;
+  esac
+}
+pfad_ok() {
+  local p
+  p=$(realpath -m -- "$1")
+  [[ "$p" == "$WURZEL"/eingang/* || "$p" == "$WURZEL"/arbeit/* ]]
+}
+
+args=("$@"); n=${#args[@]}
+if [[ $n -eq 1 && "${args[0]}" == "--version" ]]; then
+  :
+elif [[ $n -eq 2 && "${args[0]}" == debug && "${args[1]}" == models ]]; then
+  :
+elif [[ $n -ge 2 && "${args[0]}" == exec ]]; then
+  i=1; ende=0; sandbox=0
+  while (( i < n )); do
+    a=${args[i]}
+    if (( ende )); then
+      [[ "$a" == "-" && $((i+1)) -eq n ]] || fehler "nach -- nur noch -"
+      i=$((i+1)); continue
+    fi
+    case "$a" in
+      --json|--skip-git-repo-check|--ephemeral) ;;
+      -s) i=$((i+1)); [[ "${args[i]:-}" == read-only ]] || fehler "-s nur read-only"; sandbox=1 ;;
+      -C) i=$((i+1)); pfad_ok "${args[i]:-}" || fehler "-C ausserhalb von $WURZEL/arbeit" ;;
+      -i) i=$((i+1)); pfad_ok "${args[i]:-}" || fehler "-i ausserhalb von $WURZEL/eingang" ;;
+      -m|--model) i=$((i+1)); [[ "${args[i]:-}" =~ ^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$ ]] || fehler "Modellname" ;;
+      -c) i=$((i+1)); erlaubt_c "${args[i]:-}" || fehler "-c ${args[i]:-} nicht erlaubt" ;;
+      --) ende=1 ;;
+      -) [[ $((i+1)) -eq n ]] || fehler "- nur am Ende" ;;
+      *) fehler "Option nicht erlaubt: $a" ;;
+    esac
+    i=$((i+1))
+  done
+  [[ "${args[n-1]}" == "-" ]] || fehler "Prompt nur ueber stdin (-)"
+  (( sandbox )) || args=(exec -s read-only "${args[@]:1}")
+  # Werkzeuge immer aus, vor den Aufrufer-Optionen; erlaubt_c laesst fuer
+  # diese Schluessel nur =false zu, ein spaeteres -c schaltet nichts ein.
+  sperren=()
+  for f in "${GESPERRT[@]}"; do sperren+=(-c "features.$f=false"); done
+  args=(exec "${sperren[@]}" "${args[@]:1}")
+else
+  fehler "nur --version, debug models oder exec"
+fi
+
+aufraeumen
+starte "${args[@]}"

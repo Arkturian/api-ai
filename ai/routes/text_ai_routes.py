@@ -97,6 +97,25 @@ def codex_als_benutzer(cmd, env):
     return ["sudo", "-n", "-u", user, "-H", "env"] + umgebung + [binaer] + list(cmd[1:])
 
 
+def _codex_kontingent_pruefen(result, cmd=()) -> None:
+    """#3165: Scheitert ein codex-Lauf am Kontingent, misst die Kontowahl
+    sofort (im Hintergrund) statt bis zur naechsten Runde zu warten."""
+    try:
+        from ai.services import cli_dienst, codex_konten
+        if not cli_dienst.konto_modus() or getattr(result, "returncode", 0) == 0:
+            return
+        if not any(str(a).endswith("/" + cli_dienst.CODEX_DIENST_WRAPPER) for a in (cmd or ())):
+            return
+        if not codex_konten.ist_kontingentfehler(f"{result.stdout or ''}\n{result.stderr or ''}"[-20000:]):
+            return
+        import threading
+        from ai.services import codex_melden
+        threading.Thread(target=codex_konten.nach_kontingentfehler, kwargs={"melden": codex_melden.melden},
+                         daemon=True).start()
+    except Exception as e:                                    # noqa: BLE001
+        logger.warning("codex-konten: Pruefung nach Fehler gescheitert: %s", type(e).__name__)
+
+
 def bilder_fuer_codex_benutzer(pfade, eigene_ordner=()):
     """Macht lokale Bilder fuer den Benutzer lesbar, als der codex laeuft.
 
@@ -290,7 +309,9 @@ def _run_cli_with_pgid(cmd, env, timeout=300, cwd="/", input=None, phasen=None):
         start_new_session=True,  # own pgid for clean group-kill
     )
     if phasen is not None:
-        return _mit_phasen_warten(proc, cmd, input, timeout, phasen)
+        res = _mit_phasen_warten(proc, cmd, input, timeout, phasen)
+        _codex_kontingent_pruefen(res, cmd)
+        return res
     try:
         stdout, stderr = proc.communicate(input=input, timeout=timeout)
     except subprocess.TimeoutExpired:
@@ -305,12 +326,14 @@ def _run_cli_with_pgid(cmd, env, timeout=300, cwd="/", input=None, phasen=None):
         except subprocess.TimeoutExpired:
             stdout, stderr = "", ""
         raise
-    return subprocess.CompletedProcess(
+    res = subprocess.CompletedProcess(
         args=cmd,
         returncode=proc.returncode,
         stdout=stdout,
         stderr=stderr,
     )
+    _codex_kontingent_pruefen(res, cmd)
+    return res
 
 
 # Which real account a gated endpoint spends on. The 403 used to say

@@ -81,6 +81,12 @@ def codex_config(codex_home: Optional[str] = None) -> Tuple[Optional[str], Optio
     """Was ein codex-Aufruf ohne Modell tatsaechlich bekommt: `model` und
     `model_reasoning_effort` aus der config.toml, mit der api-ai codex startet."""
     home = codex_home or os.getenv("CODEX_HOME") or "/home/alex/.codex"
+    from ai.services import cli_dienst
+    if cli_dienst.konto_modus():
+        # #3165: config.toml des Kontos gehoert apiai-codex (0600), nur der Wrapper liest sie
+        from ai.services import codex_konten
+        user = (os.getenv("CODEX_RUN_AS_USER") or "").strip()
+        return cli_dienst.codex_konfig(user, codex_konten.konto_aus_home(home)) if user else (None, None)
     try:
         cfg = tomllib.loads((Path(home) / "config.toml").read_text())
     except PermissionError:
