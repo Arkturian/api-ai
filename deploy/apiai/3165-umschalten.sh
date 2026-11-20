@@ -45,6 +45,10 @@ cat > "$DROPIN" <<EOF
 Environment=CODEX_RUN_AS_USER=apiai-codex
 Environment=CODEX_HOME=/var/lib/api-ai-codex
 Environment=API_AI_CODEX_KONTEN=$KONTEN
+# /var/lib/api-ai-codex bleibt beschreibbar: codex laeuft per sudo als apiai-codex,
+# aber im Mount-Namensraum dieses Dienstes; ProtectSystem=strict gilt auch fuer
+# ihn (Token-Erneuerung in auth.json, generated_images, sessions). apiai selbst
+# hat dort nur Durchgang (0710).
 ReadWritePaths=
 ReadWritePaths=/var/lib/api-ai /var/lib/api-ai-cli /var/lib/apiai-agy /var/lib/api-ai-codex /tmp
 EOF

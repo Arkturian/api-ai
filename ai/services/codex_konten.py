@@ -232,15 +232,23 @@ def _voll(l: Optional[dict]) -> bool:
     return bool(l) and (l["erreicht"] or l["used_pct"] >= SCHWELLE_PCT)
 
 
+def _erreicht(l: Optional[dict]) -> bool:
+    return bool(l) and (l["erreicht"] or l["used_pct"] >= 100)
+
+
 def entscheide(aktiv_name: str, stand: dict) -> Optional[str]:
     """Zielkonto oder None. stand: konto -> {state, limits}."""
     a = stand.get(aktiv_name) or {}
     if not _voll(a.get("limits")):
         return None
     jetzt = a["limits"]["used_pct"]
+    # Cloud 20.11.: Ist das Kontingent ERREICHT, entfaellt der Vorsprung --
+    # sonst bliebe api-ai bei apopovic 100 % / tsaier 82 % tot stehen. Bei
+    # „fast voll“ (95-99 %) bleiben die 20 Punkte.
+    vorsprung = 0.0 if _erreicht(a["limits"]) else VORSPRUNG_PCT
     gut = [k for k, s in stand.items()
            if k != aktiv_name and s.get("state") == "ok" and s.get("limits")
-           and not _voll(s["limits"]) and jetzt - s["limits"]["used_pct"] >= VORSPRUNG_PCT]
+           and not _voll(s["limits"]) and jetzt - s["limits"]["used_pct"] >= vorsprung]
     if not gut:
         return None
     return min(gut, key=lambda k: (stand[k]["limits"]["used_pct"], stand[k]["limits"].get("resets_at") or 0))
@@ -265,7 +273,8 @@ def kein_ziel_text(aktiv_name: str, stand: dict) -> str:
     if _voll(stand[best]["limits"]):
         return kopf + f"Auch {best} ist voll ({b:.0f} %). api-ai wartet bis zum Reset."
     return kopf + (f"Kein Wechsel: {best} steht bei {b:.0f} %, das sind nur {jetzt - b:.0f} Punkte "
-                   f"mehr Luft. Gewechselt wird erst ab {VORSPRUNG_PCT:.0f} Punkten Abstand.")
+                   f"mehr Luft. Bei fast vollem Konto wird erst ab {VORSPRUNG_PCT:.0f} Punkten Abstand "
+                   f"gewechselt, bei erreichtem Kontingent sofort.")
 
 
 def _ereignis(z: dict, art: str, text: str, **daten) -> dict:

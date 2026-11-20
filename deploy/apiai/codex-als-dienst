@@ -62,15 +62,22 @@ case "${1:-}" in
     # stdin beliebige JSON-RPC-Befehle an, auch solche, die etwas ausfuehren.
     # Ausgegeben werden nur die Antworten auf id 2 und 3.
     exec 0</dev/null
-    {
-      printf '%s\n' '{"id":1,"method":"initialize","params":{"clientInfo":{"name":"api-ai-konten","version":"1"}}}' \
-                    '{"method":"initialized"}' \
-                    '{"id":2,"method":"account/read","params":{"refreshToken":false}}' \
-                    '{"id":3,"method":"account/rateLimits/read"}'
-      sleep 20
-    } | timeout 20 env -i HOME=/var/lib/api-ai-codex PATH=/usr/local/bin:/usr/bin:/bin \
-          NO_COLOR=1 LANG=C.UTF-8 CODEX_HOME="$CH" "$NODE" "$BIN" app-server 2>/dev/null \
-      | awk '/"id":[ ]*[23][,}]/ {print; fflush(); n++} n>=2 {exit}' || true
+    # coproc statt Pipe (Cloud 20.11.): sobald beide Antworten da sind, endet
+    # der app-server, statt die Runde 20 s lang festzuhalten.
+    coproc APP (exec timeout 20 env -i HOME=/var/lib/api-ai-codex PATH=/usr/local/bin:/usr/bin:/bin \
+          NO_COLOR=1 LANG=C.UTF-8 CODEX_HOME="$CH" "$NODE" "$BIN" app-server 2>/dev/null)
+    ein=${APP[1]}; aus=${APP[0]}; pid=$APP_PID
+    printf '%s\n' '{"id":1,"method":"initialize","params":{"clientInfo":{"name":"api-ai-konten","version":"1"}}}' \
+                  '{"method":"initialized"}' \
+                  '{"id":2,"method":"account/read","params":{"refreshToken":false}}' \
+                  '{"id":3,"method":"account/rateLimits/read"}' >&"$ein"
+    muster='"id": ?[23][,}]'
+    n=0
+    while (( n < 2 )) && IFS= read -r -t 20 zeile <&"$aus"; do
+      if [[ "$zeile" =~ $muster ]]; then printf '%s\n' "$zeile"; n=$((n+1)); fi
+    done
+    kill -TERM "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
     exit 0 ;;
   *) fehler "zweites Argument: haupt, text, konfig oder limits" ;;
 esac

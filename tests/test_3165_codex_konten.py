@@ -213,6 +213,12 @@ def _stand(**pct):
     (_stand(apopovic=96, tsaier=80), None),            # nur 16 Punkte Vorsprung
     (_stand(apopovic=96, tsaier=95), None),            # Ziel selbst fast voll
     ({**_stand(apopovic=99), "tsaier": {"state": "unauthorized", "limits": None}}, None),
+    # Cloud 20.11.: erreicht -> kein Vorsprung noetig (apopovic 100 / tsaier 82)
+    (_stand(apopovic=100, tsaier=82), "tsaier"),
+    ({"apopovic": {"state": "ok", "limits": {"used_pct": 90, "resets_at": 1, "erreicht": True}},
+      **_stand(tsaier=82)}, "tsaier"),
+    (_stand(apopovic=100, tsaier=96), None),           # Ziel fast voll: auch dann nicht
+    (_stand(apopovic=99, tsaier=82), None),            # nur fast voll: 20 Punkte bleiben
 ])
 def test_regel_wie_codex_konto_wechsel(stand, ziel):
     assert ck.entscheide("apopovic", stand) == ziel
@@ -322,3 +328,39 @@ def test_health_im_kontomodus_aus_der_messung(konto):
     assert s["konto_modus"] and s["aktiv"] == "apopovic" and s["ok"] is None
     ck.runde(lauf=_lauf_mit({"apopovic": 10, "tsaier": 10}))
     assert main._codex_auth_status()["ok"] is True
+
+
+def _wrapper_mit_attrappe(tmp_path, antwort_verzoegerung="0"):
+    """limits gegen einen falschen app-server: antwortet auf id 2 und 3 und
+    schlaeft danach 30 s, wie der echte, der auf stdin wartet."""
+    p, konten = _wrapper(tmp_path)
+    fake = tmp_path / "fake-app-server"
+    fake.write_text(f"""#!/bin/bash
+[[ "$1" == app-server ]] || exit 9
+while IFS= read -r z; do
+  echo "EINGABE $z" >> {tmp_path}/eingaben
+  case "$z" in
+    *'"id":2'*) sleep {antwort_verzoegerung}; echo '{{"id":2,"result":{{"account":{{"email":"x@y"}}}}}}' ;;
+    *'"id":3'*) echo '{{"id":3,"result":{{"rateLimits":{{"primary":{{"usedPercent":42}}}}}}}}'; sleep 30 ;;
+  esac
+done
+""")
+    fake.chmod(0o755)
+    s = p.read_text().replace("NODE=/usr/bin/node", "NODE=/bin/bash").replace(
+        "BIN=/usr/local/lib/api-ai/codex/bin/codex.js", f"BIN={fake}")
+    p.write_text(s)
+    return p
+
+
+def test_limits_endet_sobald_beide_antworten_da_sind(tmp_path):
+    import time
+    p = _wrapper_mit_attrappe(tmp_path)
+    t0 = time.time()
+    r = _lauf(p, "apopovic", "limits", stdin='{"id":9,"method":"command/exec"}\n')
+    dauer = time.time() - t0
+    assert r.returncode == 0, r.stderr
+    m = ck.auswerten(r.stdout)
+    assert m["state"] == "ok" and m["limits"]["used_pct"] == 42
+    assert dauer < 5, dauer                                    # vorher immer 20 s
+    eingaben = (tmp_path / "eingaben").read_text()
+    assert "command/exec" not in eingaben                      # stdin des Aufrufers kommt nie an

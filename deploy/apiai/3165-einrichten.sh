@@ -24,7 +24,9 @@ KONTEN=(apopovic tsaier)
 BASIS=/var/lib/api-ai-codex
 ABLAGE=/var/lib/api-ai-codex-anmeldung
 PROG=/usr/local/lib/api-ai/codex
-ALEX_CODEX=/home/alex/.local/bin/codex
+# Nur LESEN, nie als root ausfuehren (Cloud 20.11.): die Datei gehoert alex,
+# jeder Prozess als alex koennte codex.js vorher aendern.
+ALEX_PAKET=/home/alex/.local/lib/node_modules/@openai/codex/package.json
 
 # 1. Benutzer
 if ! id apiai-codex >/dev/null 2>&1; then
@@ -34,11 +36,12 @@ usermod -aG apiai-cli apiai-codex
 id apiai-codex
 
 # 2. Programmkopie, gleiche Fassung wie alex' codex
-V=$("$ALEX_CODEX" --version | awk '{print $2}')
+V=$(python3 -I -c 'import json,sys;print(json.load(open(sys.argv[1]))["version"])' "$ALEX_PAKET")
 [[ "$V" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "codex-Fassung unklar: $V" >&2; exit 1; }
-if [[ "$("$PROG/bin/codex.js" --version 2>/dev/null | awk '{print $2}')" != "$V" ]]; then
+IST=$(python3 -I -c 'import json,sys;print(json.load(open(sys.argv[1]))["version"])' "$PROG/package.json" 2>/dev/null || true)
+if [[ "$IST" != "$V" ]]; then
   NEU=$(mktemp -d /usr/local/lib/api-ai/codex-npm.XXXXXX)
-  ( umask 022; npm install --global --prefix "$NEU" --no-fund --no-audit "@openai/codex@$V" >/dev/null )
+  ( umask 022; npm install --global --prefix "$NEU" --ignore-scripts --no-fund --no-audit "@openai/codex@$V" >/dev/null )
   chmod -R a+rX,go-w "$NEU"
   ln -sfn "$NEU/lib/node_modules/@openai/codex" "$PROG.neu" && mv -Tf "$PROG.neu" "$PROG"
 fi
