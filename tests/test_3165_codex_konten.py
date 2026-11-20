@@ -210,15 +210,18 @@ def _stand(**pct):
 @pytest.mark.parametrize("stand,ziel", [
     (_stand(apopovic=80, tsaier=10), None),            # nicht fast voll: bleibt
     (_stand(apopovic=96, tsaier=40), "tsaier"),        # fast voll, 56 Punkte Vorsprung
-    (_stand(apopovic=96, tsaier=80), None),            # nur 16 Punkte Vorsprung
-    (_stand(apopovic=96, tsaier=95), None),            # Ziel selbst fast voll
-    ({**_stand(apopovic=99), "tsaier": {"state": "unauthorized", "limits": None}}, None),
-    # Cloud 20.11.: erreicht -> kein Vorsprung noetig (apopovic 100 / tsaier 82)
-    (_stand(apopovic=100, tsaier=82), "tsaier"),
+    (_stand(apopovic=96, tsaier=80), None),            # 95-99: nur 16 Punkte Vorsprung
+    (_stand(apopovic=98, tsaier=95), None),            # 95-99: Ziel selbst fast voll
+    ({**_stand(apopovic=99.5), "tsaier": {"state": "unauthorized", "limits": None}}, None),
+    # Alex 20.11. „wechsel auf t saier bei 99%“ (Regel wie Login):
+    (_stand(apopovic=99, tsaier=82), "tsaier"),        # ab 99 % ohne Vorsprung
+    (_stand(apopovic=100, tsaier=97), "tsaier"),       # Ziel darf 95-98 sein
+    (_stand(apopovic=99, tsaier=99), None),            # Ziel selbst ab 99 %
+    (_stand(apopovic=99.2, tsaier=98.9), "tsaier"),    # weniger verbraucht, unter 99
+    ({"apopovic": {"state": "ok", "limits": {"used_pct": 90, "resets_at": 1, "erreicht": True}},
+      **_stand(tsaier=97)}, None),                      # erreicht, aber Ziel nicht weniger verbraucht
     ({"apopovic": {"state": "ok", "limits": {"used_pct": 90, "resets_at": 1, "erreicht": True}},
       **_stand(tsaier=82)}, "tsaier"),
-    (_stand(apopovic=100, tsaier=96), None),           # Ziel fast voll: auch dann nicht
-    (_stand(apopovic=99, tsaier=82), None),            # nur fast voll: 20 Punkte bleiben
 ])
 def test_regel_wie_codex_konto_wechsel(stand, ziel):
     assert ck.entscheide("apopovic", stand) == ziel
@@ -258,7 +261,7 @@ def test_kein_ziel_einmal_je_zustand_mit_ehrlichem_grund(konto):
         erg = ck.runde(melden=gemeldet.append, lauf=_lauf_mit({"apopovic": 97, "tsaier": 85}))
     assert erg["aktion"] == "kein_ziel"
     assert [e["art"] for e in gemeldet] == ["kein_ziel"]
-    assert "nur 12 Punkte" in gemeldet[0]["text"]
+    assert "nur 12 Punkte" in gemeldet[0]["text"] and "spaetestens wenn apopovic 99 % erreicht" in gemeldet[0]["text"]
     ck.runde(melden=gemeldet.append, lauf=_lauf_mit({"apopovic": 50, "tsaier": 85}))   # wieder Luft
     ck.runde(melden=gemeldet.append, lauf=_lauf_mit({"apopovic": 97, "tsaier": 85}))
     assert [e["art"] for e in gemeldet] == ["kein_ziel", "kein_ziel"]

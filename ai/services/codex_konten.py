@@ -37,6 +37,8 @@ logger = logging.getLogger(__name__)
 
 SCHWELLE_PCT = float(os.getenv("CODEX_WECHSEL_SCHWELLE_PCT", "95"))
 VORSPRUNG_PCT = float(os.getenv("CODEX_WECHSEL_VORSPRUNG_PCT", "20"))
+# Alex 20.11.: „wechsel auf t saier bei 99%“; Name und Vorgabe wie cloud-api (9c40247b, R85)
+HART_PCT = float(os.getenv("CODEX_WECHSEL_HART_PCT", "99"))
 MIN_ABSTAND_S = float(os.getenv("CODEX_WECHSEL_MIN_ABSTAND_S", "3600"))
 MESS_ABSTAND_S = float(os.getenv("CODEX_KONTEN_MESS_ABSTAND_S", "900"))
 SOFORT_SPERRE_S = 120.0     # Messung nach Kontingentfehler hoechstens alle 2 min
@@ -232,23 +234,36 @@ def _voll(l: Optional[dict]) -> bool:
     return bool(l) and (l["erreicht"] or l["used_pct"] >= SCHWELLE_PCT)
 
 
-def _erreicht(l: Optional[dict]) -> bool:
-    return bool(l) and (l["erreicht"] or l["used_pct"] >= 100)
+def _hart(l: Optional[dict]) -> bool:
+    """Ab HART_PCT oder bei rateLimitReachedType (Alex 20.11., Regel wie Login)."""
+    return bool(l) and (l["erreicht"] or l["used_pct"] >= HART_PCT)
 
 
 def entscheide(aktiv_name: str, stand: dict) -> Optional[str]:
-    """Zielkonto oder None. stand: konto -> {state, limits}."""
+    """Zielkonto oder None. stand: konto -> {state, limits}.
+
+    Regel wie Login (Zweig login/codex-wechsel-99, Alex 20.11.):
+    - unter SCHWELLE_PCT (95 %): bleiben,
+    - 95 bis unter 99 %: Ziel mit mindestens VORSPRUNG_PCT Punkten weniger,
+      das selbst nicht fast voll ist,
+    - ab 99 % oder erreicht: ohne Vorsprung jedes Konto, das weniger
+      verbraucht und selbst unter 99 % liegt.
+    Der Mindestabstand von 1 h gilt in `runde`."""
     a = stand.get(aktiv_name) or {}
     if not _voll(a.get("limits")):
         return None
     jetzt = a["limits"]["used_pct"]
-    # Cloud 20.11.: Ist das Kontingent ERREICHT, entfaellt der Vorsprung --
-    # sonst bliebe api-ai bei apopovic 100 % / tsaier 82 % tot stehen. Bei
-    # „fast voll“ (95-99 %) bleiben die 20 Punkte.
-    vorsprung = 0.0 if _erreicht(a["limits"]) else VORSPRUNG_PCT
-    gut = [k for k, s in stand.items()
-           if k != aktiv_name and s.get("state") == "ok" and s.get("limits")
-           and not _voll(s["limits"]) and jetzt - s["limits"]["used_pct"] >= vorsprung]
+    hart = _hart(a["limits"])
+
+    def passt(s: dict) -> bool:
+        l = s.get("limits")
+        if s.get("state") != "ok" or not l:
+            return False
+        if hart:
+            return not _hart(l) and l["used_pct"] < jetzt
+        return not _voll(l) and jetzt - l["used_pct"] >= VORSPRUNG_PCT
+
+    gut = [k for k, s in stand.items() if k != aktiv_name and passt(s)]
     if not gut:
         return None
     return min(gut, key=lambda k: (stand[k]["limits"]["used_pct"], stand[k]["limits"].get("resets_at") or 0))
@@ -260,7 +275,7 @@ def _pct(stand: dict, k: str) -> Optional[float]:
 
 
 def kein_ziel_text(aktiv_name: str, stand: dict) -> str:
-    """Wortlaut wie cloud-api `_kein_ziel_text` (R83): nennt den echten Grund."""
+    """Wortlaut wie cloud-api `_kein_ziel_text` (R83/R85): nennt den echten Grund."""
     l = (stand.get(aktiv_name) or {}).get("limits") or {}
     jetzt = l.get("used_pct", 100.0)
     wie = "erreicht" if l.get("erreicht") or jetzt >= 100 else "fast voll"
@@ -273,8 +288,8 @@ def kein_ziel_text(aktiv_name: str, stand: dict) -> str:
     if _voll(stand[best]["limits"]):
         return kopf + f"Auch {best} ist voll ({b:.0f} %). api-ai wartet bis zum Reset."
     return kopf + (f"Kein Wechsel: {best} steht bei {b:.0f} %, das sind nur {jetzt - b:.0f} Punkte "
-                   f"mehr Luft. Bei fast vollem Konto wird erst ab {VORSPRUNG_PCT:.0f} Punkten Abstand "
-                   f"gewechselt, bei erreichtem Kontingent sofort.")
+                   f"mehr Luft. Gewechselt wird ab {VORSPRUNG_PCT:.0f} Punkten Abstand, spaetestens "
+                   f"wenn {aktiv_name} {HART_PCT:.0f} % erreicht.")
 
 
 def _ereignis(z: dict, art: str, text: str, **daten) -> dict:
@@ -331,7 +346,8 @@ def _runde(melden, lauf) -> dict:
         else:
             von_pct, nach_pct = _pct(stand, a), _pct(stand, ziel)
             w = {"zeit": time.time(), "von": a, "nach": ziel, "von_pct": von_pct, "nach_pct": nach_pct,
-                 "grund": "erreicht" if (stand[a]["limits"] or {}).get("erreicht") else "fast_voll"}
+                 "grund": ("erreicht" if (stand[a]["limits"] or {}).get("erreicht")
+                       else "ab_99" if _hart(stand[a]["limits"]) else "fast_voll")}
             z["aktiv"], z["letzter_wechsel"], z["gemeldet"] = ziel, w["zeit"], ""
             z["wechsel"] = (z.get("wechsel") or [])[-9:] + [w]
             neu.append(_ereignis(z, "wechsel", f"api-ai codex: Wechsel {a} → {ziel} "
@@ -381,5 +397,5 @@ def uebersicht() -> dict:
         return {"aktiv": z.get("aktiv"), "konten": ks,
                 "wechsel": list(z.get("wechsel") or [])[-10:],
                 "ereignisse": list(z.get("ereignisse") or [])[-10:],
-                "regel": {"schwelle_pct": SCHWELLE_PCT, "vorsprung_pct": VORSPRUNG_PCT,
+                "regel": {"schwelle_pct": SCHWELLE_PCT, "vorsprung_pct": VORSPRUNG_PCT, "hart_pct": HART_PCT,
                           "min_abstand_s": MIN_ABSTAND_S, "mess_abstand_s": MESS_ABSTAND_S}}
