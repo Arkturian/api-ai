@@ -420,7 +420,7 @@ def weg_zustand() -> dict:
         bis = a.get("bis")
         try:
             vorbei = bool(bis) and datetime.fromisoformat(bis) <= _jetzt()
-        except ValueError:
+        except (ValueError, TypeError):
             vorbei = False
         if not vorbei:
             aus.update(zustand="kontingent", bis=bis)

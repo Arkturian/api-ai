@@ -13,13 +13,16 @@ from ai import auth_guard as ag
 from ai.services import ki_wege, openai_text as ot
 
 KEY = "sk-kunde-geheim-1234567890"
+INSTANZ = "instanzschluessel"
+BETREIBER = "betreiberschluessel"
 
 
 @pytest.fixture(autouse=True)
 def umgebung(monkeypatch, tmp_path):
-    for n in ("REALTIME_AUTH_ISSUER", "REALTIME_AUTH_JWKS_URL", "REALTIME_AUTH_GRANT_URL", "API_ACCESS_KEY",
+    for n in ("REALTIME_AUTH_ISSUER", "REALTIME_AUTH_JWKS_URL", "REALTIME_AUTH_GRANT_URL",
               "REALTIME_GRANT_SERVICE_KEY", ot.ANFRAGEN_ENV, "AGY_RUN_AS_USER"):
         monkeypatch.delenv(n, raising=False)
+    monkeypatch.setenv("API_ACCESS_KEY", INSTANZ)
     monkeypatch.setenv("OPENAI_API_KEY", KEY)
     monkeypatch.setenv(ot.GRENZE_ENV, "0.5")
     monkeypatch.setenv("NARRATE_JOBS_DIR", str(tmp_path / "jobs"))
@@ -28,6 +31,11 @@ def umgebung(monkeypatch, tmp_path):
 
 @pytest.fixture
 def client():
+    return TestClient(main.app, raise_server_exceptions=False, headers={"X-API-KEY": INSTANZ})
+
+
+@pytest.fixture
+def anonym():
     return TestClient(main.app, raise_server_exceptions=False)
 
 
@@ -278,12 +286,66 @@ def test_idempotenz_nach_tagesgrenze_wiederholbar(monkeypatch, client, netz):
     assert client.post("/ai/openai", json=b).status_code == 200
 
 
-def test_kundeninstanz_verlangt_instanzschluessel(monkeypatch, client, netz):
-    monkeypatch.setenv("API_ACCESS_KEY", "instanz")
-    assert client.post("/ai/openai", json={}).status_code == 401
-    assert client.post("/ai/openai", json={"prompt": "x"}, headers={"X-API-KEY": "falsch"}).status_code == 401
+def test_kundeninstanz_verlangt_instanzschluessel(anonym, netz):
+    assert anonym.post("/ai/openai", json={}).status_code == 401
+    assert anonym.post("/ai/openai", json={"prompt": "x"}, headers={"X-API-KEY": "falsch"}).status_code == 401
     assert netz.anfragen == []
-    assert client.post("/ai/openai", json={"prompt": "x"}, headers={"X-API-KEY": "instanz"}).status_code == 200
+    assert anonym.post("/ai/openai", json={"prompt": "x"}, headers={"X-API-KEY": INSTANZ}).status_code == 200
+
+
+def test_ohne_api_access_key_nicht_offen(monkeypatch, anonym, netz):
+    """P1 (Cloud-Security): Das Bezahltor laesst ohne API_ACCESS_KEY alles durch."""
+    monkeypatch.delenv("API_ACCESS_KEY")
+    monkeypatch.setenv("REALTIME_GRANT_SERVICE_KEY", BETREIBER)
+    assert anonym.post("/ai/openai", json={"prompt": "x"}).status_code == 401
+    assert anonym.post("/ai/openai", json={}).status_code == 401
+    assert netz.anfragen == []
+    assert anonym.post("/ai/openai", json={"prompt": "x"}, headers={"X-API-KEY": BETREIBER}).status_code == 200
+
+
+def test_ganz_ohne_schluessel_503(monkeypatch, anonym, netz):
+    monkeypatch.delenv("API_ACCESS_KEY")
+    r = anonym.post("/ai/openai", json={"prompt": "x"})
+    assert (r.status_code, r.json()["detail"]["error"]) == (503, "operator_key_not_configured")
+    assert netz.anfragen == []
+
+
+@pytest.mark.parametrize("methode,pfad", [("get", "/ai/openai/cost-status"), ("post", "/ai/openai")])
+def test_beide_schluessel_gesetzt(monkeypatch, anonym, netz, methode, pfad):
+    """P2 (Cloud-Security): Der Betreiberschluessel darf nicht am Bezahltor scheitern."""
+    monkeypatch.setenv("REALTIME_GRANT_SERVICE_KEY", BETREIBER)
+    json_ = {"json": {"prompt": "x"}} if methode == "post" else {}
+    for kopf in (INSTANZ, BETREIBER, f"  {INSTANZ}  "):
+        assert getattr(anonym, methode)(pfad, headers={"X-API-KEY": kopf}, **json_).status_code == 200, kopf
+    for kopf in ("falsch", "\u00e4".encode("latin-1")):
+        assert getattr(anonym, methode)(pfad, headers={"X-API-KEY": kopf}, **json_).status_code == 401
+    assert getattr(anonym, methode)(pfad, **json_).status_code == 401
+
+
+def test_betreiberschluessel_oeffnet_keinen_anderen_bezahlpfad(monkeypatch, anonym):
+    monkeypatch.setenv("REALTIME_GRANT_SERVICE_KEY", BETREIBER)
+    for pfad in ("/ai/m3", "/ai/deepseek", "/ai/genimage", "/ai/openaix"):
+        r = anonym.post(pfad, json={}, headers={"X-API-KEY": BETREIBER})
+        assert r.status_code in (401, 404), pfad
+        if pfad != "/ai/openaix":
+            assert r.json()["detail"]["error"] == "api_key_required"
+
+
+def test_jede_openai_route_hat_ihr_tor():
+    from fastapi.routing import APIRoute
+    routen = [r for r in main.app.routes if isinstance(r, APIRoute)
+              and (r.path == "/ai/openai" or r.path.startswith("/ai/openai/"))]
+    assert len(routen) == 3
+    for r in routen:
+        assert any(d.dependency is ag.betreiber_oder_instanz for d in r.dependencies), r.path
+
+
+def test_kaputtes_bis_wirft_nicht(monkeypatch, client):
+    ot._dir().mkdir(parents=True, exist_ok=True)
+    ot._schreiben(ot._ausgangsdatei(), {"letzter_ausgang": "kontingent", "bis": "2026-11-21T10:00:00"})
+    assert ot.weg_zustand()["zustand"] == "kontingent"
+    ot._schreiben(ot._ausgangsdatei(), {"letzter_ausgang": "kontingent", "bis": "unsinn"})
+    assert ot.weg_zustand()["zustand"] == "kontingent"
 
 
 def test_ist_bezahlpfad():
@@ -298,28 +360,28 @@ def test_cost_status_nicht_von_kennung_verdeckt(monkeypatch, client):
 
 
 @pytest.mark.parametrize("pfad", ["/ai/openai/cost-status", "/ai/openai/sprechstil-0001", "/ai/wege"])
-def test_status_nicht_oeffentlich(monkeypatch, client, pfad):
+def test_status_nicht_oeffentlich(monkeypatch, anonym, pfad):
     monkeypatch.setenv("REALTIME_GRANT_SERVICE_KEY", "dienst")
-    assert client.get(pfad, headers={"X-Real-IP": "203.0.113.9"}).status_code == 401
+    assert anonym.get(pfad, headers={"X-Real-IP": "203.0.113.9"}).status_code == 401
 
 
 @pytest.mark.parametrize("pfad", ["/ai/openai/cost-status", "/ai/wege"])
-def test_dieser_host_ist_keine_ausnahme(monkeypatch, client, pfad):
+def test_dieser_host_ist_keine_ausnahme(monkeypatch, anonym, pfad):
     monkeypatch.setenv("REALTIME_GRANT_SERVICE_KEY", "dienst")
     monkeypatch.setattr(ag, "von_diesem_host", lambda r: True)
-    assert client.get(pfad).status_code == 401
+    assert anonym.get(pfad).status_code == 401
 
 
-def test_wege_mit_instanzschluessel(monkeypatch, client):
-    monkeypatch.setenv("API_ACCESS_KEY", "instanz")
+def test_wege_mit_instanzschluessel(monkeypatch, anonym):
     monkeypatch.setattr(main, "_cli_status", lambda n: {"ok": False, "error": "codex: not found on PATH"})
-    assert client.get("/ai/wege", headers={"X-API-KEY": "instanz"}).status_code == 200
-    assert client.get("/ai/wege", headers={"X-API-KEY": "falsch"}).status_code == 401
-    assert client.get("/ai/wege", headers={"X-API-KEY": "\u00e4".encode("latin-1")}).status_code == 401
+    assert anonym.get("/ai/wege", headers={"X-API-KEY": INSTANZ}).status_code == 200
+    assert anonym.get("/ai/wege", headers={"X-API-KEY": "falsch"}).status_code == 401
+    assert anonym.get("/ai/wege", headers={"X-API-KEY": "\u00e4".encode("latin-1")}).status_code == 401
 
 
-def test_wege_ohne_jeden_schluessel_503(client):
-    r = client.get("/ai/wege")
+def test_wege_ohne_jeden_schluessel_503(monkeypatch, anonym):
+    monkeypatch.delenv("API_ACCESS_KEY")
+    r = anonym.get("/ai/wege")
     assert (r.status_code, r.json()["detail"]["error"]) == (503, "operator_key_not_configured")
 
 

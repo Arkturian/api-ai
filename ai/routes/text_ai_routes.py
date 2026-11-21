@@ -3803,7 +3803,7 @@ async def _openai_einmal(prompt: "Prompt", model: Optional[str]) -> AIResponse:
                       effort_applied=None if prompt.effort else r["effort"])
 
 
-@router.post("/openai", response_model=AIResponse)
+@router.post("/openai", response_model=AIResponse, dependencies=[Depends(_ag.betreiber_oder_instanz)])
 async def openai_text_endpoint(
     prompt: Prompt,
     model: Optional[str] = None,

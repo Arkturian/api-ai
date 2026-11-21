@@ -273,6 +273,10 @@ async def _require_api_key(request, call_next):
     pfad = request.url.path
     if not _ist_bezahlpfad(pfad) or pfad in _OFFENE_PFADE:
         return await call_next(request)
+    # #3640: Diese Routen pruefen selbst (betreiber_oder_instanz), auch ohne
+    # gesetzten API_ACCESS_KEY. Hier wuerde nur der Betreiberschluessel scheitern.
+    if pfad == "/ai/openai" or pfad.startswith("/ai/openai/"):
+        return await call_next(request)
     geliefert = request.headers.get(_KEY_HEADER) or ""
     # `compare_digest` statt `==`: gleiche Laufzeit unabhaengig davon,
     # an welcher Stelle zwei Schluessel sich unterscheiden.
