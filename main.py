@@ -293,6 +293,46 @@ async def _require_api_key(request, call_next):
     return await call_next(request)
 
 
+# #3607: Die Modellrouten starten eine CLI auf dem Abo der Instanz. Auf unserem
+# Kern bleiben sie vorerst ohne Schluessel (#1755). Eine Kundeninstanz (eigene
+# auth-api) verlangt ihn immer; fehlt er dort, bleiben die Routen zu.
+_MODELLPFADE = ("/ai/chatgpt", "/ai/claude", "/ai/gemini", "/ai/grok")
+
+
+def _modelltor_gilt(pfad: str) -> bool:
+    if pfad in _OFFENE_PFADE:
+        return False
+    if not any(pfad == k or pfad.startswith(k + "/") for k in _MODELLPFADE):
+        return False
+    return auth_konfig.zustand() != auth_konfig.VORGABE
+
+
+@app.middleware("http")
+async def _modelltor(request, call_next):
+    pfad = request.url.path
+    if not _modelltor_gilt(pfad):
+        return await call_next(request)
+    soll = os.getenv(_API_KEY_ENV)
+    if not soll:
+        logging.getLogger("api-ai.authwatch").error(
+            "GESPERRT path=%s: Kundeninstanz ohne %s (#3607)", pfad, _API_KEY_ENV)
+        return JSONResponse(status_code=503, content={"detail": {
+            "error": "api_key_not_configured",
+            "hint": "Diese Instanz braucht API_ACCESS_KEY fuer die Modellrouten.",
+        }})
+    kopf = request.headers.get(_KEY_HEADER) or ""
+    if not (kopf and hmac.compare_digest(kopf, soll)):
+        logging.getLogger("api-ai.authwatch").warning(
+            "GESPERRT path=%s client=%s (#3607 — %s)", pfad,
+            (request.client.host if request.client else "?"),
+            "kein Schluessel" if not kopf else "falscher Schluessel")
+        return JSONResponse(status_code=401, content={"detail": {
+            "error": "api_key_required",
+            "hint": "Dieser Dienst verlangt den Kopf `X-API-KEY`.",
+        }})
+    return await call_next(request)
+
+
 @app.middleware("http")
 async def _log_auth_presence(request, call_next):
     try:

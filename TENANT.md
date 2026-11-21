@@ -20,8 +20,9 @@ dessen Tests grün sind. Der Tag wird bewegt, nicht neu erfunden.
 API_ACCESS_KEY=<je Instanz erzeugen>       # openssl rand -hex 24
 ```
 
-Ohne `API_ACCESS_KEY` ist **jeder** `/ai/*`-Endpunkt offen erreichbar; der
-Start warnt dann laut ins Journal. **Je Instanz erzeugen, niemals aus einer
+Ohne `API_ACCESS_KEY` antworten die Modellrouten (`/ai/chatgpt`, `/ai/claude`,
+`/ai/gemini`, `/ai/grok`) einer Instanz mit eigener auth-api mit 503 (#3607), die
+Bezahlpfade sind dann offen; der Start warnt laut ins Journal. **Je Instanz erzeugen, niemals aus einer
 Vorlage erben** — sonst tragen alle Kunden denselben Schlüssel.
 
 ```bash
