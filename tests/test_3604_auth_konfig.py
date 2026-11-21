@@ -214,10 +214,27 @@ def test_zeigt_auf_betreiber(monkeypatch, issuer, feld, wert):
 
 
 @pytest.mark.parametrize("issuer", ["auth-api.arkturian.com", "auth-api.arkserver.arkturian.com",
-                                    "https://auth-api.arkturian.com", "arkturian.com"])
+                                    "https://auth-api.arkturian.com", "arkturian.com",
+                                    "www.arkturian.com", "arkserver.arkturian.com",
+                                    "cloud-api.arkserver.arkturian.com", "WWW.arkturian.com."])
 def test_aussteller_des_betreibers_mit_lokalen_adressen(monkeypatch, issuer):
     setzen(monkeypatch, **{**LOKAL, ak.ISSUER_ENV: issuer})
     assert ak.befund()["zeigt_auf_betreiber"] == [ak.ISSUER_ENV]
+
+
+@pytest.mark.parametrize("host", ["www.arkturian.com", "arkserver.arkturian.com",
+                                  "cloud-api.arkserver.arkturian.com"])
+def test_alle_drei_gemeinsam_auf_betreiberhost(monkeypatch, host):
+    url = f"https://{host}/x"
+    setzen(monkeypatch, **{ak.ISSUER_ENV: host, ak.JWKS_ENV: url, ak.GRANT_ENV: url})
+    assert ak.befund()["zeigt_auf_betreiber"] == list(DREI)
+
+
+@pytest.mark.parametrize("issuer", ["david.arkturian.com", "agentos.oneal.arkturian.com",
+                                    "ele.arkturian.com", "p3.arkturian.com"])
+def test_die_vier_kundennamen_bleiben_eigen(monkeypatch, issuer):
+    setzen(monkeypatch, **{**LOKAL, ak.ISSUER_ENV: issuer})
+    assert ak.zustand() == ak.EIGEN
 
 
 def test_journal_einmal_und_ohne_werte(monkeypatch, caplog):

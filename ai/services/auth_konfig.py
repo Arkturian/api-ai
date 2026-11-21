@@ -49,6 +49,9 @@ EIGEN = "eigen"
 UNVOLLSTAENDIG = "unvollstaendig"
 FEHLERCODE = "realtime_auth_unvollstaendig"
 
+# Nie der Name einer Kundeninstanz (Cloud-Security, #3604).
+_BETREIBER_HOSTS = frozenset({"arkturian.com", "www.arkturian.com", "arkserver.arkturian.com"})
+
 _gemeldet = False
 
 
@@ -74,8 +77,9 @@ def _unter_arkturian(host: str) -> bool:
 def _ist_betreiber_aussteller(host: Optional[str]) -> bool:
     if not host:
         return True
-    return host == "arkturian.com" or (
-        host.startswith("auth-api.") and host.endswith(".arkturian.com"))
+    return (host in _BETREIBER_HOSTS
+            or host.endswith(".arkserver.arkturian.com")
+            or (host.startswith("auth-api.") and host.endswith(".arkturian.com")))
 
 
 def _url_zeigt_auf_betreiber(url: str, eigener_host: Optional[str]) -> bool:
