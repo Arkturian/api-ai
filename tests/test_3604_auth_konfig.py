@@ -245,3 +245,127 @@ def test_health_und_token_route(monkeypatch, env, erwartet):
         r = TestClient(main.app).post("/ai/realtime/token", headers={"Authorization": BEARER}, json={})
         assert r.status_code == 503
         assert "realtime_auth_unvollstaendig" in r.text
+
+
+# --- Knowledge und ArTrack: Koordinaten gehen nicht an uns -----------------
+
+KOORD = {"lat": 46.6211, "lon": 14.3055}
+GEO = [
+    ("knowledge_query", "_tool_knowledge_query", "KNOWLEDGE_API_URL",
+     "https://knowledge-api.arkturian.com", "/api/v1/knowledge/near"),
+    ("pois_near", "_tool_pois_near", "ARTRACK_API_URL",
+     "https://api-artrack.arkturian.com", "/places/nearby/compact"),
+    ("osm_nearby", "_tool_osm_nearby", "ARTRACK_API_URL",
+     "https://api-artrack.arkturian.com", "/osm/nearby/compact"),
+]
+
+
+class _GeoAntwort:
+    status_code = 200
+
+    def raise_for_status(self):
+        return None
+
+    def json(self):
+        return {"items": [], "text": "", "count": 0}
+
+
+def _geo_client(ziele):
+    class Client:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def get(self, url, params=None, headers=None):
+            ziele.append(url)
+            return _GeoAntwort()
+
+    return Client
+
+
+@pytest.fixture
+def rr(monkeypatch):
+    from ai.routes import realtime_routes as m
+    for n in ("KNOWLEDGE_API_URL", "ARTRACK_API_URL"):
+        monkeypatch.delenv(n, raising=False)
+    monkeypatch.setattr(m, "_dienst_fehlt_gemeldet", set())
+    return m
+
+
+def _nicht_eingerichtet(out):
+    return out["status"] == "unavailable" and out["count"] == 0 and "NICHT" in out["hint"]
+
+
+@pytest.mark.parametrize("tool,fn,env,vorgabe,pfad", GEO)
+def test_eigene_instanz_ohne_dienst_schickt_nichts(monkeypatch, kein_netz, rr, tool, fn, env, vorgabe, pfad):
+    setzen(monkeypatch, **LOKAL)
+    assert _nicht_eingerichtet(asyncio.run(getattr(rr, fn)(dict(KOORD))))
+
+
+@pytest.mark.parametrize("tool,fn,env,vorgabe,pfad", GEO)
+def test_eigene_instanz_mit_betreiberadresse_schickt_nichts(monkeypatch, kein_netz, rr, tool, fn, env, vorgabe, pfad):
+    setzen(monkeypatch, **{**LOKAL, env: vorgabe})
+    assert _nicht_eingerichtet(asyncio.run(getattr(rr, fn)(dict(KOORD))))
+
+
+@pytest.mark.parametrize("namen", HALB)
+@pytest.mark.parametrize("tool,fn,env,vorgabe,pfad", GEO)
+def test_halbe_konfiguration_schickt_nichts(monkeypatch, kein_netz, rr, tool, fn, env, vorgabe, pfad, namen):
+    setzen(monkeypatch, **{n: LOKAL[n] for n in namen})
+    assert _nicht_eingerichtet(asyncio.run(getattr(rr, fn)(dict(KOORD))))
+
+
+@pytest.mark.parametrize("tool,fn,env,vorgabe,pfad", GEO)
+def test_eigene_instanz_mit_eigenem_dienst(monkeypatch, rr, tool, fn, env, vorgabe, pfad):
+    setzen(monkeypatch, **{**LOKAL, env: "http://127.0.0.1:9000/"})
+    ziele = []
+    monkeypatch.setattr(httpx, "AsyncClient", _geo_client(ziele))
+    asyncio.run(getattr(rr, fn)(dict(KOORD)))
+    assert ziele == [f"http://127.0.0.1:9000{pfad}"]
+
+
+def test_eigener_name_unter_arkturian_bleibt_erlaubt(monkeypatch, rr):
+    setzen(monkeypatch, **{**LOKAL, ak.ISSUER_ENV: "ele.arkturian.com",
+                           "ARTRACK_API_URL": "https://ele.arkturian.com/artrack"})
+    ziele = []
+    monkeypatch.setattr(httpx, "AsyncClient", _geo_client(ziele))
+    asyncio.run(rr._tool_osm_nearby(dict(KOORD)))
+    assert ziele == ["https://ele.arkturian.com/artrack/osm/nearby/compact"]
+
+
+@pytest.mark.parametrize("tool,fn,env,vorgabe,pfad", GEO)
+def test_unser_kern_nutzt_die_vorgabe(monkeypatch, rr, tool, fn, env, vorgabe, pfad):
+    ziele = []
+    monkeypatch.setattr(httpx, "AsyncClient", _geo_client(ziele))
+    asyncio.run(getattr(rr, fn)(dict(KOORD)))
+    assert ziele == [f"{vorgabe}{pfad}"]
+
+
+def test_knowledge_ohne_koordinaten_bleibt_wie_bisher(monkeypatch, kein_netz, rr):
+    setzen(monkeypatch, **LOKAL)
+    out = asyncio.run(rr._tool_knowledge_query({}))
+    assert out["count"] == 0 and "status" not in out
+
+
+def test_meldung_einmal_und_ohne_koordinaten(monkeypatch, kein_netz, rr, caplog):
+    setzen(monkeypatch, **LOKAL)
+    with caplog.at_level(logging.WARNING, logger=rr.logger.name):
+        asyncio.run(rr._tool_osm_nearby(dict(KOORD)))
+        asyncio.run(rr._tool_pois_near(dict(KOORD)))
+    zeilen = [r.getMessage() for r in caplog.records if "ARTRACK_API_URL" in r.getMessage()]
+    assert len(zeilen) == 1 and "46.62" not in zeilen[0]
+
+
+def test_werkzeug_route_ohne_dienst(monkeypatch, kein_netz, rr):
+    import main
+    setzen(monkeypatch, **LOKAL)
+    r = TestClient(main.app).post("/ai/realtime/tool/osm_nearby",
+                                  json={"call_id": "c1", "arguments": dict(KOORD)})
+    assert r.status_code == 200
+    d = r.json()
+    assert d["ok"] is True and d["result"]["status"] == "unavailable"

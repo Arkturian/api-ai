@@ -42,9 +42,13 @@ betroffene Endpunkt scheitert **laut** beim Aufruf (`openai_api_key_missing`
 CLOUD_API_URL=https://<lokal>
 STORAGE_API_URL=https://<lokal>
 STORAGE_API_KEY=<je Instanz>       # PFLICHT, siehe unten
-KNOWLEDGE_API_URL=https://<lokal>
-ARTRACK_API_URL=https://<lokal>
+KNOWLEDGE_API_URL=https://<lokal>   # ohne Wert: knowledge_query aus
+ARTRACK_API_URL=https://<lokal>     # ohne Wert: pois_near und osm_nearby aus
 ```
+
+Eine Instanz mit eigener auth-api faellt bei Knowledge und ArTrack nicht auf uns
+zurueck (#3604): Ohne eigenen Wert sind die Werkzeuge aus und melden
+`status: unavailable`, die Koordinaten gehen nirgends hin.
 
 **`STORAGE_API_KEY` ist Pflicht, auch wenn die Instanz Storage nicht nutzt.**
 Ist er unbesetzt, greift ein fest eingebauter Rückfallwert, und die Instanz

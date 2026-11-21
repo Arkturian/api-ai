@@ -124,6 +124,22 @@ def zustand() -> str:
     return befund()["zustand"]
 
 
+def dienst_basis(env: str, vorgabe: str) -> Optional[str]:
+    """Basisadresse eines Nachbardienstes, oder None, wenn es ihn hier nicht gibt.
+
+    Die Vorgabe (unsere Adresse) gilt nur auf unserem Kern. Eine Instanz mit
+    eigener auth-api braucht einen eigenen Wert; ohne ihn oder mit einem Wert,
+    der auf uns zeigt, ist das Werkzeug aus, statt Daten an uns zu schicken."""
+    wert = (os.environ.get(env) or "").strip().rstrip("/")
+    if zustand() == VORGABE:
+        return wert or vorgabe.rstrip("/")
+    if not wert:
+        return None
+    issuer = (os.environ.get(ISSUER_ENV) or "").strip()
+    eigener_host = _host(issuer) if issuer else None
+    return None if _url_zeigt_auf_betreiber(wert, eigener_host) else wert
+
+
 def unvollstaendig() -> bool:
     """True, wenn gerade kein Bearer-Token hinaus darf. Meldet das einmal je
     Prozess ins Journal."""
