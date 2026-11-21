@@ -1,8 +1,10 @@
 """#3607: Auf einer Kundeninstanz startet niemand ohne Schluessel eine Modell-CLI."""
 import asyncio
 import itertools
+import os
 import subprocess
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 
@@ -159,3 +161,95 @@ def test_betreiberrouten_anonym_zu(monkeypatch, client, pfad, rumpf, dienstschlu
         monkeypatch.setenv("REALTIME_GRANT_SERVICE_KEY", dienstschluessel)
     r = client.post(pfad, headers=kopf, json=rumpf)
     assert r.status_code in (401, 403, 503), r.text
+
+
+# --- Prompt, Systemprompt und effort werden nie zu CLI-Optionen (Review) ----
+
+BOESE = '--settings={"apiKeyHelper":"id"}'
+
+
+@pytest.fixture
+def cli_fang(monkeypatch):
+    from ai.routes import text_ai_routes as t
+    faenge = []
+
+    def fang(cmd, env=None, timeout=300, cwd="/", input=None, phasen=None):
+        eintrag = {"cmd": list(cmd), "input": input, "datei": None, "modus": None}
+        if "--prompt-file" in cmd:
+            pfad = cmd[cmd.index("--prompt-file") + 1]
+            eintrag["pfad"] = pfad
+            eintrag["datei"] = open(pfad, encoding="utf-8").read()
+            eintrag["modus"] = os.stat(pfad).st_mode & 0o777
+        faenge.append(eintrag)
+        return subprocess.CompletedProcess(cmd, 1, "", "abgebrochen im Test")
+
+    monkeypatch.setattr(t, "_run_cli_with_pgid", fang)
+    monkeypatch.setattr(t, "_claude_konto_vorab", lambda: None)
+    monkeypatch.delenv("CLAUDE_ROUTE", raising=False)
+    monkeypatch.delenv("GEMINI_FORWARD_URL", raising=False)
+    return faenge
+
+
+def test_claude_prompt_geht_ueber_stdin(client, cli_fang):
+    client.post("/ai/claude", json={"prompt": BOESE})
+    assert len(cli_fang) == 1
+    f = cli_fang[0]
+    assert f["cmd"][:2] == ["claude", "-p"] and f["input"] == BOESE
+    assert not any(BOESE in a for a in f["cmd"])
+
+
+def test_claude_systemprompt_ist_ein_argument(client, cli_fang):
+    client.post("/ai/claude", json={"prompt": "x", "system": "--mcp-config=/tmp/x"})
+    cmd = cli_fang[0]["cmd"]
+    assert "--system-prompt=--mcp-config=/tmp/x" in cmd
+    assert "--mcp-config=/tmp/x" not in cmd and "--system-prompt" not in cmd
+
+
+def test_grok_prompt_geht_ueber_datei(client, cli_fang):
+    client.post("/ai/grok", json={"prompt": "--always-approve"})
+    assert len(cli_fang) == 1
+    f = cli_fang[0]
+    assert "-p" not in f["cmd"] and "--always-approve" not in f["cmd"]
+    assert f["datei"] == "--always-approve" and f["modus"] == 0o600
+    assert not os.path.exists(f["pfad"])
+
+
+@pytest.mark.parametrize("route", ROUTEN)
+@pytest.mark.parametrize("effort", ["--evil", "-x", "a b", "x;id", "a" * 25])
+def test_ungueltiger_effort(client, cli_fang, route, effort):
+    r = client.post(route, json={"prompt": "x", "effort": effort})
+    assert r.status_code == 422 and r.json()["detail"]["error"] == "invalid_effort"
+    assert cli_fang == []
+
+
+@pytest.mark.parametrize("effort", ["low", "medium", "xhigh", " High "])
+def test_gueltiger_effort(effort):
+    from ai.routes.text_ai_routes import Prompt, _cli_eingaben_pruefen
+    _cli_eingaben_pruefen(Prompt(prompt="x", effort=effort))
+
+
+@pytest.mark.parametrize("route,env,wert", [
+    ("/ai/claude", "CLAUDE_ROUTE", "codex"),
+    ("/ai/gemini", "GEMINI_FORWARD_URL", "http://127.0.0.1:9/nie"),
+])
+@pytest.mark.parametrize("feld,wert_feld,fehler", [
+    ("model", "--sandbox", "invalid_model_name"), ("effort", "--evil", "invalid_effort")])
+def test_pruefung_vor_umleitung(monkeypatch, client, cli_fang, route, env, wert, feld, wert_feld, fehler):
+    monkeypatch.setenv(env, wert)
+    monkeypatch.setattr(httpx, "AsyncClient", lambda *a, **k: pytest.fail("weitergeleitet"))
+    r = client.post(route, json={"prompt": "x", feld: wert_feld})
+    assert r.status_code == 422 and r.json()["detail"]["error"] == fehler
+
+
+def test_vision_prueft_den_modellnamen(monkeypatch, client):
+    from ai.routes import text_ai_routes as t
+    monkeypatch.setenv("REALTIME_GRANT_SERVICE_KEY", "dienst")
+    r = client.post("/ai/gemini/vision", headers={"X-API-KEY": "dienst"},
+                    json={"prompt": "x", "model": "--sandbox"})
+    assert r.status_code == 422 and r.json()["detail"]["error"] == "invalid_model_name"
+
+
+def test_leerzeichen_als_schluessel_gilt_als_fehlend(monkeypatch, client):
+    kunde(monkeypatch, schluessel="   ")
+    r = client.post("/ai/chatgpt", headers={"X-API-KEY": "   "}, json={"prompt": "x"})
+    assert r.status_code == 503

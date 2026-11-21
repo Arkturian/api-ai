@@ -312,7 +312,7 @@ async def _modelltor(request, call_next):
     pfad = request.url.path
     if not _modelltor_gilt(pfad):
         return await call_next(request)
-    soll = os.getenv(_API_KEY_ENV)
+    soll = (os.getenv(_API_KEY_ENV) or "").strip()
     if not soll:
         logging.getLogger("api-ai.authwatch").error(
             "GESPERRT path=%s: Kundeninstanz ohne %s (#3607)", pfad, _API_KEY_ENV)
