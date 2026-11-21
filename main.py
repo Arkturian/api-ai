@@ -30,7 +30,7 @@ import hmac
 import logging
 import os
 from ai.provider_config import providers_status as _providers_status
-from ai.services import auth_konfig
+from ai.services import auth_konfig, kern_tor
 
 # Import routes
 from ai.routes import text_ai_routes, image_ai_routes, audio_ai_routes, dialog_routes, video_ai_routes, narration_routes, image_generation_routes, translate_routes, internal_routes, dashboard_routes, music_ai_routes, realtime_routes, hunyuan3d_routes, kling_routes, flow_routes
@@ -330,6 +330,18 @@ async def _modelltor(request, call_next):
             "error": "api_key_required",
             "hint": "Dieser Dienst verlangt den Kopf `X-API-KEY`.",
         }})
+    return await call_next(request)
+
+
+# #1184: Nur Beobachtung. Misst, wen ein Tor auf dem Kern sperren wuerde, und
+# sperrt selbst niemanden. Die Stimme hat ihren eigenen Grant-Weg.
+_KERN_TOR_PFADE = _MODELLPFADE + _BEZAHLPFADE
+_KERN_TOR_OFFEN = _OFFENE_PFADE + ("/ai/realtime/live",)
+
+
+@app.middleware("http")
+async def _kern_tor_beobachtung(request, call_next):
+    kern_tor.beobachten(request, _KERN_TOR_PFADE, _KERN_TOR_OFFEN)
     return await call_next(request)
 
 

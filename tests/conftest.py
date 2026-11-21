@@ -53,6 +53,9 @@ def _kundendaten(monkeypatch, request):
 
 def pytest_configure(config):
     config.addinivalue_line(
+        "markers", "kern_tor_echt: echte Hintergrund-Auswertung der Kern-Tor-Beobachtung (#1184)",
+    )
+    config.addinivalue_line(
         "markers",
         "ohne_kundendaten: prueft den fail-closed-Pfad ohne Marken/Kategorien",
     )
@@ -96,6 +99,15 @@ def _verbrauch_in_tmp(monkeypatch, tmp_path):
     """Der Bildverbrauch (13.11.2026) schreibt nach VERBRAUCH_DIR. Kein Test
     darf in /var/lib/api-ai/verbrauch landen und echte Zahlen verfaelschen."""
     monkeypatch.setenv("VERBRAUCH_DIR", str(tmp_path / "verbrauch"))
+
+
+@pytest.fixture(autouse=True)
+def _kern_tor_still(request, monkeypatch):
+    """Die Beobachtung laeuft neben der Anfrage und wuerde in Tests JWKS holen."""
+    if request.node.get_closest_marker("kern_tor_echt"):
+        return
+    from ai.services import kern_tor
+    monkeypatch.setattr(kern_tor, "_starten", lambda anfrage: None)
 
 
 @pytest.fixture(autouse=True)
