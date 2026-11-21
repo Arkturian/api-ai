@@ -97,6 +97,30 @@ def codex_als_benutzer(cmd, env):
     return ["sudo", "-n", "-u", user, "-H", "env"] + umgebung + [binaer] + list(cmd[1:])
 
 
+def _cli_fehler(weg: str, status: int, text: str, felder: Optional[dict] = None) -> HTTPException:
+    """#3645: feste Codes fuer die Kette der cloud-api. Ist der Fehler weder
+    Kontingent noch Anmeldung, bleibt die Antwort wie bisher."""
+    from ai.services import ki_wege
+    e = ki_wege.fehler(weg, status, text, felder)
+    return e if e is not None else HTTPException(status_code=status, detail=text)
+
+
+def _cli_fehler_agy(meldung: str, status) -> Optional[HTTPException]:
+    from ai.services import ki_wege
+    return ki_wege.fehler("agy", 502, str(meldung or ""),
+                          {"alt_error": "agy_error", "agy_status": status, "agy_message": meldung})
+
+
+def _weg_ok(weg: str) -> None:
+    from ai.services import ki_wege
+    ki_wege.ausgang(weg, "ok")
+
+
+def _cli_nicht_installiert(weg: str, text: str) -> HTTPException:
+    from ai.services import ki_wege
+    return ki_wege.nicht_installiert(weg, text)
+
+
 def _codex_kontingent_pruefen(result, cmd=()) -> None:
     """#3165: Scheitert ein codex-Lauf am Kontingent, misst die Kontowahl
     sofort (im Hintergrund) statt bis zur naechsten Runde zu warten."""
@@ -2173,7 +2197,7 @@ async def _chatgpt_einmal(
             if result.returncode != 0:
                 error_msg = result.stderr or "Unknown error from codex CLI (empty response)"
                 logger.error(f"Codex CLI error (empty stdout): {error_msg}")
-                raise HTTPException(status_code=500, detail=f"Codex CLI error: {error_msg}")
+                raise _cli_fehler("codex", 500, f"Codex CLI error: {error_msg}")
             raise HTTPException(status_code=500, detail="Codex CLI returned empty response")
 
         # Parse JSONL output - each line is a separate JSON object
@@ -2241,10 +2265,7 @@ async def _chatgpt_einmal(
                 )
             if upstream_error:
                 logger.error(f"Codex upstream error: {upstream_error}")
-                raise HTTPException(
-                    status_code=502,
-                    detail=f"Codex CLI upstream error: {upstream_error}",
-                )
+                raise _cli_fehler("codex", 502, f"Codex CLI upstream error: {upstream_error}")
             logger.error(f"No agent_message found in Codex output: {raw_output[:500]}")
             raise HTTPException(status_code=500, detail="No response from Codex CLI")
 
@@ -2256,6 +2277,7 @@ async def _chatgpt_einmal(
         })
 
         tokens_used = input_tokens + output_tokens
+        _weg_ok("codex")
 
         logger.info(
             f"Codex CLI response: {len(response_text)} chars, "
@@ -2279,7 +2301,7 @@ async def _chatgpt_einmal(
         raise HTTPException(status_code=504, detail="Codex CLI timeout - prompt may be too long")
     except FileNotFoundError:
         logger.error("Codex CLI not found - is 'codex' installed?")
-        raise HTTPException(status_code=500, detail="Codex CLI not installed on server")
+        raise _cli_nicht_installiert("codex", "Codex CLI not installed on server")
     except HTTPException:
         raise
     except Exception as e:
@@ -3043,7 +3065,7 @@ async def gemini_endpoint(
             if result.returncode != 0:
                 error_msg = result.stderr or "Unknown error from gemini CLI (empty response)"
                 logger.error(f"Gemini CLI error (empty stdout): {error_msg}")
-                raise HTTPException(status_code=500, detail=f"Gemini CLI error: {error_msg}")
+                raise _cli_fehler("agy", 500, f"Gemini CLI error: {error_msg}")
             raise HTTPException(status_code=500, detail="Gemini CLI returned empty response")
 
         # Parse JSON output — agy schema (flat):
@@ -3082,6 +3104,11 @@ async def gemini_endpoint(
                 f"agy CLI returned status={status!r} error={agy_error!r} "
                 f"(returncode={result.returncode})"
             )
+            # #3645: `alt_error` haelt den bisherigen Code im Text, die cloud-api
+            # erkennt daran noch den agy-Fehler.
+            _agy_fest = _cli_fehler_agy(agy_error, status)
+            if _agy_fest is not None:
+                raise _agy_fest
             raise HTTPException(
                 status_code=502,
                 detail={
@@ -3124,6 +3151,7 @@ async def gemini_endpoint(
         })
 
         tokens_used = input_tokens + output_tokens
+        _weg_ok("agy")
 
         logger.info(
             f"Gemini CLI response: {len(response_text)} chars, "
@@ -3143,7 +3171,7 @@ async def gemini_endpoint(
         raise HTTPException(status_code=504, detail="Gemini CLI timeout - prompt may be too long")
     except FileNotFoundError:
         logger.error("agy CLI not found - is 'agy' installed and on PATH?")
-        raise HTTPException(status_code=500, detail="Gemini CLI not installed on server")
+        raise _cli_nicht_installiert("agy", "Gemini CLI not installed on server")
     except HTTPException:
         raise
     except Exception as e:
