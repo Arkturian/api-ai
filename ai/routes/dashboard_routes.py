@@ -93,8 +93,12 @@ async def _smoke_probe(provider: str, model: str | None) -> dict[str, Any]:
     body = {"prompt": "Reply with one word: pong.", "model": model or ""}
     start = time.time()
     try:
+        # #3607: Auf einer Kundeninstanz stehen die Modellrouten hinter dem
+        # Instanzschluessel. Das Ziel ist fest dieser Host.
+        schluessel = (os.getenv("API_ACCESS_KEY") or "").strip()
+        kopf = {"X-API-KEY": schluessel} if schluessel else {}
         async with httpx.AsyncClient(timeout=20.0) as cx:
-            r = await cx.post(url, json=body)
+            r = await cx.post(url, json=body, headers=kopf)
         latency_ms = int((time.time() - start) * 1000)
         ok = 200 <= r.status_code < 300
         body_preview = r.text[:160].replace("\n", " ")

@@ -166,6 +166,14 @@ def _verify_shared_counter_auth(provided: Optional[str]) -> None:
         raise HTTPException(status_code=401, detail="invalid shared counter auth")
 
 
+def _zaehler_tor(
+    x_internal_auth: Optional[str] = Header(default=None, alias="X-Internal-Auth"),
+) -> None:
+    """#3607: Als Abhaengigkeit laeuft die Pruefung VOR der Validierung. Sonst
+    antwortet die Route Unangemeldeten mit 422 und verraet ihr Schema."""
+    _verify_shared_counter_auth(x_internal_auth)
+
+
 class _SharedTrackPayload(BaseModel):
     """Payload posted by a sibling host to log a Gemini API call into the
     shared monthly counter. Field names align with the existing local
@@ -250,7 +258,7 @@ class _MinimaxSharedTrackPayload(BaseModel):
     source_host: Optional[str] = None
 
 
-@router.get("/cost-shared-state")
+@router.get("/cost-shared-state", dependencies=[Depends(_zaehler_tor)])
 async def cost_shared_state_get(
     x_internal_auth: Optional[str] = Header(default=None, alias="X-Internal-Auth"),
 ):
@@ -269,7 +277,7 @@ async def cost_shared_state_get(
     return status
 
 
-@router.post("/cost-shared-state")
+@router.post("/cost-shared-state", dependencies=[Depends(_zaehler_tor)])
 async def cost_shared_state_track(
     payload: _SharedTrackPayload,
     x_internal_auth: Optional[str] = Header(default=None, alias="X-Internal-Auth"),
@@ -296,7 +304,7 @@ async def cost_shared_state_track(
     return status
 
 
-@router.get("/minimax-cost-shared-state")
+@router.get("/minimax-cost-shared-state", dependencies=[Depends(_zaehler_tor)])
 async def minimax_cost_shared_state_get(
     x_internal_auth: Optional[str] = Header(default=None, alias="X-Internal-Auth"),
 ):
@@ -319,7 +327,7 @@ async def minimax_cost_shared_state_get(
     return status
 
 
-@router.post("/minimax-cost-shared-state")
+@router.post("/minimax-cost-shared-state", dependencies=[Depends(_zaehler_tor)])
 async def minimax_cost_shared_state_track(
     payload: _MinimaxSharedTrackPayload,
     x_internal_auth: Optional[str] = Header(default=None, alias="X-Internal-Auth"),
@@ -379,7 +387,7 @@ async def minimax_cost_shared_state_track(
     return status
 
 
-@router.get("/deepseek-cost-shared-state")
+@router.get("/deepseek-cost-shared-state", dependencies=[Depends(_zaehler_tor)])
 async def deepseek_cost_shared_state_get(
     x_internal_auth: Optional[str] = Header(default=None, alias="X-Internal-Auth"),
 ):
@@ -397,7 +405,7 @@ async def deepseek_cost_shared_state_get(
     return status
 
 
-@router.post("/deepseek-cost-shared-state")
+@router.post("/deepseek-cost-shared-state", dependencies=[Depends(_zaehler_tor)])
 async def deepseek_cost_shared_state_track(
     payload: _DeepSeekSharedTrackPayload,
     x_internal_auth: Optional[str] = Header(default=None, alias="X-Internal-Auth"),
@@ -422,7 +430,7 @@ class _ElevenLabsSharedTrackPayload(BaseModel):
     source_host: Optional[str] = None
 
 
-@router.get("/elevenlabs-cost-shared-state")
+@router.get("/elevenlabs-cost-shared-state", dependencies=[Depends(_zaehler_tor)])
 async def elevenlabs_cost_shared_state_get(
     x_internal_auth: Optional[str] = Header(default=None, alias="X-Internal-Auth"),
 ):
@@ -433,7 +441,7 @@ async def elevenlabs_cost_shared_state_get(
     return elevenlabs_cost_tracker._local_status()   # der Master IST die Wahrheit
 
 
-@router.post("/elevenlabs-cost-shared-state")
+@router.post("/elevenlabs-cost-shared-state", dependencies=[Depends(_zaehler_tor)])
 async def elevenlabs_cost_shared_state_track(
     payload: _ElevenLabsSharedTrackPayload,
     x_internal_auth: Optional[str] = Header(default=None, alias="X-Internal-Auth"),
@@ -446,7 +454,7 @@ async def elevenlabs_cost_shared_state_track(
     return elevenlabs_cost_tracker._local_status()
 
 
-@router.get("/openai-cost-shared-state")
+@router.get("/openai-cost-shared-state", dependencies=[Depends(_zaehler_tor)])
 async def openai_cost_shared_state_get(
     x_internal_auth: Optional[str] = Header(default=None, alias="X-Internal-Auth"),
 ):
@@ -468,7 +476,7 @@ async def openai_cost_shared_state_get(
     return status
 
 
-@router.post("/openai-cost-shared-state")
+@router.post("/openai-cost-shared-state", dependencies=[Depends(_zaehler_tor)])
 async def openai_cost_shared_state_track(
     payload: _OpenAISharedTrackPayload,
     x_internal_auth: Optional[str] = Header(default=None, alias="X-Internal-Auth"),
@@ -491,7 +499,7 @@ async def openai_cost_shared_state_track(
     return status
 
 
-@router.get("/openai-realtime-cost-shared-state")
+@router.get("/openai-realtime-cost-shared-state", dependencies=[Depends(_zaehler_tor)])
 async def openai_realtime_cost_shared_state_get(
     x_internal_auth: Optional[str] = Header(default=None, alias="X-Internal-Auth"),
 ):
@@ -509,7 +517,7 @@ async def openai_realtime_cost_shared_state_get(
     return status
 
 
-@router.post("/openai-realtime-cost-shared-state")
+@router.post("/openai-realtime-cost-shared-state", dependencies=[Depends(_zaehler_tor)])
 async def openai_realtime_cost_shared_state_track(
     payload: _OpenAIRealtimeSharedTrackPayload,
     x_internal_auth: Optional[str] = Header(default=None, alias="X-Internal-Auth"),

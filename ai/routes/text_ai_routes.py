@@ -1073,6 +1073,30 @@ def _codex_text_anmeldung_heilen(link: str, quelle: str) -> None:
     os.remove(link)
 
 
+_MODELLNAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,79}")
+
+
+def _modellname_pruefen(name: Optional[str]) -> Optional[str]:
+    """#3607: Der Name geht als Argument an eine CLI und darf nie wie eine
+    Option aussehen. Bewusst eine Formpruefung und keine feste Liste: Die
+    Modelle wechseln, und welche es gibt, weiss die CLI bzw. der Katalog."""
+    if name and not (isinstance(name, str) and _MODELLNAME.fullmatch(name)):
+        raise HTTPException(status_code=422, detail={"error": "invalid_model_name"})
+    return name
+
+
+_EFFORT = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,23}")
+
+
+def _cli_eingaben_pruefen(prompt: "Prompt", model: Optional[str] = None) -> None:
+    """#3607: Alles, was als eigenes Argument an eine CLI geht, vor jeder
+    Umleitung pruefen, damit das Ergebnis nicht vom Weg abhaengt."""
+    _modellname_pruefen(model or prompt.model)
+    effort = prompt.effort
+    if effort and not (isinstance(effort, str) and _EFFORT.fullmatch(effort.strip())):
+        raise HTTPException(status_code=422, detail={"error": "invalid_effort"})
+
+
 def _weise_tools_aus_ab(prompt: "Prompt", endpoint: str) -> None:
     """Pfade ohne Schalter: tools=false waere dort still wirkungslos -> 422."""
     if getattr(prompt, "tools", None) is not False:
@@ -1240,6 +1264,7 @@ async def _claude_mit_rechten(
 
     Note: Claude CLI does NOT support images. For vision tasks, use /ai/gemini/vision instead.
     """
+    _cli_eingaben_pruefen(prompt, model)
     umgeleitet = await _claude_umleiten(prompt, model)
     if umgeleitet is not None:
         return umgeleitet
@@ -1293,7 +1318,9 @@ async def _claude_mit_rechten(
             prompt_text = prompt_text.replace(_u, _p)
         if _imgs:
             logger.info("claude: localized %d storage image(s) to /tmp" % len(_imgs))
-        cmd = ["claude", "-p", prompt_text, "--output-format", "json"]
+        # #3607: Der Prompt geht ueber stdin. `-p` ist ein Schalter ohne Wert:
+        # Als Argument wuerde ein Text mit fuehrendem `-` als CLI-Option gelesen.
+        cmd = ["claude", "-p", "--output-format", "json"]
 
         # Add model - default to sonnet (günstig), user can override with opus/haiku
         selected_model = model or "sonnet"
@@ -1322,14 +1349,14 @@ async def _claude_mit_rechten(
         # --setting-sources (verified is_error=false).
         cmd.extend(["--setting-sources", "project"])
         if persona:
-            cmd.extend(["--system-prompt", persona])
+            cmd.append(f"--system-prompt={persona}")
             if prompt.system:
-                cmd.extend(["--append-system-prompt", prompt.system])
+                cmd.append(f"--append-system-prompt={prompt.system}")
             logger.info(
                 f"Injected persona api-ai-claude-{prompt.persona_variant} ({len(persona)} chars)"
             )
         elif prompt.system:
-            cmd.extend(["--system-prompt", prompt.system])
+            cmd.append(f"--system-prompt={prompt.system}")
 
         # MCP tool-gating (opt-in, bot-bound). When the virtual bot declares
         # allowed_tools, the call becomes an AGENTIC multi-turn run: we re-add
@@ -1392,7 +1419,8 @@ async def _claude_mit_rechten(
             # Run claude in its own process-group so timeout cleanup
             # can take out helper procs alongside the main CLI. See
             # _run_cli_with_pgid for the orphan-defense rationale.
-            result = _run_cli_with_pgid(cmd, env=env, timeout=claude_cli_timeout, cwd="/")
+            result = _run_cli_with_pgid(cmd, env=env, timeout=claude_cli_timeout, cwd="/",
+                                        input=prompt_text)
             return result
 
         # Concurrency cap: bound the number of in-flight claude CLI
@@ -1904,6 +1932,7 @@ async def _chatgpt_einmal(
 
     _weise_response_format_ab(prompt, endpoint="chatgpt")
     model = model or prompt.model
+    _cli_eingaben_pruefen(prompt, model)
 
     try:
         # Extract prompt text and image paths
@@ -2317,6 +2346,7 @@ async def grok_endpoint(
     _weise_response_format_ab(prompt, endpoint="grok")
     _weise_tools_aus_ab(prompt, endpoint="grok")
     model = model or prompt.model
+    _cli_eingaben_pruefen(prompt, model)
 
     try:
         if isinstance(prompt.prompt, str):
@@ -2349,7 +2379,9 @@ async def grok_endpoint(
             prompt_text = f"{persona}\n\n{prompt_text}"
             logger.info(f"Injected persona api-ai-grok-{prompt.persona_variant} ({len(persona)} chars)")
 
-        cmd = ["grok", "-p", prompt_text, "--output-format", "json"]
+        # #3607: Der Prompt geht ueber --prompt-file (siehe run_grok_cli). Der Wert
+        # von `-p` ist optional: Ein Text mit fuehrendem `-` waere eine CLI-Option.
+        cmd = ["grok", "--output-format", "json"]
 
         selected_model = model
         if selected_model and selected_model.strip().lower() in (
@@ -2378,7 +2410,14 @@ async def grok_endpoint(
                 os.makedirs(neutral_cwd, exist_ok=True)
             except OSError:
                 neutral_cwd = "/"
-            return _run_cli_with_pgid(cmd, env=env, timeout=300, cwd=neutral_cwd)
+            import tempfile
+            ablage = neutral_cwd if os.path.isdir(neutral_cwd) and neutral_cwd != "/" else None
+            with tempfile.NamedTemporaryFile("w", encoding="utf-8", prefix="grok-prompt-",
+                                              suffix=".txt", dir=ablage) as datei:  # 0600
+                datei.write(prompt_text)
+                datei.flush()
+                return _run_cli_with_pgid(cmd + ["--prompt-file", datei.name], env=env,
+                                          timeout=300, cwd=neutral_cwd)
 
         sem = await _acquire_cli_slot("grok")
         try:
@@ -2780,6 +2819,7 @@ async def gemini_endpoint(
     import json as json_module
     from ..services.gemini_cli_cost_tracker import gemini_cli_cost_tracker
 
+    _cli_eingaben_pruefen(prompt, model)
     weiter = await _gemini_weiterreichen(prompt, model, request)
     if weiter is not None:
         return weiter
@@ -3175,6 +3215,7 @@ async def gemini_vision_endpoint(
     import uuid
     import httpx
 
+    _cli_eingaben_pruefen(prompt, model)
     model = model or prompt.model
 
     # Vision runs over the gemini CLI / OAuth subscription (FREE) now — NOT the
