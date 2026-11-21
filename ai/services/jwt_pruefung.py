@@ -30,6 +30,7 @@ from typing import Iterable, Optional
 from fastapi import HTTPException
 
 from ai.agentos_jwt import KeysUnavailable, RevocationUnknown, TokenRejected, Verifier
+from ai.services import auth_konfig
 
 logger = logging.getLogger(__name__)
 
@@ -122,6 +123,10 @@ def pruefen(authorization: Optional[str]) -> Optional[dict]:
     token = _bearer(authorization)
     if token is None:
         return None
+    # #3604: Bei halber Konfiguration passen Aussteller und Schluesselquelle
+    # nicht zusammen. Dann gilt kein Token als geprueft.
+    if auth_konfig.unvollstaendig():
+        raise HTTPException(status_code=503, detail={"error": auth_konfig.FEHLERCODE})
     try:
         pruefer = allgemein()
     except (OSError, ValueError) as e:

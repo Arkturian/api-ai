@@ -75,6 +75,7 @@ from ..services.realtime_budget_guard import (
     Reservation,
 )
 from ai.provider_config import provider_missing
+from ai.services import auth_konfig
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -7547,18 +7548,39 @@ async def realtime_tool_call(
 # ── Tool implementations ──────────────────────────────────────────────
 
 
-def _knowledge_api_base() -> str:
-    return os.getenv(
+def _knowledge_api_base() -> Optional[str]:
+    return auth_konfig.dienst_basis(
         "KNOWLEDGE_API_URL", "https://knowledge-api.arkturian.com"
-    ).rstrip("/")
+    )
 
 
-def _artrack_api_base() -> str:
+def _artrack_api_base() -> Optional[str]:
     # ArTrack-API is hosted at api-artrack.arkturian.com (not the natural
     # artrack-api.* you might guess — that NXDOMAIN'd in the first smoke).
-    return os.getenv(
+    return auth_konfig.dienst_basis(
         "ARTRACK_API_URL", "https://api-artrack.arkturian.com"
-    ).rstrip("/")
+    )
+
+
+_dienst_fehlt_gemeldet: set = set()
+
+
+def _dienst_nicht_eingerichtet(tool: str, env: str) -> dict:
+    """#3604: Die Instanz hat diesen Dienst nicht. Die Koordinaten aus dem
+    Werkzeugaufruf gehen dann nirgends hin, auch nicht an uns. `hint` hält
+    das Modell davon ab, „hier ist nichts“ zu sagen."""
+    if env not in _dienst_fehlt_gemeldet:
+        _dienst_fehlt_gemeldet.add(env)
+        logger.warning("realtime tool %s aus: %s fehlt oder zeigt auf den Betreiber",
+                       tool, env)
+    return {
+        "status": "unavailable",
+        "items": [],
+        "count": 0,
+        "text": "",
+        "hint": ("Dieser Dienst ist hier nicht eingerichtet. NICHT 'hier ist nichts' "
+                 "sagen, sondern dass die Umgebungsdaten gerade nicht verfuegbar sind."),
+    }
 
 
 def _guide_api_base() -> str:
@@ -7614,6 +7636,9 @@ async def _tool_knowledge_query(args: dict) -> dict:
                 "the model should speak from general knowledge instead."
             ),
         }
+    basis = _knowledge_api_base()
+    if basis is None:
+        return _dienst_nicht_eingerichtet("knowledge_query", "KNOWLEDGE_API_URL")
     params = {
         "lat": float(lat),
         "lon": float(lon),
@@ -7625,7 +7650,7 @@ async def _tool_knowledge_query(args: dict) -> dict:
     # leave it as a soft hint in the response so the caller can match.
     async with httpx.AsyncClient(timeout=2.0) as client:
         r = await client.get(
-            f"{_knowledge_api_base()}/api/v1/knowledge/near", params=params
+            f"{basis}/api/v1/knowledge/near", params=params
         )
         r.raise_for_status()
         data = r.json()
@@ -7653,6 +7678,9 @@ async def _tool_pois_near(args: dict) -> dict:
 
     ArTrack-API uses ``lng`` (not ``lon``) for longitude; we translate.
     """
+    basis = _artrack_api_base()
+    if basis is None:
+        return _dienst_nicht_eingerichtet("pois_near", "ARTRACK_API_URL")
     lat = float(args["lat"])
     lng = float(args["lon"])
     radius_m = float(args.get("radius_m", 200))
@@ -7660,9 +7688,9 @@ async def _tool_pois_near(args: dict) -> dict:
     params = {"lat": lat, "lng": lng, "radius_m": radius_m}
     if track_id:
         params["limit"] = 10
-        url = f"{_artrack_api_base()}/tracks/{int(track_id)}/pois-near"
+        url = f"{basis}/tracks/{int(track_id)}/pois-near"
     else:
-        url = f"{_artrack_api_base()}/places/nearby/compact"
+        url = f"{basis}/places/nearby/compact"
     async with httpx.AsyncClient(timeout=2.0) as client:
         r = await client.get(url, params=params)
         r.raise_for_status()
@@ -7701,6 +7729,9 @@ async def _tool_osm_nearby(args: dict) -> dict:
     ArTrack-API uses ``lng`` (not ``lon``) for longitude — same
     translation as _tool_pois_near.
     """
+    basis = _artrack_api_base()
+    if basis is None:
+        return _dienst_nicht_eingerichtet("osm_nearby", "ARTRACK_API_URL")
     lat = float(args["lat"])
     lng = float(args.get("lng") or args.get("lon"))
     # 500m is the typical talking-distance radius (user walks past,
@@ -7715,7 +7746,7 @@ async def _tool_osm_nearby(args: dict) -> dict:
     # Deckel des Proxys statt der Quelle.
     budget_s = _osm_budget_s(args.get("budget_s"))
     params = {"lat": lat, "lng": lng, "radius_m": radius_m, "budget_s": budget_s}
-    url = f"{_artrack_api_base()}/osm/nearby/compact"
+    url = f"{basis}/osm/nearby/compact"
     # Timeout posture: 5.0s (PR #90, 2026-06-28). Cold Overpass queries
     # after the 1h ArTrack cache TTL can briefly exceed 2.5s
     # (GuideDevBot2 observed 2530ms at 46.62/14.31). Tightening to 2.5s

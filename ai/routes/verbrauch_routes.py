@@ -17,6 +17,7 @@ import httpx
 from fastapi import APIRouter, Header, HTTPException, Query
 from fastapi.responses import JSONResponse
 
+from ai.services import auth_konfig
 from ai.services import bild_verbrauch as bv
 
 logger = logging.getLogger(__name__)
@@ -42,6 +43,10 @@ async def _profil(authorization: Optional[str]) -> Optional[dict]:
     token = authorization.split(" ", 1)[1].strip()
     if not token:
         return None
+    # #3604: /me bekommt das Bearer-Token des Aufrufers. Bei halber
+    # Konfiguration laege die Adresse womoeglich beim Betreiber.
+    if auth_konfig.unvollstaendig():
+        raise HTTPException(status_code=503, detail={"error": auth_konfig.FEHLERCODE})
     jetzt = time.time()
     treffer = _ME_CACHE.get(token)
     if treffer and treffer[0] > jetzt:
