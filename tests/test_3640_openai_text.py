@@ -331,6 +331,28 @@ def test_betreiberschluessel_oeffnet_keinen_anderen_bezahlpfad(monkeypatch, anon
             assert r.json()["detail"]["error"] == "api_key_required"
 
 
+@pytest.mark.parametrize("instanz,betreiber,soll", [(True, False, 401), (False, True, 401), (True, True, 401),
+                                                    (False, False, 503)])
+def test_tor_vor_dem_json_parser(monkeypatch, anonym, netz, instanz, betreiber, soll):
+    if not instanz:
+        monkeypatch.delenv("API_ACCESS_KEY")
+    if betreiber:
+        monkeypatch.setenv("REALTIME_GRANT_SERVICE_KEY", BETREIBER)
+    r = anonym.post("/ai/openai", content="{", headers={"Content-Type": "application/json"})
+    assert r.status_code == soll
+    assert netz.anfragen == []
+
+
+def test_kaputtes_json_mit_schluessel_bleibt_422(client, netz):
+    r = client.post("/ai/openai", content="{", headers={"Content-Type": "application/json"})
+    assert r.status_code == 422 and netz.anfragen == []
+
+
+def test_cors_vorabfrage_braucht_keinen_schluessel(anonym):
+    r = anonym.options("/ai/openai", headers={"Origin": "https://example.com", "Access-Control-Request-Method": "POST"})
+    assert r.status_code not in (401, 503)
+
+
 def test_jede_openai_route_hat_ihr_tor():
     from fastapi.routing import APIRoute
     routen = [r for r in main.app.routes if isinstance(r, APIRoute)

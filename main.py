@@ -22,7 +22,7 @@ except PermissionError:
     # sie ohnehin als EnvironmentFile (Drop-in env-file.conf).
     pass
 
-from fastapi import Depends, FastAPI, Request
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -336,6 +336,20 @@ async def _modelltor(request, call_next):
             "error": "api_key_required",
             "hint": "Dieser Dienst verlangt den Kopf `X-API-KEY`.",
         }})
+    return await call_next(request)
+
+
+@app.middleware("http")
+async def _openai_tor(request, call_next):
+    """#3640: Der Schluessel wird VOR dem Lesen des Rumpfs geprueft. Die
+    Route-Abhaengigkeit allein liefe erst nach dem JSON-Parser: Kaputtes JSON
+    bekaeme ohne Schluessel 422 statt 401."""
+    pfad = request.url.path
+    if request.method != "OPTIONS" and (pfad == "/ai/openai" or pfad.startswith("/ai/openai/")):
+        try:
+            _ag.betreiber_oder_instanz(request.headers.get(_KEY_HEADER))
+        except HTTPException as e:
+            return JSONResponse(status_code=e.status_code, content={"detail": e.detail})
     return await call_next(request)
 
 
