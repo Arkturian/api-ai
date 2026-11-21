@@ -1,6 +1,7 @@
 """#3607: Auf einer Kundeninstanz startet niemand ohne Schluessel eine Modell-CLI."""
 import asyncio
 import itertools
+import subprocess
 
 import pytest
 from fastapi.testclient import TestClient
@@ -31,11 +32,17 @@ def client():
     return TestClient(main.app, raise_server_exceptions=False)
 
 
-@pytest.fixture
+@pytest.fixture(autouse=True)
 def keine_cli(monkeypatch):
-    async def verboten(*a, **k):
+    """Fuer JEDEN Test: Auch ein wieder eingebauter Fehler startet keine echte
+    CLI (die Routen nutzen subprocess.Popen, nicht asyncio)."""
+    def verboten(*a, **k):
         raise AssertionError("CLI gestartet")
-    monkeypatch.setattr(asyncio, "create_subprocess_exec", verboten)
+    async def verboten_async(*a, **k):
+        raise AssertionError("CLI gestartet")
+    monkeypatch.setattr(subprocess, "Popen", verboten)
+    monkeypatch.setattr(subprocess, "run", verboten)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", verboten_async)
 
 
 def kunde(monkeypatch, schluessel=SCHLUESSEL):
@@ -114,3 +121,41 @@ def test_unser_kern_bleibt_wie_bisher(monkeypatch, client, route, schluessel):
     if schluessel:
         monkeypatch.setenv("API_ACCESS_KEY", schluessel)
     assert client.post(route, json={}).status_code == 422
+
+
+# --- Modellname: nie eine Option fuer die CLI ------------------------------
+
+@pytest.mark.parametrize("route", ROUTEN)
+@pytest.mark.parametrize("name", ["--sandbox", "-c", "a b", "x;id", "x\nz", "a" * 81, "../x y"])
+def test_ungueltiger_modellname_im_rumpf(client, route, name):
+    r = client.post(route, json={"prompt": "x", "model": name})
+    assert r.status_code == 422 and r.json()["detail"]["error"] == "invalid_model_name"
+
+
+@pytest.mark.parametrize("route", ROUTEN)
+def test_ungueltiger_modellname_in_der_query(client, route):
+    r = client.post(route, params={"model": "--config=x"}, json={"prompt": "x"})
+    assert r.status_code == 422 and r.json()["detail"]["error"] == "invalid_model_name"
+
+
+@pytest.mark.parametrize("name", [None, "", "gpt-6-luna", "gemini-4-hydrogen-low", "gpt-5.6-terra",
+                                  "claude-opus-5-5", "codex-default", "org/modell:1"])
+def test_gueltige_modellnamen(name):
+    from ai.routes.text_ai_routes import _modellname_pruefen
+    assert _modellname_pruefen(name) == name
+
+
+# --- Betreiber-Routen: im Code zu, nicht nur in nginx -----------------------
+
+@pytest.mark.parametrize("pfad,rumpf", [
+    ("/ai/status/smoketest", None),
+    ("/internal/notify-cli-update", {"host": "probe"}),
+])
+@pytest.mark.parametrize("dienstschluessel", [None, "dienst"])
+@pytest.mark.parametrize("kopf", [{}, {"X-API-KEY": "falsch"}])
+def test_betreiberrouten_anonym_zu(monkeypatch, client, pfad, rumpf, dienstschluessel, kopf):
+    monkeypatch.delenv("REALTIME_GRANT_SERVICE_KEY", raising=False)
+    if dienstschluessel:
+        monkeypatch.setenv("REALTIME_GRANT_SERVICE_KEY", dienstschluessel)
+    r = client.post(pfad, headers=kopf, json=rumpf)
+    assert r.status_code in (401, 403, 503), r.text

@@ -1073,6 +1073,18 @@ def _codex_text_anmeldung_heilen(link: str, quelle: str) -> None:
     os.remove(link)
 
 
+_MODELLNAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,79}")
+
+
+def _modellname_pruefen(name: Optional[str]) -> Optional[str]:
+    """#3607: Der Name geht als Argument an eine CLI und darf nie wie eine
+    Option aussehen. Bewusst eine Formpruefung und keine feste Liste: Die
+    Modelle wechseln, und welche es gibt, weiss die CLI bzw. der Katalog."""
+    if name and not (isinstance(name, str) and _MODELLNAME.fullmatch(name)):
+        raise HTTPException(status_code=422, detail={"error": "invalid_model_name"})
+    return name
+
+
 def _weise_tools_aus_ab(prompt: "Prompt", endpoint: str) -> None:
     """Pfade ohne Schalter: tools=false waere dort still wirkungslos -> 422."""
     if getattr(prompt, "tools", None) is not False:
@@ -1252,6 +1264,7 @@ async def _claude_mit_rechten(
     _weise_response_format_ab(prompt, endpoint="claude")
     _weise_tools_aus_ab(prompt, endpoint="claude")
     model = model or prompt.model
+    _modellname_pruefen(model)
 
     try:
         # Extract prompt text
@@ -1904,6 +1917,7 @@ async def _chatgpt_einmal(
 
     _weise_response_format_ab(prompt, endpoint="chatgpt")
     model = model or prompt.model
+    _modellname_pruefen(model)
 
     try:
         # Extract prompt text and image paths
@@ -2317,6 +2331,7 @@ async def grok_endpoint(
     _weise_response_format_ab(prompt, endpoint="grok")
     _weise_tools_aus_ab(prompt, endpoint="grok")
     model = model or prompt.model
+    _modellname_pruefen(model)
 
     try:
         if isinstance(prompt.prompt, str):
@@ -2787,6 +2802,7 @@ async def gemini_endpoint(
     _weise_response_format_ab(prompt, endpoint="gemini")
     _weise_tools_aus_ab(prompt, endpoint="gemini")
     model = model or prompt.model
+    _modellname_pruefen(model)
 
     # Extract prompt text and image paths
     prompt_text = ""
