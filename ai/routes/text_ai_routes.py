@@ -1200,30 +1200,82 @@ def _codex_modell_fuer(claude_modell: Optional[str]) -> Optional[str]:
     return None
 
 
-def _claude_route_503(grund: str, text: str) -> HTTPException:
+def _hydrogen_modell_fuer(claude_modell: Optional[str]) -> str:
+    """Alex, 21.11. (#3652): Die Dienstlast laeuft ueber Hydrogen (CLAUDE_ROUTE=hydrogen)."""
+    m = (claude_modell or "").lower()
+    if any(k in m for k in _CLAUDE_ZU_CODEX["stark"]):
+        return os.getenv("CLAUDE_ROUTE_HYDROGEN_MODEL_STARK", "gemini-4-hydrogen-high")
+    return os.getenv("CLAUDE_ROUTE_HYDROGEN_MODEL", "gemini-4-hydrogen-low")
+
+
+def _claude_route_503(grund: str, text: str, ziel: str = "codex") -> HTTPException:
     return HTTPException(status_code=503, detail={
-        "error": "claude_routed_to_codex", "grund": grund, "message": text,
-        "routed_to": "codex", "fallback": None})
+        "error": f"claude_routed_to_{ziel}", "grund": grund, "message": text,
+        "routed_to": ziel, "fallback": None})
+
+
+async def _claude_ueber_hydrogen(prompt: "Prompt", angefragt: Optional[str]) -> "AIResponse":
+    """Wie der Codex-Weg: gleiche Antwortform, markiert, mit request_id idempotent.
+    Der Tagesdeckel schuetzt das gemeinsame Google-Kontingent."""
+    from ai.services import ki_wege, narrate_jobs as nj
+    if prompt.tools is True:
+        raise HTTPException(status_code=403, detail={
+            "error": "tools_disabled",
+            "hint": "Werkzeuge sind auf api-ai abgeschaltet (#2937). Ohne tools laeuft der Aufruf als reiner Text."})
+    ziel = _hydrogen_modell_fuer(angefragt)
+    neu = prompt.model_copy(update={"model": None, "require_provider": None, "tools": None, "effort": None,
+                                    "request_id": None, "model_fallback": False})
+    rid = prompt.request_id
+    if rid:
+        nutzlast = prompt.model_dump(); nutzlast["model_param"] = angefragt
+        replay = nj.vorab(rid, "claude", nutzlast)
+        if replay:
+            return AIResponse(**{k: v for k, v in replay.items() if k in AIResponse.model_fields})
+    try:
+        ki_wege.hydrogen_tag_buchen()
+        out = await gemini_endpoint(neu, model=ziel, api_key="placeholder")
+        out.routed_to = "agy"
+        out.model_requested = angefragt or "claude-default"
+        logger.info("claude->hydrogen angefragt=%s ziel=%s", angefragt, ziel)
+        if rid:
+            nj.abschliessen(rid, out.model_dump())
+        return out
+    except HTTPException as e:
+        if rid:
+            nj.nachtrag_fehler(rid, e.status_code, e.detail)
+        raise
+    except Exception as e:
+        if rid:
+            nj.nachtrag_fehler(rid, None, type(e).__name__)
+        raise
 
 
 async def _claude_umleiten(prompt: "Prompt", model: Optional[str]):
-    if (os.getenv("CLAUDE_ROUTE") or "").strip().lower() != "codex":
+    route = (os.getenv("CLAUDE_ROUTE") or "").strip().lower()
+    if route not in ("codex", "hydrogen"):
         return None
+    ziel_weg, ziel_name = ("agy", "Hydrogen") if route == "hydrogen" else ("codex", "Codex")
+
+    def stopp(grund: str, text: str) -> HTTPException:
+        return _claude_route_503(grund, text.replace("Codex", ziel_name), ziel_weg)
+
     if (prompt.require_provider or "").strip().lower() == "claude":
-        raise _claude_route_503("require_provider",
+        raise stopp("require_provider",
             "Claude ist fuer api-ai abgeschaltet; die Dienstlast laeuft ueber Codex (Vorgabe Alex, 30.10.). "
             "Ohne require_provider laeuft der Aufruf auf Codex.")
     if prompt.response_format is not None:
         # json_schema gegen Codex noch nicht geprueft: lieber klar ablehnen
         # als still ohne Schema laufen (Cloud, 30.10.).
-        raise _claude_route_503("response_format",
+        raise stopp("response_format",
             "response_format ist auf /ai/claude ueber Codex noch nicht freigegeben.")
     if prompt.persona_variant:
         bundle = await get_persona_bundle("claude", prompt.persona_variant)
         if bundle.get("allowed_tools"):
-            raise _claude_route_503("persona_mcp",
+            raise stopp("persona_mcp",
                 f"persona_variant {prompt.persona_variant!r} bringt MCP-Werkzeuge mit; die gibt es nur auf Claude.")
     angefragt = model or prompt.model
+    if route == "hydrogen":
+        return await _claude_ueber_hydrogen(prompt, angefragt)
     ziel = _codex_modell_fuer(angefragt)
     neu = prompt.model_copy(update={"model": None, "require_provider": None})
     out = await chatgpt_endpoint(neu, model=ziel, api_key="placeholder")

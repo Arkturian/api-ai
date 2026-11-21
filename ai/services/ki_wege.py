@@ -20,6 +20,7 @@ bis zu ihrem Umbau daran erkennt. Gespeichert werden nie Prompt oder Fehlertext.
 """
 from __future__ import annotations
 
+import fcntl
 import json
 import logging
 import os
@@ -44,6 +45,8 @@ _CLI_WEGE = ("agy", "codex")
 # sonst bliebe ein Weg nach neuer Anmeldung rot, bis zufaellig jemand ihn ruft.
 _FEHLER_GILT_S = 3600
 _KONTINGENT_OHNE_BIS_GILT_S = 24 * 3600
+CLAUDE_HYDROGEN_MAX_ENV = "CLAUDE_ROUTE_HYDROGEN_TAG_MAX"
+CLAUDE_HYDROGEN_MAX_VORGABE = 85
 
 # Wortlaute aus dem Journal von arkserver, 07.-21.11.2026.
 _QUOTA = re.compile(r"individual quota|resource_exhausted|usage.?limit|rate.?limit|insufficient_quota|"
@@ -235,6 +238,56 @@ def codex(cli_status: Callable[[str], dict]) -> dict:
     if grund in ("absent", "expired", "unreadable"):
         return _weg("nicht_angemeldet", grund=grund)
     return _weg("fehler", grund=str(grund or "unbekannt")[:40])
+
+
+def hydrogen_tag_max() -> int:
+    """Tagesdeckel fuer /ai/claude ueber agy. Vorgabe 85 (Cloud, #3652): zusammen mit
+    den 500 der Sprechstile deutlich unter der bekannten Grenze von rund 970."""
+    try:
+        wert = int((os.getenv(CLAUDE_HYDROGEN_MAX_ENV) or "").strip())
+    except ValueError:
+        return CLAUDE_HYDROGEN_MAX_VORGABE
+    return wert if wert > 0 else CLAUDE_HYDROGEN_MAX_VORGABE
+
+
+def hydrogen_tag_buchen() -> None:
+    """Zaehlt einen Aufruf. Am Deckel 429 `kontingent` bis Mitternacht. Ist der Zaehler
+    nicht schreibbar, geht nichts hinaus: Eine Sperre von 130 h traefe alle Wege."""
+    jetzt = datetime.now().astimezone().replace(microsecond=0)
+    tag = jetzt.date().isoformat()
+    verzeichnis = Path(os.getenv("VERBRAUCH_DIR") or "/var/lib/api-ai/verbrauch")
+    tmp = None
+    try:
+        verzeichnis.mkdir(parents=True, exist_ok=True)
+        fd = os.open(verzeichnis / ".claude_hydrogen.lock", os.O_RDWR | os.O_CREAT, 0o600)
+        with os.fdopen(fd, "r+") as sperre:
+            fcntl.flock(sperre, fcntl.LOCK_EX)
+            pfad = verzeichnis / f"claude_hydrogen_{tag}.json"
+            try:
+                n = int(json.loads(pfad.read_text()).get("anfragen") or 0)
+            except FileNotFoundError:
+                n = 0
+            if n >= hydrogen_tag_max():
+                naechster = (jetzt.replace(tzinfo=None) + timedelta(days=1)).replace(hour=0, minute=0, second=0)
+                bis = naechster.astimezone().isoformat()
+                sek = max(1, int((naechster.astimezone() - jetzt).total_seconds()))
+                raise HTTPException(status_code=429, headers={"Retry-After": str(sek)}, detail={
+                    "error": "kontingent", "weg": "agy", "grund": "tagesdeckel", "resets_at": bis,
+                    "hint": "daily quota reached, try again at 00:00"})
+            wfd, tmp = tempfile.mkstemp(dir=verzeichnis, prefix=".claude_hydrogen.")   # 0600
+            with os.fdopen(wfd, "w") as f:
+                json.dump({"anfragen": n + 1}, f)
+            os.replace(tmp, pfad)
+            tmp = None
+    except (OSError, ValueError, TypeError, AttributeError) as e:
+        logger.error("ki_wege: Hydrogen-Zaehler nicht nutzbar (%s)", type(e).__name__)
+        raise HTTPException(status_code=503, detail={"error": "hydrogen_zaehler_fehlt"})
+    finally:
+        if tmp:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
 
 
 def _anmeldung_mtime(weg: str) -> Optional[float]:
