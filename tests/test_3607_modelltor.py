@@ -253,3 +253,95 @@ def test_leerzeichen_als_schluessel_gilt_als_fehlend(monkeypatch, client):
     kunde(monkeypatch, schluessel="   ")
     r = client.post("/ai/chatgpt", headers={"X-API-KEY": "   "}, json={"prompt": "x"})
     assert r.status_code == 503
+
+
+# --- Das Tor greift VOR der Validierung (Direktprobe von Cloud-release) -----
+
+ZAEHLER = ["cost", "minimax-cost", "deepseek-cost", "elevenlabs-cost", "openai-cost", "openai-realtime-cost"]
+
+
+@pytest.mark.parametrize("name", ZAEHLER)
+@pytest.mark.parametrize("geheimnis", [None, "zaehler"])
+def test_zaehlerrouten_antworten_nie_mit_422(monkeypatch, client, name, geheimnis):
+    monkeypatch.delenv("COST_TRACKER_SHARED_SECRET", raising=False)
+    if geheimnis:
+        monkeypatch.setenv("COST_TRACKER_SHARED_SECRET", geheimnis)
+    pfad = f"/internal/{name}-shared-state"
+    assert client.post(pfad, json={}).status_code == (401 if geheimnis else 503)
+    assert client.get(pfad).status_code == (401 if geheimnis else 503)
+
+
+def test_alle_internen_post_routen_vor_der_validierung(monkeypatch, client):
+    from fastapi.routing import APIRoute
+    monkeypatch.delenv("COST_TRACKER_SHARED_SECRET", raising=False)
+    monkeypatch.setenv("REALTIME_GRANT_SERVICE_KEY", "dienst")
+    pfade = [r.path for r in main.app.routes if isinstance(r, APIRoute)
+             and "POST" in r.methods and r.path.startswith("/internal/")]
+    assert len(pfade) >= 7
+    for pfad in pfade:
+        assert client.post(pfad, json={}).status_code in (401, 403, 503), pfad
+
+
+@pytest.mark.parametrize("route", ROUTEN)
+def test_kunde_leerer_rumpf_401_vor_validierung(monkeypatch, client, route):
+    kunde(monkeypatch)
+    assert client.post(route, json={}).status_code == 401
+
+
+def test_openapi_bleibt_lesbar(monkeypatch, client):
+    kunde(monkeypatch)
+    assert client.get("/openapi.json").status_code == 200
+
+
+@pytest.fixture
+def smoke_fang(monkeypatch, tmp_path):
+    from ai.routes import dashboard_routes as d
+    gelaufen = []
+    # Der Dienst laeuft als root; der Testbenutzer darf /var/lib/api-ai nicht lesen.
+    monkeypatch.setattr(d, "_MODELS_JSON", tmp_path / "models.json")
+    monkeypatch.setattr(d, "_LAST_RUN", tmp_path / "last_run")
+
+    async def probe(provider, model):
+        gelaufen.append(provider)
+        return {"provider": provider}
+
+    monkeypatch.setattr(d, "_smoke_probe", probe)
+    monkeypatch.setenv("REALTIME_GRANT_SERVICE_KEY", "dienst")
+    return gelaufen
+
+
+@pytest.mark.parametrize("kopf", [{}, {"X-API-KEY": "falsch"}, {"X-API-KEY": SCHLUESSEL}])
+def test_smoketest_laeuft_nicht_ohne_betreiberschluessel(monkeypatch, client, smoke_fang, kopf):
+    kunde(monkeypatch)
+    assert client.post("/ai/status/smoketest", headers=kopf).status_code == 401
+    assert smoke_fang == []
+
+
+def test_smoketest_mit_betreiberschluessel(monkeypatch, client, smoke_fang):
+    kunde(monkeypatch)
+    assert client.post("/ai/status/smoketest", headers={"X-API-KEY": "dienst"}).status_code == 200
+    assert smoke_fang
+
+
+def test_smoke_probe_schickt_den_instanzschluessel(monkeypatch):
+    from ai.routes import dashboard_routes as d
+    koepfe = []
+
+    class Client:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def post(self, url, json=None, headers=None):
+            koepfe.append((url, headers))
+            return httpx.Response(200, text="pong")
+
+    monkeypatch.setattr(d.httpx, "AsyncClient", Client)
+    monkeypatch.setenv("API_ACCESS_KEY", SCHLUESSEL)
+    asyncio.run(d._smoke_probe("codex", None))
+    assert koepfe == [("http://127.0.0.1:8000/ai/chatgpt", {"X-API-KEY": SCHLUESSEL})]
