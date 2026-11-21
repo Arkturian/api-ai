@@ -22,7 +22,7 @@ except PermissionError:
     # sie ohnehin als EnvironmentFile (Drop-in env-file.conf).
     pass
 
-from fastapi import FastAPI, Request
+from fastapi import Depends, FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -30,7 +30,8 @@ import hmac
 import logging
 import os
 from ai.provider_config import providers_status as _providers_status
-from ai.services import auth_konfig, kern_tor
+from ai import auth_guard as _ag
+from ai.services import auth_konfig, kern_tor, ki_wege
 
 # Import routes
 from ai.routes import text_ai_routes, image_ai_routes, audio_ai_routes, dialog_routes, video_ai_routes, narration_routes, image_generation_routes, translate_routes, internal_routes, dashboard_routes, music_ai_routes, realtime_routes, hunyuan3d_routes, kling_routes, flow_routes
@@ -172,6 +173,7 @@ _BEZAHLPFADE = (
     "/ai/decisions",     # OpenAI Decisions
     "/ai/realtime/token",
     "/ai/realtime/live",
+    "/ai/openai",        # #3640: Platform-Schluessel der Instanz
 )
 
 
@@ -603,6 +605,13 @@ def health_check():
         # #3604: vorgabe | eigen | unvollstaendig, ohne Werte.
         "realtime_auth": auth_konfig.zustand(),
     }
+
+@app.get("/ai/wege", dependencies=[Depends(_ag.betreiber_oder_instanz)])
+def ki_wege_endpoint():
+    """#3639: Zustand je Modellweg fuer die Pipeline, ohne Modellaufruf.
+    Bewusst nicht in /health: das zeigt sonst, welche Abos ein Kunde hat."""
+    return ki_wege.wege(_cli_status)
+
 
 @app.get("/")
 def root():

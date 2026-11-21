@@ -70,6 +70,33 @@ def betreiber_oder_lokal(request: Request,
         "hint": "Nur fuer Dienste auf diesem Host oder mit X-API-KEY des Hosts."})
 
 
+def _gleich(ist: str, soll: str) -> bool:
+    # Als Bytes: compare_digest wirft bei Text ausserhalb von ASCII.
+    return bool(ist and soll) and hmac.compare_digest(ist.encode("utf-8", "replace"),
+                                                      soll.encode("utf-8", "replace"))
+
+
+def betreiber_oder_instanz(x_api_key: Optional[str] = Header(default=None, alias="X-API-KEY")) -> str:
+    """Betreiber- oder Instanzschluessel, OHNE Ausnahme fuer diesen Host (#3639).
+
+    Fuer Daten, die zeigen, welche Abos ein Kunde hat, oder Kundentext enthalten.
+    `von_diesem_host` haengt daran, dass das vorgelagerte nginx X-Real-IP setzt;
+    das ist auf den Instanzen nicht belegt. Viele Instanzen haben keinen
+    Betreiberschluessel, darum gilt auch API_ACCESS_KEY."""
+    ist = (x_api_key or "").strip()
+    betreiber = (os.environ.get("REALTIME_GRANT_SERVICE_KEY") or "").strip()
+    instanz = (os.environ.get("API_ACCESS_KEY") or "").strip()
+    if _gleich(ist, betreiber):
+        return "betreiber"
+    if _gleich(ist, instanz):
+        return "instanz"
+    if not betreiber and not instanz:
+        raise HTTPException(status_code=503, detail={"error": "operator_key_not_configured"})
+    raise HTTPException(status_code=401, detail={
+        "error": "operator_key_required",
+        "hint": "X-API-KEY des Betreibers oder der Instanz mitschicken."})
+
+
 def angemeldet(authorization: Optional[str] = Header(default=None),
                x_api_key: Optional[str] = Header(default=None, alias="X-API-KEY")) -> str:
     if ist_betreiber(x_api_key):
