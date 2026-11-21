@@ -17,6 +17,7 @@ from ai.services import ki_wege as kw
 AGY_QUOTA = "Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 42h15m28s."
 CODEX_QUOTA = ("You’ve hit your usage limit. Visit https://chatgpt.com/settings/usage to purchase more credits "
                "or try again at Nov 21st, 2026 1:52 PM.")
+GEMINI_LEER = "You have exhausted your capacity on this model. Your quota will reset after 9h15m42s."
 # Erkennung der cloud-api (sprechstile.py, f0737382), muss bis zu ihrem Umbau weiter greifen.
 KONTINGENT_CLOUD = re.compile(r"usage limit|rate limit|quota|out of credits|insufficient_quota|"
                               r"resource_exhausted|exhausted your", re.I)
@@ -24,7 +25,7 @@ GEMINI_502_CLOUD = re.compile(r"Upstream (?:502|429) from POST \S*/ai/gemini|agy
 
 
 @pytest.fixture(autouse=True)
-def keine_cli(monkeypatch):
+def keine_cli(monkeypatch, tmp_path):
     def verboten(*a, **k):
         raise AssertionError("CLI gestartet")
 
@@ -37,6 +38,8 @@ def keine_cli(monkeypatch):
               "CLAUDE_ROUTE", "GEMINI_FORWARD_URL", "AGY_RUN_AS_USER"):
         monkeypatch.delenv(n, raising=False)
     monkeypatch.setenv("REALTIME_GRANT_SERVICE_KEY", "dienst")
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex"))
+    monkeypatch.setenv("CLI_HOME", str(tmp_path / "home"))
 
 
 @pytest.fixture
@@ -74,6 +77,9 @@ def codex_fehler(m):
     (AGY_QUOTA, "kontingent", "kontingent"),
     ('{"short_error":"RESOURCE_EXHAUSTED (code 429): x"}', "kontingent", "kontingent"),
     (CODEX_QUOTA, "kontingent", "kontingent"),
+    (GEMINI_LEER, "kontingent", "kontingent"),
+    ("Rate limit reached for requests", "kontingent", "kontingent"),
+    ("insufficient_quota", "kontingent", "kontingent"),
     ("authentication failed or timed out", "cli_fehlt", "fehler"),
     ("Not logged in", "cli_fehlt", "nicht_angemeldet"),
     ("access token could not be refreshed", "cli_fehlt", "nicht_angemeldet"),
@@ -102,6 +108,37 @@ def test_reset_codex_absolut(uhr, h, mi):
                                   "Resets in soon", "Resets in 99999999999h"])
 def test_reset_unbekannt_ist_none(text):
     assert kw.resets_aus(text) is None
+
+
+WIEN = timezone(timedelta(hours=1))
+
+
+@pytest.mark.parametrize("text,jetzt,soll", [
+    (GEMINI_LEER, datetime(2026, 11, 21, 12, 0, tzinfo=WIEN), "2026-11-21T21:15:42+01:00"),
+    ("Upgrade or try again at Nov 19th, 2026 7:20 PM.", datetime(2026, 11, 19, 12, 0, tzinfo=WIEN), "2026-11-19T19:20:00+01:00"),
+    ("try again at Nov 19th 7:20 PM", datetime(2026, 11, 15, 23, 30, tzinfo=WIEN), "2026-11-19T19:20:00+01:00"),
+    ("try again at Jan 2nd 9:00 AM", datetime(2026, 12, 30, 12, 0, tzinfo=WIEN), "2027-01-02T09:00:00+01:00"),
+    ("try again at 10:25 PM", datetime(2026, 11, 21, 12, 0, tzinfo=WIEN), "2026-11-21T22:25:00+01:00"),
+    ("try again at 10:25 PM", datetime(2026, 11, 21, 23, 0, tzinfo=WIEN), "2026-11-22T22:25:00+01:00"),
+    ("try again at 12:05 AM", datetime(2026, 11, 21, 23, 0, tzinfo=WIEN), "2026-11-22T00:05:00+01:00"),
+    ("try again in 3 hours", datetime(2026, 11, 15, 23, 30, tzinfo=WIEN), "2026-11-16T02:30:00+01:00"),
+    ("try again in 1 day 2 hours", datetime(2026, 11, 15, 23, 30, tzinfo=WIEN), "2026-11-17T01:30:00+01:00"),
+    ("try again in 42m", datetime(2026, 11, 15, 12, 0, tzinfo=WIEN), "2026-11-15T12:42:00+01:00"),
+])
+def test_reset_formate_der_cloud_api(text, jetzt, soll):
+    assert kw.resets_aus(text, jetzt) == soll
+
+
+@pytest.mark.parametrize("text", ["try again at Nov 31st, 2026 7:20 PM", "try again at sometime later", "try again at 25:00"])
+def test_reset_unsinn_ist_none(text):
+    assert kw.resets_aus(text) is None
+
+
+def test_gemini_stderr_kontingent(client, cli):
+    cli.rc, cli.err = 1, GEMINI_LEER
+    r = client.post("/ai/gemini", json={"prompt": "x"})
+    d = r.json()["detail"]
+    assert (r.status_code, d["error"], d["weg"]) == (500, "kontingent", "agy") and d["resets_at"]
 
 
 def test_gemini_nicht_installiert(client, cli):
@@ -210,6 +247,49 @@ def test_fehlschlag_laeuft_aus(monkeypatch, client):
     a = kw._ausgang_lesen("codex"); a["zeit"] = time.time() - kw._FEHLER_GILT_S - 1
     kw._ausgang_pfad("codex").write_text(json.dumps(a))
     assert wege(monkeypatch, client, {"ok": True})["codex"]["zustand"] == "angemeldet"
+
+
+def anmeldung(zeit=None):
+    p = kw.Path(os.environ["CODEX_HOME"]) / "auth.json"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text("{}")
+    if zeit:
+        os.utime(p, (zeit, zeit))
+
+
+def test_gebuchtes_fehlt_schlaegt_keine_neue_installation(monkeypatch, client):
+    kw.ausgang("codex", "fehlt")
+    assert wege(monkeypatch, client, {"ok": True})["codex"]["zustand"] == "angemeldet"
+
+
+def test_gebuchtes_fehlt_gilt_wenn_die_platte_nichts_sagt(monkeypatch, client):
+    kw.ausgang("codex", "fehlt")
+    assert wege(monkeypatch, client)["codex"]["zustand"] == "fehlt"
+
+
+def test_neue_anmeldung_verwirft_alten_fehlschlag(monkeypatch, client):
+    anmeldung(time.time() - 600)
+    kw.ausgang("codex", "nicht_angemeldet")
+    assert wege(monkeypatch, client, {"ok": True})["codex"]["zustand"] == "nicht_angemeldet"
+    anmeldung(time.time() + 5)
+    assert wege(monkeypatch, client, {"ok": True})["codex"]["zustand"] == "angemeldet"
+
+
+def test_neue_anmeldung_agy(monkeypatch, client, tmp_path):
+    monkeypatch.setattr(kw.shutil, "which", lambda n: "/usr/bin/agy")
+    kw.ausgang("agy", "nicht_angemeldet")
+    t = kw.Path(os.environ["CLI_HOME"]).joinpath(".gemini", "antigravity-cli")
+    t.mkdir(parents=True)
+    (t / "antigravity-oauth-token").write_text("x")
+    os.utime(t / "antigravity-oauth-token", (time.time() + 5, time.time() + 5))
+    monkeypatch.setattr(main, "_cli_status", lambda n: {"ok": True, "auth": {"ok": True}})
+    assert client.get("/ai/wege", headers={"X-API-KEY": "dienst"}).json()["wege"]["agy"]["zustand"] == "angemeldet"
+
+
+def test_token_erneuerung_hebt_kontingent_nicht_auf(monkeypatch, client):
+    kw.ausgang("codex", "kontingent", (datetime.now().astimezone() + timedelta(hours=3)).isoformat())
+    anmeldung(time.time() + 5)
+    assert wege(monkeypatch, client, {"ok": True})["codex"]["zustand"] == "kontingent"
 
 
 def test_fehlende_cli_schlaegt_alten_erfolg(monkeypatch, client):

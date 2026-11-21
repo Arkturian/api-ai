@@ -46,15 +46,20 @@ _FEHLER_GILT_S = 3600
 _KONTINGENT_OHNE_BIS_GILT_S = 24 * 3600
 
 # Wortlaute aus dem Journal von arkserver, 07.-21.11.2026.
-_QUOTA = re.compile(r"individual quota|resource_exhausted|usage.?limit|quota (?:reached|exceeded)|"
-                    r"out of credits", re.I)
+_QUOTA = re.compile(r"individual quota|resource_exhausted|usage.?limit|rate.?limit|insufficient_quota|"
+                    r"quota (?:reached|exceeded)|exhausted your|out of credits", re.I)
 _ANMELDUNG = re.compile(r"not logged in|please (?:run|use) .{0,20}login|could not be refreshed|"
                         r"invalid[_ ]grant|unauthorized|token_expired", re.I)
 # agy meldet Anmeldung und Zeitueberschreitung mit demselben Satz.
 _UNKLAR = re.compile(r"authentication failed", re.I)
-_AGY_RESET = re.compile(r"resets in\s+(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?", re.I)
-_CODEX_RESET = re.compile(r"try again at\s+([A-Za-z]{3})[a-z]*\.?\s+(\d{1,2})(?:st|nd|rd|th)?,?\s+"
-                          r"(\d{4})\s+(\d{1,2}):(\d{2})\s*([AP]M)", re.I)
+# Formen wie in cloud-api `wieder_ab` (#3128): "Resets in 42h15m28s", "reset after 9h15m42s",
+# "try again at Nov 21st, 2026 1:52 PM", "... Nov 19th 7:20 PM", "... 10:25 PM", "... in 3 hours".
+_RESET_ANKER = re.compile(r"(?:try again|resets?|reset will occur|available again)\s+(?:at|after|in|on)\s+"
+                          r"([^.\n\"]{2,60})", re.I)
+_KURZDAUER = re.compile(r"^\s*(?:(\d+)h)?(?:(\d+)m(?!s))?(?:(\d+)s)?(?=\W|$)", re.I)
+_RELATIV = re.compile(r"(\d+)\s*(days?|hours?|hrs?|minutes?|mins?)\b", re.I)
+_UHR = re.compile(r"\b(\d{1,2}):(\d{2})\s*([AP]M)?\b", re.I)
+_DATUM = re.compile(r"\b([A-Za-z]{3})[a-z]*\.?\s+(\d{1,2})(?:st|nd|rd|th)?\b,?(?:\s+(\d{4})\b)?", re.I)
 _MONATE = {m: i for i, m in enumerate(("jan", "feb", "mar", "apr", "may", "jun", "jul", "aug",
                                        "sep", "oct", "nov", "dec"), start=1)}
 
@@ -72,28 +77,58 @@ def einordnen(text: str) -> Optional[tuple]:
 
 
 def resets_aus(text: str, jetzt: Optional[datetime] = None) -> Optional[str]:
-    """ISO-8601 aus dem Fehlertext, sonst None. Die Uhrzeit von codex ist Ortszeit des Hosts."""
-    t = text or ""
+    """ISO-8601 aus dem Fehlertext, sonst None. Uhrzeiten sind Ortszeit des Hosts,
+    denn die CLI laeuft auf demselben Rechner."""
+    anker = _RESET_ANKER.search(text or "")
+    if not anker:
+        return None
+    roh = anker.group(1).strip()
     basis = (jetzt or datetime.now().astimezone()).replace(microsecond=0)
-    m = _AGY_RESET.search(t)
-    if m and any(m.groups()):
-        h, mi, s = (int(x or 0) for x in m.groups())
-        try:
-            return (basis + timedelta(hours=h, minutes=mi, seconds=s)).isoformat()
-        except OverflowError:
-            return None
-    m = _CODEX_RESET.search(t)
-    if not m:
-        return None
-    monat = _MONATE.get(m.group(1).lower())
-    if not monat:
-        return None
-    stunde = int(m.group(4)) % 12 + (12 if m.group(6).upper() == "PM" else 0)
+
+    def lokal(naiv: datetime) -> str:
+        # Ohne vorgegebene Zeit rechnet astimezone die Sommerzeit des Zieltags richtig.
+        ziel = naiv.replace(tzinfo=basis.tzinfo) if jetzt else naiv.astimezone()
+        return ziel.replace(microsecond=0).isoformat()
+
     try:
-        return datetime(int(m.group(3)), monat, int(m.group(2)), stunde, int(m.group(5))) \
-            .astimezone().replace(microsecond=0).isoformat()
+        m = _KURZDAUER.match(roh)
+        if m and any(m.groups()):
+            h, mi, se = (int(x or 0) for x in m.groups())
+            return (basis + timedelta(hours=h, minutes=mi, seconds=se)).isoformat()
+        uhr = _UHR.search(roh)
+        std = mnt = None
+        if uhr:
+            std, mnt = int(uhr.group(1)), int(uhr.group(2))
+            ampm = (uhr.group(3) or "").upper()
+            if ampm == "PM" and std < 12:
+                std += 12
+            elif ampm == "AM" and std == 12:
+                std = 0
+            if not (0 <= std <= 23 and 0 <= mnt <= 59):
+                return None
+        # Vor dem Datum: In "1 day 2 hours" saehe "day 2" sonst wie ein Monat aus.
+        rel = _RELATIV.findall(roh) if not uhr else []
+        if rel:
+            sek = {"d": 86400, "h": 3600, "m": 60}
+            return (basis + timedelta(seconds=sum(int(z) * sek[e[0].lower()] for z, e in rel))).isoformat()
+        datum = _DATUM.search(roh)
+        if datum:
+            monat = _MONATE.get(datum.group(1).lower())
+            if not monat:
+                return None
+            jahr = int(datum.group(3)) if datum.group(3) else basis.year
+            ziel = datetime(jahr, monat, int(datum.group(2)), std or 0, mnt or 0)
+            if not datum.group(3) and ziel < basis.replace(tzinfo=None) - timedelta(days=1):
+                ziel = ziel.replace(year=jahr + 1)
+            return lokal(ziel)
+        if uhr:
+            ziel = basis.replace(tzinfo=None, hour=std, minute=mnt, second=0)
+            if ziel <= basis.replace(tzinfo=None):
+                ziel += timedelta(days=1)
+            return lokal(ziel)
     except (ValueError, OverflowError, OSError):
         return None
+    return None
 
 
 def _ausgang_pfad(weg: str) -> Path:
@@ -202,6 +237,20 @@ def codex(cli_status: Callable[[str], dict]) -> dict:
     return _weg("fehler", grund=str(grund or "unbekannt")[:40])
 
 
+def _anmeldung_mtime(weg: str) -> Optional[float]:
+    """Wann die Anmeldung zuletzt geschrieben wurde, None wenn nicht lesbar."""
+    try:
+        if weg == "agy":
+            pfad = os.path.join(_agy_home(), *_AGY_TOKEN)
+        else:
+            home = os.getenv("CODEX_HOME") or os.path.join(
+                os.getenv("CLI_HOME") or pwd.getpwuid(os.getuid()).pw_dir, ".codex")
+            pfad = os.path.join(home, "auth.json")
+        return os.stat(pfad).st_mtime
+    except (OSError, KeyError):
+        return None
+
+
 def _mit_ausgang(weg: str, basis: dict) -> dict:
     """Legt den letzten echten Aufruf ueber das, was auf der Platte sichtbar ist."""
     a = _ausgang_lesen(weg)
@@ -236,6 +285,14 @@ def _mit_ausgang(weg: str, basis: dict) -> dict:
         # Ein Kontingentfehler belegt auch: Die Anmeldung gilt.
         return setzen("kontingent", bis=bis) if laeuft else setzen("angemeldet")
     if art in ("fehlt", "nicht_angemeldet", "fehler") and alter < _FEHLER_GILT_S:
+        # Die Platte zeigt die CLI samt Anmeldung: Das gebuchte „fehlt“ ist ueberholt.
+        if art == "fehlt" and z == "angemeldet":
+            return aus
+        # Seit dem Fehlschlag neu angemeldet. Fuer `kontingent` gilt das bewusst nicht:
+        # Eine Token-Erneuerung schreibt die Datei auch, das Kontingent bleibt leer.
+        stand = _anmeldung_mtime(weg)
+        if stand is not None and stand > time.time() - alter:
+            return aus
         return setzen(art, grund="letzter_aufruf")
     return aus
 
