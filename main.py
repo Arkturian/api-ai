@@ -30,6 +30,7 @@ import hmac
 import logging
 import os
 from ai.provider_config import providers_status as _providers_status
+from ai.services import auth_konfig
 
 # Import routes
 from ai.routes import text_ai_routes, image_ai_routes, audio_ai_routes, dialog_routes, video_ai_routes, narration_routes, image_generation_routes, translate_routes, internal_routes, dashboard_routes, music_ai_routes, realtime_routes, hunyuan3d_routes, kling_routes, flow_routes
@@ -547,6 +548,8 @@ def health_check():
         # Welche Provider DIESE Instanz konfiguriert hat — read-only, ohne
         # Geheimnisse, ohne Erzeugung (Kundeninstanzen ohne unsere Toepfe).
         "providers": _providers_status(),
+        # #3604: vorgabe | eigen | unvollstaendig, ohne Werte.
+        "realtime_auth": auth_konfig.zustand(),
     }
 
 @app.get("/")
@@ -614,6 +617,7 @@ async def global_exception_handler(request: Request, exc: Exception):
 async def startup_event():
     """Startup tasks"""
     logger.info("🚀 Arkturian AI API starting up...")
+    auth_konfig.unvollstaendig()  # #3604: meldet eine halbe Konfiguration beim Start
     # #3165: eigene codex-Konten messen und ggf. wechseln (nur im Kontomodus)
     from ai.services import cli_dienst
     if cli_dienst.konto_modus():

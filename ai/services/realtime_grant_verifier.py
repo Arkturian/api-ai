@@ -47,6 +47,7 @@ import ssl
 import time
 from dataclasses import dataclass
 from typing import Any, List, Optional
+from ai.services import auth_konfig
 from ai.services.realtime_identity import kurz_id
 
 import certifi
@@ -189,6 +190,18 @@ class ServiceKeyMissing(GrantError):
         )
 
 
+class AuthKonfigUnvollstaendig(GrantError):
+    """Nur ein Teil der drei REALTIME_AUTH-Werte ist gesetzt oder einer zeigt
+    auf den Betreiber (#3604). Es geht kein Token hinaus."""
+
+    def __init__(self):
+        super().__init__(
+            auth_konfig.FEHLERCODE,
+            "REALTIME_AUTH_* unvollstaendig",
+            status_code=503,
+        )
+
+
 class ProfileMisconfigured(GrantError):
     """REALTIME_PROFILE_ID env unset on this host."""
 
@@ -273,6 +286,8 @@ def _unsafe_peek_jwt_claims(authorization_header: str) -> str:
 async def _exchange_user_jwt_for_grant(authorization_header: str) -> dict:
     """POST the user JWT (still as Bearer, never as body) to auth-api
     plus our shared service key. Return the JSON envelope verbatim."""
+    if auth_konfig.unvollstaendig():      # #3604: letzte Stelle vor dem Netz
+        raise AuthKonfigUnvollstaendig()
     service_key = os.environ.get(SERVICE_KEY_ENV)
     if not service_key:
         raise ServiceKeyMissing()
@@ -441,6 +456,11 @@ async def exchange_and_verify(
     The audit logger gets a single redacted line per call so a flapping
     auth-api or a bad client is visible without leaking PII.
     """
+    # #3604: vor allem anderen, damit eine halbe Konfiguration nie bis zum
+    # Tausch kommt und der Fehler sie auch benennt.
+    if auth_konfig.unvollstaendig():
+        raise AuthKonfigUnvollstaendig()
+
     allowed_profile_ids = host_profile_ids()
     if not allowed_profile_ids:
         raise ProfileMisconfigured()

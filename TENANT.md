@@ -65,10 +65,15 @@ Trotz des Namens gelten diese drei nicht mehr nur fuer Sprache. Ab
 Pruefung ueber `<GRANT_URL ohne letztes Segment>/me`). Die Widerrufsliste kommt
 von `<JWKS_URL ohne letztes Segment>/revoked-agent-jtis`
 (`AGENTOS_JWT_REVOCATION_URL` ueberschreibt).
-**Ohne sie faellt die Instanz auf auth-api.arkturian.com zurueck:**
+**Fehlen alle drei, faellt die Instanz auf auth-api.arkturian.com zurueck:**
 Sie nimmt dann JWTs des Betreibers an, holt Schluessel und Sperrliste bei ihm,
 und /ai/verbrauch schickt das Bearer-Token des Kunden an die auth-api des
-Betreibers.
+Betreibers. Das sieht im Code aus wie unser Kern, deshalb prueft es der Rollout.
+
+**Fehlt nur ein Teil oder zeigt ein Wert auf den Betreiber (#3604):** Tausch und
+Token-Pruefung sind aus, Antwort 503 `realtime_auth_unvollstaendig`, `/health`
+meldet `realtime_auth: unvollstaendig`. Eine Adresse unter arkturian.com ist nur
+erlaubt, wenn ihr Host der eigene Aussteller ist (z. B. `ele.arkturian.com`).
 
 ```bash
 # --- Realtime (nur wenn Sprache genutzt wird) ---------------------------
