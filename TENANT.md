@@ -106,6 +106,21 @@ TYPESAFE_API_KEY=…                # eigener Vertrag, sonst 503 typesafe_key_mi
 `jev`). Abschalten heisst: den Aufrufer nicht anbieten (cloud-api/MCP) bzw.
 ohne Schluessel lassen — dann antwortet api-ai laut mit 503.
 
+```bash
+# --- Textweg ueber den OpenAI-Schluessel (nur wenn genannt, #3640) -------
+OPENAI_TEXT_DAILY_MAX_USD=0.5     # Pflicht fuer diesen Weg, ohne Wert 503
+# OPENAI_TEXT_DAILY_MAX_REQUESTS=2000   # Vorgabe
+```
+
+`POST /ai/openai` laeuft ueber den `OPENAI_API_KEY` der Instanz (Responses API,
+`gpt-6-luna`, `store: false`). Ohne Schluessel oder ohne gueltige Tagesgrenze
+antwortet er 503, ein Rueckfall auf einen anderen Schluessel existiert nicht. Ist
+die Grenze erreicht, kommt 429 mit `error: kontingent` und `resets_at`.
+
+`GET /ai/wege` zeigt je Weg (`agy`, `codex`, `openai_schluessel`) den Zustand,
+ohne Modellaufruf. Der Pfad verlangt den Betreiber- oder Instanzschluessel und
+kennt keine Ausnahme fuer den eigenen Host. `/health` nennt die Wege bewusst nicht.
+
 ## Verify-Checkliste
 
 Nach jedem Ausrollen, in dieser Reihenfolge:

@@ -3767,6 +3767,86 @@ async def m3_endpoint(
 # JSON output should account for the reasoning-token budget when setting
 # max_tokens (raise to 1000+ for non-trivial structured outputs).
 
+def _openai_rumpf_pruefen(prompt: "Prompt") -> str:
+    """Was dieser Weg nicht kann, wird abgewiesen statt still verschluckt."""
+    if prompt.tools is True:
+        raise HTTPException(status_code=403, detail={"error": "tools_disabled"})
+    if prompt.response_format is not None:
+        raise HTTPException(status_code=422, detail={"error": "response_format_unsupported_on_endpoint",
+                                                     "endpoint": "openai"})
+    if prompt.conversation_history:
+        raise HTTPException(status_code=422, detail={"error": "conversation_history_unsupported_on_endpoint",
+                                                     "endpoint": "openai"})
+    if prompt.persona_variant:
+        raise HTTPException(status_code=422, detail={"error": "persona_unsupported_on_endpoint",
+                                                     "endpoint": "openai"})
+    if prompt.model_fallback:
+        raise HTTPException(status_code=422, detail={"error": "model_fallback_unsupported_on_endpoint",
+                                                     "endpoint": "openai"})
+    if isinstance(prompt.prompt, str):
+        text, bilder = prompt.prompt, bool(prompt.image_paths)
+    else:
+        text = prompt.prompt.text
+        bilder = bool(prompt.image_paths or prompt.prompt.image_paths or prompt.prompt.images)
+    if bilder:
+        raise HTTPException(status_code=422, detail={"error": "images_unsupported_on_endpoint",
+                                                     "endpoint": "openai"})
+    return text or ""
+
+
+async def _openai_einmal(prompt: "Prompt", model: Optional[str]) -> AIResponse:
+    from ai.services import openai_text as ot
+    text = _openai_rumpf_pruefen(prompt)
+    r = await ot.aufrufen(text, prompt.system, model or prompt.model, prompt.effort, prompt.max_tokens)
+    return AIResponse(response=r["text"], model=r["model"], tokens_used=r["tokens"],
+                      finish_reason=r["finish_reason"], thinking_tokens=r["thinking"],
+                      effort_applied=None if prompt.effort else r["effort"])
+
+
+@router.post("/openai", response_model=AIResponse, dependencies=[Depends(_ag.betreiber_oder_instanz)])
+async def openai_text_endpoint(
+    prompt: Prompt,
+    model: Optional[str] = None,
+    api_key: str = Depends(get_api_key),
+):
+    """Text ueber den OpenAI-Platform-Schluessel DIESER Instanz (#3640).
+
+    Fuer Instanzen ohne agy und codex. Eigene Tagesgrenze, ohne sie 503.
+    Mit request_id idempotent wie /ai/chatgpt."""
+    from ai.services import narrate_jobs as nj, openai_text as ot
+    # Vor der Kennung: Ein Fehler hier kostet nichts und darf sie nicht verbrauchen.
+    _openai_rumpf_pruefen(prompt)
+    ot.freigabe()
+    rid = prompt.request_id
+    if not rid:
+        return await _openai_einmal(prompt, model)
+    nutzlast = prompt.model_dump(); nutzlast["model_param"] = model
+    replay = nj.vorab(rid, "openai", nutzlast)
+    if replay:
+        return AIResponse(**{k: v for k, v in replay.items() if k in AIResponse.model_fields})
+    try:
+        out = await _openai_einmal(prompt, model)
+        nj.abschliessen(rid, out.model_dump())
+        return out
+    except HTTPException as e:
+        nj.nachtrag_fehler(rid, e.status_code, e.detail); raise
+    except Exception as e:
+        nj.nachtrag_fehler(rid, None, type(e).__name__); raise
+
+
+@router.get("/openai/cost-status", dependencies=[Depends(_ag.betreiber_oder_instanz)])
+async def openai_text_cost_status():
+    """Tagesstand des Schluesselwegs. Muss vor /openai/{request_id} stehen."""
+    from ai.services import openai_text as ot
+    return ot.stand()
+
+
+@router.get("/openai/{request_id}", dependencies=[Depends(_ag.betreiber_oder_instanz)])
+async def openai_text_status(request_id: str):
+    from ai.services import narrate_jobs as nj
+    return nj.status_lesen(request_id, "openai", ausgeschlossen=("cost-status",))
+
+
 @router.post("/deepseek", response_model=AIResponse)
 async def deepseek_endpoint(
     prompt: Prompt,
