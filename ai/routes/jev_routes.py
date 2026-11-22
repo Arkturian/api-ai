@@ -109,8 +109,11 @@ async def jev_endpoint(req: JevRequest, x_agent_name: Optional[str] = Header(def
     if caller.startswith("agent:"):
         caller = caller[len("agent:"):]
     caller = caller or "(unbekannt)"
+    from ai.services.decisions_service import ZaehlerUnlesbar
     try:
         s.budget_pruefen(caller)   # Host-Grenze und, falls gesetzt, die der Kennung (JEV_CALLER_LIMITS)
+    except ZaehlerUnlesbar as e:
+        raise HTTPException(503, e.detail)
     except s.JevBudget as e:
         from datetime import datetime as _dt
         warte = max(1, int((_dt.fromisoformat(e.detail["resets_at"]) - _dt.now().astimezone()).total_seconds()))

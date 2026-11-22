@@ -95,11 +95,11 @@ class ZaehlerUnlesbar(Exception):
     """#3693 (Steward, 11572): Der Zaehler des Tages ist beschaedigt oder nicht
     lesbar. Dann geht nichts hinaus, und es faengt nichts wieder bei null an."""
 
-    def __init__(self, datei: Path, grund: str):
-        super().__init__(f"decisions-Zaehler unlesbar: {grund}")
-        self.detail = {"error": "decisions_zaehler_unlesbar", "grund": grund,
+    def __init__(self, datei: Path, grund: str, dienst: str = "decisions"):
+        super().__init__(f"{dienst}-Zaehler unlesbar: {grund}")
+        self.detail = {"error": f"{dienst}_zaehler_unlesbar", "grund": grund,
                        "hint": "Der Tageszaehler ist beschaedigt oder nicht lesbar. Bis ein Mensch "
-                               f"{datei.name} prueft, bleibt Decisions zu."}
+                               f"{datei.name} prueft, bleibt {dienst} zu."}
 
 
 def _beiseitelegen(p: Path) -> None:
