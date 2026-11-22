@@ -266,6 +266,25 @@ async def _jev_jwt_pflicht(request, call_next):
 
 
 @app.middleware("http")
+async def _kette_tor(request, call_next):
+    """#3658: Ohne KI_KETTE ist /ai/kette aus (503), vor dem Lesen des Rumpfs und
+    ohne CLI. Direkte /ai/gemini-Aufrufe zaehlen im Google-Zaehler mit, sperren aber
+    nie (die Kette wechselt dadurch frueher auf ChatGPT)."""
+    pfad = request.url.path
+    if request.method != "OPTIONS" and (pfad == "/ai/kette" or pfad.startswith("/ai/kette/")):
+        from ai.services import kette as _kette
+        if not _kette.kette():
+            return JSONResponse(status_code=503, content={"detail": {
+                "error": "kette_aus", "hint": "Diese Instanz fuehrt keine Kette (KI_KETTE leer)."}})
+    antwort = await call_next(request)
+    if request.method == "POST" and pfad == "/ai/gemini" and antwort.status_code == 200:
+        from ai.services import kette as _kette
+        if "agy" in _kette.kette():
+            ki_wege.tag_zaehlen(_kette.DECKEL["agy"][0])
+    return antwort
+
+
+@app.middleware("http")
 async def _require_api_key(request, call_next):
     erwartet = (os.getenv(_API_KEY_ENV) or "").strip()
     pfad = request.url.path
@@ -311,7 +330,7 @@ async def _require_api_key(request, call_next):
 # #3607: Die Modellrouten starten eine CLI auf dem Abo der Instanz. Auf unserem
 # Kern bleiben sie vorerst ohne Schluessel (#1755). Eine Kundeninstanz (eigene
 # auth-api) verlangt ihn immer; fehlt er dort, bleiben die Routen zu.
-_MODELLPFADE = ("/ai/chatgpt", "/ai/claude", "/ai/gemini", "/ai/grok")
+_MODELLPFADE = ("/ai/chatgpt", "/ai/claude", "/ai/gemini", "/ai/grok", "/ai/kette")
 
 
 def _modelltor_gilt(pfad: str) -> bool:
@@ -454,6 +473,8 @@ from ai.routes import verbrauch_routes  # noqa: E402
 app.include_router(verbrauch_routes.router, prefix="/ai", tags=["Verbrauch"])
 from ai.routes import codex_konten_routes  # noqa: E402
 app.include_router(codex_konten_routes.router, prefix="/ai", tags=["Codex-Konten"])
+from ai.routes import kette_routes  # noqa: E402
+app.include_router(kette_routes.router, prefix="/ai", tags=["Kette (#3658)"])
 from ai.routes import extern_routes  # noqa: E402
 app.include_router(extern_routes.router, prefix="/ai", tags=["Extern (#3656)"])
 from ai.routes import audio_mix_routes  # noqa: E402

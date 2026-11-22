@@ -17,6 +17,7 @@ from ai.routes.realtime_routes import require_operator_key
 from pydantic import BaseModel, field_validator
 from typing import Optional, List, Dict, Any, Union
 import asyncio
+import contextvars
 import logging
 import os
 import re
@@ -293,6 +294,19 @@ def _mit_phasen_warten(proc, cmd, input, timeout, phasen: dict):
                                        stdout="".join(z for _, z in zeilen), stderr="".join(fehler))
 
 
+# #3658: Frist der Kette (time.monotonic()). Gesetzt, kuerzt sie die Zeitgrenze
+# der CLI und das Warten auf einen Platz. asyncio.to_thread nimmt den Kontext mit,
+# so beendet killpg den Prozess am Budgetende statt ihn weiterlaufen zu lassen.
+CLI_FRIST: "contextvars.ContextVar[Optional[float]]" = contextvars.ContextVar("cli_frist", default=None)
+
+
+def _frist_rest(vorgabe: float) -> float:
+    frist = CLI_FRIST.get()
+    if frist is None:
+        return vorgabe
+    return max(1.0, min(vorgabe, frist - time.monotonic()))
+
+
 def _run_cli_with_pgid(cmd, env, timeout=300, cwd="/", input=None, phasen=None):
     """Run a CLI subprocess as its own process-group leader.
 
@@ -318,6 +332,7 @@ def _run_cli_with_pgid(cmd, env, timeout=300, cwd="/", input=None, phasen=None):
     import signal as _signal
     import subprocess
     cmd = codex_als_benutzer(cmd, env)
+    timeout = _frist_rest(timeout)
     proc = subprocess.Popen(
         cmd,
         # `input` (Prompt ueber stdin statt argv): argv ist auf ~128 KB
@@ -624,7 +639,7 @@ async def _acquire_cli_slot(provider: str):
     sem = _get_cli_semaphore(provider)
     started = time.monotonic()
     try:
-        await asyncio.wait_for(sem.acquire(), timeout=_ACQUIRE_TIMEOUT)
+        await asyncio.wait_for(sem.acquire(), timeout=_frist_rest(_ACQUIRE_TIMEOUT))
     except asyncio.TimeoutError:
         logger.warning(
             f"{provider} CLI semaphore saturated for {_ACQUIRE_TIMEOUT}s "
@@ -1326,6 +1341,7 @@ async def _claude_mit_rechten(
     prompt: Prompt,
     model: Optional[str] = None,
     api_key: str = "placeholder",
+    direkt: bool = False,
 ):
     """
     Claude AI endpoint via Claude Code CLI (claude -p)
@@ -1341,7 +1357,8 @@ async def _claude_mit_rechten(
     Note: Claude CLI does NOT support images. For vision tasks, use /ai/gemini/vision instead.
     """
     _cli_eingaben_pruefen(prompt, model)
-    umgeleitet = await _claude_umleiten(prompt, model)
+    # direkt: nur die Kette (#3658), deren letzte Stufe wirklich Claude ist.
+    umgeleitet = None if direkt else await _claude_umleiten(prompt, model)
     if umgeleitet is not None:
         return umgeleitet
     _claude_konto_vorab()

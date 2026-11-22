@@ -40,7 +40,7 @@ from ai.services import cli_dienst, openai_text
 logger = logging.getLogger(__name__)
 
 _AGY_TOKEN = (".gemini", "antigravity-cli", "antigravity-oauth-token")
-_CLI_WEGE = ("agy", "codex")
+_CLI_WEGE = ("agy", "codex", "claude")
 # Ein Fehlschlag gilt so lange. Danach zaehlt wieder die Anmeldung auf der Platte,
 # sonst bliebe ein Weg nach neuer Anmeldung rot, bis zufaellig jemand ihn ruft.
 _FEHLER_GILT_S = 3600
@@ -296,6 +296,42 @@ def tag_buchen(name: str, tag_max: int) -> None:
                 os.unlink(tmp)
             except OSError:
                 pass
+
+
+def tag_stand(name: str) -> int:
+    """Heutiger Zaehlerstand, 0 wenn es keinen gibt."""
+    tag = datetime.now().astimezone().date().isoformat()
+    pfad = Path(os.getenv("VERBRAUCH_DIR") or "/var/lib/api-ai/verbrauch") / f"{name}_{tag}.json"
+    try:
+        return int(json.loads(pfad.read_text()).get("anfragen") or 0)
+    except (OSError, ValueError, TypeError, AttributeError):
+        return 0
+
+
+def tag_zaehlen(name: str) -> None:
+    """Zaehlt mit, sperrt nie (#3658: direkte /ai/gemini-Aufrufe im Google-Zaehler)."""
+    try:
+        tag_buchen(name, 10 ** 9)
+    except HTTPException:
+        logger.warning("ki_wege: Zaehler %s nicht gebucht", name)
+
+
+def gesperrt(weg: str) -> tuple:
+    """(True, bis) solange der letzte Aufruf des Wegs ein leeres Kontingent meldete."""
+    a = _ausgang_lesen(weg)
+    if a.get("art") != "kontingent":
+        return False, None
+    bis = a.get("bis")
+    try:
+        alter = time.time() - float(a.get("zeit") or 0)
+    except (TypeError, ValueError):
+        return False, None
+    try:
+        if bis:
+            return (datetime.fromisoformat(bis) > datetime.now().astimezone()), bis
+    except (ValueError, TypeError):
+        pass
+    return alter < _KONTINGENT_OHNE_BIS_GILT_S, None
 
 
 def _anmeldung_mtime(weg: str) -> Optional[float]:
