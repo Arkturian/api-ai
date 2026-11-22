@@ -113,7 +113,49 @@ async def generate_music_stable_audio(prompt: str, duration_ms: Optional[int] = 
     }
 
 
-async def generate_music_elevenlabs(prompt: str, duration_ms: Optional[int] = 30000) -> dict:
+_PLAN_FELDER = {"positive_global_styles", "negative_global_styles", "sections"}
+_ABSCHNITT_FELDER = {"section_name", "positive_local_styles", "negative_local_styles", "duration_ms", "lines"}
+
+
+def plan_pruefen(plan) -> dict:
+    """ElevenLabs composition_plan: Abschnitte je 3 bis 120 s, zusammen hoechstens
+    5 min. Vor jedem bezahlten Aufruf geprueft, sonst 422."""
+    def nein(text):
+        raise HTTPException(status_code=422, detail={"error": "invalid_composition_plan", "hint": text})
+    if not isinstance(plan, dict) or set(plan) - _PLAN_FELDER:
+        nein(f"erlaubte Felder: {sorted(_PLAN_FELDER)}")
+    abschnitte = plan.get("sections")
+    if not isinstance(abschnitte, list) or not 1 <= len(abschnitte) <= 30:
+        nein("sections: 1 bis 30 Abschnitte")
+    for k in ("positive_global_styles", "negative_global_styles"):
+        if not isinstance(plan.get(k, []), list) or not all(isinstance(x, str) for x in plan.get(k, [])):
+            nein(f"{k}: Liste von Texten")
+    gesamt = 0
+    for i, a in enumerate(abschnitte):
+        if not isinstance(a, dict) or set(a) - _ABSCHNITT_FELDER:
+            nein(f"Abschnitt {i}: erlaubte Felder {sorted(_ABSCHNITT_FELDER)}")
+        d = a.get("duration_ms")
+        if not isinstance(d, int) or isinstance(d, bool) or not 3000 <= d <= 120000:
+            nein(f"Abschnitt {i}: duration_ms 3000 bis 120000")
+        for k in ("positive_local_styles", "negative_local_styles", "lines"):
+            if not isinstance(a.get(k, []), list) or not all(isinstance(x, str) for x in a.get(k, [])):
+                nein(f"Abschnitt {i}: {k} als Liste von Texten")
+        if not isinstance(a.get("section_name", ""), str):
+            nein(f"Abschnitt {i}: section_name als Text")
+        gesamt += d
+    if gesamt > 300000:
+        nein("zusammen hoechstens 300000 ms")
+    return {"positive_global_styles": list(plan.get("positive_global_styles", [])),
+            "negative_global_styles": list(plan.get("negative_global_styles", [])),
+            "sections": [{"section_name": a.get("section_name", f"Teil {i + 1}"),
+                          "positive_local_styles": list(a.get("positive_local_styles", [])),
+                          "negative_local_styles": list(a.get("negative_local_styles", [])),
+                          "duration_ms": a["duration_ms"], "lines": list(a.get("lines", []))}
+                         for i, a in enumerate(abschnitte)]}
+
+
+async def generate_music_elevenlabs(prompt: str, duration_ms: Optional[int] = 30000,
+                                    composition_plan: Optional[dict] = None) -> dict:
     """Generate music using ElevenLabs Music API"""
     print(f"--- Music Gen (ElevenLabs): Generating music for prompt: '{prompt[:80]}...'")
 
@@ -124,17 +166,24 @@ async def generate_music_elevenlabs(prompt: str, duration_ms: Optional[int] = 30
     from ai.services.elevenlabs_cost_tracker import elevenlabs_cost_tracker
     elevenlabs_cost_tracker.pre_check(0, endpoint="genmusic_eleven")
 
-    payload = {
-        "prompt": prompt,
-        "musicLengthMs": duration_ms or 30000
-    }
+    if composition_plan:
+        # Plan und Prompt schliessen sich bei ElevenLabs aus; die Laenge ergibt
+        # sich aus den Abschnitten.
+        payload = {"composition_plan": composition_plan, "model_id": "music_v1"}
+        duration_ms = sum(x["duration_ms"] for x in composition_plan["sections"])
+    else:
+        payload = {
+            "prompt": prompt,
+            "musicLengthMs": duration_ms or 30000
+        }
     headers = {
         "xi-api-key": eleven_key,
         "Content-Type": "application/json"
     }
 
     music_bytes: Optional[bytes] = None
-    timeout = httpx.Timeout(connect=10.0, read=25.0, write=25.0, pool=None)
+    # Laengere Stuecke brauchen beim Anbieter laenger als 25 s.
+    timeout = httpx.Timeout(connect=10.0, read=180.0 if composition_plan else 25.0, write=25.0, pool=None)
 
     async with httpx.AsyncClient(timeout=timeout) as client:
         async def _attempt_request(p: dict) -> Optional[bytes]:
