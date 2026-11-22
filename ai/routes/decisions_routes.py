@@ -11,7 +11,10 @@ Wer heute Jev ruft und vergleichen will, braucht diese Route nicht:
 """
 from __future__ import annotations
 
+import asyncio
 import json
+
+import httpx
 import logging
 import time
 from typing import Any, Dict, List, Optional, Union
@@ -65,12 +68,16 @@ async def ausfuehren(body: dict, caller: str, versuche: int = 3) -> dict:
     Groesse, Schluessel, Budget, Aufruf, Buchung. -> Upstream-Antwort
     plus cost_usd und latency_ms."""
     groesse = len(json.dumps(body, ensure_ascii=False))
-    if groesse > _MAX_ZEICHEN:
-        raise HTTPException(413, {"error": "request_too_large", "chars": groesse, "max_chars": _MAX_ZEICHEN})
+    grenze = min(_MAX_ZEICHEN, s.max_zeichen())
+    if groesse > grenze:
+        raise HTTPException(413, {"error": "request_too_large", "chars": groesse, "max_chars": grenze})
     if not s.schluessel():
         raise HTTPException(503, {"error": "openai_key_missing"})
+    # #3693: Kosten vor dem Aufruf reservieren, unter der Sperre. So haelt die
+    # Grenze auch bei gleichzeitigen Aufrufen und knapp unter dem Deckel.
+    betrag = s.schaetzung(groesse, versuche)
     try:
-        s.budget_pruefen(caller)
+        s.reservieren(caller, betrag)
     except s.DecisionsBudget as e:
         from datetime import datetime as _dt
         warte = max(1, int((_dt.fromisoformat(e.detail["resets_at"]) - _dt.now().astimezone()).total_seconds()))
@@ -79,18 +86,23 @@ async def ausfuehren(body: dict, caller: str, versuche: int = 3) -> dict:
     t0 = time.monotonic()
     try:
         code, data = await s.aufrufen(body, versuche=versuche)
-    except Exception as e:
-        s.buchen(caller, n, None, 0.0, fehler=True)
+    except BaseException as e:
+        # Nicht gesendet (Verbindung kam nicht zustande): 0. Sonst kann OpenAI die
+        # Anfrage berechnet haben (Zeitueberschreitung, Abbruch): Schaetzung buchen.
+        nicht_gesendet = isinstance(e, (httpx.ConnectError, httpx.ConnectTimeout))
+        s.abrechnen(caller, betrag, n, None, 0.0 if nicht_gesendet else betrag, fehler=True)
+        if isinstance(e, asyncio.CancelledError):
+            raise
         raise HTTPException(502, {"error": "decisions_upstream_unreachable", "exc": type(e).__name__})
     latenz = int((time.monotonic() - t0) * 1000)
     if code != 200:
-        s.buchen(caller, n, None, 0.0, fehler=True)
+        s.abrechnen(caller, betrag, n, None, 0.0, fehler=True)
         status = code if 400 <= code < 500 else 502
         raise HTTPException(status, {"error": "decisions_upstream_error", "upstream_status": code,
                                      "upstream_body": data, "latency_ms": latenz})
     usage = (data or {}).get("usage") or {}
     preis = s.kosten(usage)
-    s.buchen(caller, n, usage, preis)
+    s.abrechnen(caller, betrag, n, usage, preis)
     logger.info("decisions ok caller=%s q=%d in=%s cached=%s %dms", caller, n, usage.get("input_tokens"),
                 (usage.get("input_tokens_details") or {}).get("cached_tokens"), latenz)
     return {**data, "cost_usd": preis, "latency_ms": latenz}

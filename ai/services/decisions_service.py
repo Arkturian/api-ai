@@ -157,6 +157,68 @@ def budget_pruefen(caller: Optional[str] = None) -> None:
             raise DecisionsBudget(r, round(u, 6), eigen[0], eigen[1], caller=caller)
 
 
+def max_zeichen() -> int:
+    """#3693: Groesse je Aufruf, fuer /ai/decisions und /ai/jev?engine=openai.
+    Vorgabe wie Jev (400 000), Kundeninstanzen z. B. 32 000."""
+    try:
+        wert = int((os.getenv("DECISIONS_MAX_ZEICHEN") or "").strip())
+    except ValueError:
+        return 400_000
+    return wert if wert > 0 else 400_000
+
+
+def schaetzung(zeichen: int, versuche: int) -> float:
+    """Obergrenze der Kosten: jedes Zeichen als ein Token, voller Eingabepreis,
+    jeder Versuch zahlt. Decisions rechnet nur Eingabe ab."""
+    voll, _cache = _preise()
+    return max(int(zeichen), 0) * voll / 1_000_000.0 * max(int(versuche), 1)
+
+
+def _reserviert(z: dict) -> tuple:
+    return int(z.get("reserved_requests") or 0), float(z.get("reserved_usd") or 0.0)
+
+
+def reservieren(caller: str, betrag: float) -> None:
+    """#3693: Unter der Sperre nur aufrufen, wenn gebucht + reserviert + Schaetzung
+    die Grenze nicht ueberschreiten. Sonst DecisionsBudget (429). Eine Reservierung,
+    die ein abgestuerzter Prozess hinterlaesst, verfaellt mit dem Tag; sie sperrt
+    nur mehr, nie weniger."""
+    max_req, max_usd = _grenzen()
+    eigen = _aufrufer_grenzen("DECISIONS_CALLER_LIMITS", caller)
+    with _sperre():
+        d = _lesen()
+        rr, ru = _reserviert(d)
+        if (max_req > 0 and d["requests"] + rr + 1 > max_req) or \
+                (max_usd > 0 and d["cost_usd"] + ru + betrag > max_usd):
+            raise DecisionsBudget(d["requests"], round(d["cost_usd"], 6), max_req, max_usd)
+        c = d["by_caller"].setdefault(caller, {"requests": 0, "questions": 0, "input_tokens": 0,
+                                               "cached_tokens": 0, "cost_usd": 0.0, "errors": 0})
+        if eigen:
+            cr, cu = _reserviert(c)
+            if (eigen[0] > 0 and int(c.get("requests") or 0) + cr + 1 > eigen[0]) or \
+                    (eigen[1] > 0 and float(c.get("cost_usd") or 0.0) + cu + betrag > eigen[1]):
+                raise DecisionsBudget(int(c.get("requests") or 0), round(float(c.get("cost_usd") or 0.0), 6),
+                                      eigen[0], eigen[1], caller=caller)
+        for z in (d, c):
+            zr, zu = _reserviert(z)
+            z["reserved_requests"], z["reserved_usd"] = zr + 1, zu + betrag
+        _schreiben(d)
+
+
+def abrechnen(caller: str, betrag: float, fragen: int, usage: Optional[dict], cost_usd: float,
+              fehler: bool = False) -> None:
+    """Gibt die Reservierung frei und bucht die tatsaechlichen Kosten in einem Schritt."""
+    with _sperre():
+        d = _lesen()
+        c = d["by_caller"].setdefault(caller, {"requests": 0, "questions": 0, "input_tokens": 0,
+                                               "cached_tokens": 0, "cost_usd": 0.0, "errors": 0})
+        for z in (d, c):
+            zr, zu = _reserviert(z)
+            z["reserved_requests"], z["reserved_usd"] = max(zr - 1, 0), max(zu - betrag, 0.0)
+        _schreiben(d)
+    buchen(caller, fragen, usage, cost_usd, fehler=fehler)
+
+
 def buchen(caller: str, fragen: int, usage: Optional[dict], cost_usd: float,
            fehler: bool = False) -> None:
     usage = usage or {}
@@ -187,7 +249,10 @@ def status() -> dict:
                                  or (max_usd > 0 and d["cost_usd"] >= max_usd))
     d["resets_at"] = rueckstellung()
     d["cost_usd"] = round(d["cost_usd"], 8)
-    d["limits"] = {"max_requests_per_day": max_req, "max_usd_per_day": max_usd}
+    d["limits"] = {"max_requests_per_day": max_req, "max_usd_per_day": max_usd,
+                   "max_chars_per_request": max_zeichen()}
+    d["reserved_usd"] = round(float(d.get("reserved_usd") or 0.0), 8)
+    d["reserved_requests"] = int(d.get("reserved_requests") or 0)
     d["price_per_1m_input_usd"] = voll
     d["price_per_1m_cached_input_usd"] = cache
     d["scope"] = "per_host"
