@@ -28,6 +28,11 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      # Goal 21 / #3590: Prod hat kein aktuelles .git (die Kopie dort stammt von 2025). Der laufende
+      # Stand reist als Datei mit; der Abgleich des Betreibers liest ihn ohne GitHub-Zugang.
+      - name: Record deployed commit
+        run: echo "${{ github.sha }}" > .deployed-commit
+
       - name: Create deployment archive
         run: |
           echo "📦 Creating deployment archive for arkserver..."

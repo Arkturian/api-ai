@@ -46,3 +46,5 @@ dist/
 build/
 *.egg-info/
 
+# Goal 21: schreibt der Deploy, nie einchecken
+.deployed-commit
