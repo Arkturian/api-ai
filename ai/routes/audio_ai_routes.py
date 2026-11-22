@@ -12,7 +12,7 @@ from fastapi import APIRouter, Depends, HTTPException, File, Form, Query, Upload
 from fastapi.responses import JSONResponse
 from fastapi.encoders import jsonable_encoder
 from pydantic import BaseModel
-from typing import Optional
+from typing import Dict, Any, Optional
 import logging
 import time
 import re
@@ -65,6 +65,9 @@ class MusicRequest(BaseModel):
     duration: Optional[int] = 30
     model: Optional[str] = "suno"  # suno or eleven
     request_id: Optional[str] = None
+    # Nur /ai/genmusic_eleven: Abschnitte mit fester Dauer (ElevenLabs
+    # composition_plan). Dann gilt der Plan, `prompt` dient nur als Name.
+    composition_plan: Optional[Dict[str, Any]] = None
 
 
 def _job_vorab(rid: Optional[str], kind: str, nutzlast: dict):
@@ -1087,14 +1090,18 @@ async def generate_music_eleven_endpoint(
     """
     from ai.services import narrate_jobs as nj
     rid = request.request_id
-    replay = _job_vorab(rid, "music", {"prompt": request.prompt, "duration": request.duration, "model": "eleven"})
+    from ai.routes.music_generation import plan_pruefen
+    plan = plan_pruefen(request.composition_plan) if request.composition_plan is not None else None
+    replay = _job_vorab(rid, "music", {"prompt": request.prompt, "duration": request.duration, "model": "eleven",
+                                        **({"composition_plan": plan} if plan else {})})
     if replay:
         return replay
     try:
         duration_ms = request.duration * 1000  # Convert seconds to milliseconds
         if rid:
             nj.stufe(rid, "tts")
-        result = await generate_music_elevenlabs(request.prompt, duration_ms)
+        result = await generate_music_elevenlabs(request.prompt, duration_ms,
+                                                **({"composition_plan": plan} if plan else {}))
         # Gemessen, nicht bestellt: `duration_seconds` war bis 13.09. die
         # Bestellung, nicht die Datei.
         out = {
@@ -1104,7 +1111,8 @@ async def generate_music_eleven_endpoint(
             "id": result.get("id"),
             "saved": True,
             "duration_seconds": result.get("duration_seconds"),
-            "duration_requested_s": float(request.duration),
+            "duration_requested_s": (sum(x["duration_ms"] for x in plan["sections"]) / 1000.0) if plan
+                                    else float(request.duration),
             "format": result["format"],
             "request_id": rid,
             "replayed": False,
