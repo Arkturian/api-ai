@@ -91,15 +91,47 @@ def _sperre():
             fcntl.flock(f, fcntl.LOCK_UN)
 
 
+class ZaehlerUnlesbar(Exception):
+    """#3693 (Steward, 11572): Der Zaehler des Tages ist beschaedigt oder nicht
+    lesbar. Dann geht nichts hinaus, und es faengt nichts wieder bei null an."""
+
+    def __init__(self, datei: Path, grund: str):
+        super().__init__(f"decisions-Zaehler unlesbar: {grund}")
+        self.detail = {"error": "decisions_zaehler_unlesbar", "grund": grund,
+                       "hint": "Der Tageszaehler ist beschaedigt oder nicht lesbar. Bis ein Mensch "
+                               f"{datei.name} prueft, bleibt Decisions zu."}
+
+
+def _beiseitelegen(p: Path) -> None:
+    """Kopie zur Pruefung, einmal je Datei. Das Original bleibt liegen: Verschoben
+    saehe der naechste Aufruf keine Datei und begaenne den Tag bei null."""
+    try:
+        if any(p.parent.glob(p.name + ".unlesbar-*")):
+            return
+        ziel = p.with_name(f"{p.name}.unlesbar-{datetime.now().strftime('%H%M%S')}")
+        ziel.write_bytes(p.read_bytes())
+    except OSError as e:
+        logger.error("decisions: Zaehler nicht beiseitegelegt (%s)", type(e).__name__)
+
+
 def _lesen() -> dict:
     p = _datei()
-    if p.exists():
-        try:
-            return json.loads(p.read_text())
-        except (OSError, ValueError):
-            pass
-    return {"day": datetime.now().strftime("%Y-%m-%d"), "requests": 0, "questions": 0,
-            "input_tokens": 0, "cached_tokens": 0, "cost_usd": 0.0, "errors": 0, "by_caller": {}}
+    if not p.exists():
+        # Neuer Tag: die einzige Lage, in der der Zaehler bei null beginnt.
+        return {"day": datetime.now().strftime("%Y-%m-%d"), "requests": 0, "questions": 0,
+                "input_tokens": 0, "cached_tokens": 0, "cost_usd": 0.0, "errors": 0, "by_caller": {}}
+    try:
+        d = json.loads(p.read_text())
+        if not isinstance(d, dict) or not isinstance(d.get("by_caller"), dict):
+            raise ValueError("keine Zaehlerform")
+        float(d["cost_usd"]), int(d["requests"])
+    except (OSError, ValueError, KeyError, TypeError) as e:
+        grund = "nicht_lesbar" if isinstance(e, OSError) else "beschaedigt"
+        logger.critical("decisions: Tageszaehler %s ist %s (%s), Decisions bleibt zu",
+                        p.name, grund, type(e).__name__)
+        _beiseitelegen(p)
+        raise ZaehlerUnlesbar(p, grund)
+    return d
 
 
 def _schreiben(d: dict) -> None:
@@ -242,8 +274,13 @@ def buchen(caller: str, fragen: int, usage: Optional[dict], cost_usd: float,
 
 def status() -> dict:
     max_req, max_usd = _grenzen()
-    with _sperre():
-        d = _lesen()
+    try:
+        with _sperre():
+            d = _lesen()
+    except ZaehlerUnlesbar as e:
+        return {**e.detail, "budget_exhausted": True, "resets_at": rueckstellung(),
+                "limits": {"max_requests_per_day": max_req, "max_usd_per_day": max_usd,
+                           "max_chars_per_request": max_zeichen()}, "scope": "per_host"}
     voll, cache = _preise()
     d["budget_exhausted"] = bool((max_req > 0 and d["requests"] >= max_req)
                                  or (max_usd > 0 and d["cost_usd"] >= max_usd))

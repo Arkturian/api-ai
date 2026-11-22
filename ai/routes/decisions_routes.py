@@ -63,6 +63,15 @@ def fragen_pruefen(fragen: List[Dict[str, Any]]) -> None:
                 raise HTTPException(422, {"error": "score_levels_2_to_10", "name": name})
 
 
+def _abrechnen(*a, **k) -> None:
+    """Wurde der Zaehler zwischen Reservieren und Abrechnen unlesbar, nichts
+    ueberschreiben. Folgeaufrufe lehnt reservieren() ohnehin ab."""
+    try:
+        s.abrechnen(*a, **k)
+    except s.ZaehlerUnlesbar:
+        logger.critical("decisions: Aufruf nicht gebucht, Zaehler unlesbar")
+
+
 async def ausfuehren(body: dict, caller: str, versuche: int = 3) -> dict:
     """Gemeinsamer Kern fuer /ai/decisions und /ai/jev?engine=openai:
     Groesse, Schluessel, Budget, Aufruf, Buchung. -> Upstream-Antwort
@@ -78,6 +87,8 @@ async def ausfuehren(body: dict, caller: str, versuche: int = 3) -> dict:
     betrag = s.schaetzung(groesse, versuche)
     try:
         s.reservieren(caller, betrag)
+    except s.ZaehlerUnlesbar as e:
+        raise HTTPException(503, e.detail)
     except s.DecisionsBudget as e:
         from datetime import datetime as _dt
         warte = max(1, int((_dt.fromisoformat(e.detail["resets_at"]) - _dt.now().astimezone()).total_seconds()))
@@ -90,19 +101,19 @@ async def ausfuehren(body: dict, caller: str, versuche: int = 3) -> dict:
         # Nicht gesendet (Verbindung kam nicht zustande): 0. Sonst kann OpenAI die
         # Anfrage berechnet haben (Zeitueberschreitung, Abbruch): Schaetzung buchen.
         nicht_gesendet = isinstance(e, (httpx.ConnectError, httpx.ConnectTimeout))
-        s.abrechnen(caller, betrag, n, None, 0.0 if nicht_gesendet else betrag, fehler=True)
+        _abrechnen(caller, betrag, n, None, 0.0 if nicht_gesendet else betrag, fehler=True)
         if isinstance(e, asyncio.CancelledError):
             raise
         raise HTTPException(502, {"error": "decisions_upstream_unreachable", "exc": type(e).__name__})
     latenz = int((time.monotonic() - t0) * 1000)
     if code != 200:
-        s.abrechnen(caller, betrag, n, None, 0.0, fehler=True)
+        _abrechnen(caller, betrag, n, None, 0.0, fehler=True)
         status = code if 400 <= code < 500 else 502
         raise HTTPException(status, {"error": "decisions_upstream_error", "upstream_status": code,
                                      "upstream_body": data, "latency_ms": latenz})
     usage = (data or {}).get("usage") or {}
     preis = s.kosten(usage)
-    s.abrechnen(caller, betrag, n, usage, preis)
+    _abrechnen(caller, betrag, n, usage, preis)
     logger.info("decisions ok caller=%s q=%d in=%s cached=%s %dms", caller, n, usage.get("input_tokens"),
                 (usage.get("input_tokens_details") or {}).get("cached_tokens"), latenz)
     return {**data, "cost_usd": preis, "latency_ms": latenz}
