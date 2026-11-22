@@ -267,9 +267,7 @@ async def _jev_jwt_pflicht(request, call_next):
 
 @app.middleware("http")
 async def _require_api_key(request, call_next):
-    erwartet = os.getenv(_API_KEY_ENV)
-    if not erwartet:
-        return await call_next(request)
+    erwartet = (os.getenv(_API_KEY_ENV) or "").strip()
     pfad = request.url.path
     if not _ist_bezahlpfad(pfad) or pfad in _OFFENE_PFADE:
         return await call_next(request)
@@ -277,6 +275,17 @@ async def _require_api_key(request, call_next):
     # gesetzten API_ACCESS_KEY. Hier wuerde nur der Betreiberschluessel scheitern.
     if pfad == "/ai/openai" or pfad.startswith("/ai/openai/"):
         return await call_next(request)
+    if not erwartet:
+        # #3607: Unser Kern bleibt ohne Schluessel offen (nginx schuetzt, #1755).
+        # Eine Kundeninstanz ohne Schluessel haette alle Bezahlpfade offen, also zu.
+        if auth_konfig.zustand() == auth_konfig.VORGABE:
+            return await call_next(request)
+        logging.getLogger("api-ai.authwatch").error(
+            "GESPERRT path=%s: Kundeninstanz ohne %s (#3607)", pfad, _API_KEY_ENV)
+        return JSONResponse(status_code=503, content={"detail": {
+            "error": "api_key_not_configured",
+            "hint": "Diese Instanz braucht API_ACCESS_KEY fuer die Bezahlpfade.",
+        }})
     geliefert = request.headers.get(_KEY_HEADER) or ""
     # `compare_digest` statt `==`: gleiche Laufzeit unabhaengig davon,
     # an welcher Stelle zwei Schluessel sich unterscheiden.

@@ -25,12 +25,15 @@ import main
 
 
 def test_ohne_gesetzten_schluessel_wird_nicht_gesperrt():
+    """Ohne Schluessel reicht das Tor nur auf unserem Kern (vorgabe) durch.
+    Eine Kundeninstanz ohne Schluessel bleibt zu (#3607,
+    test_3607_alle_routen.py prueft das am Verhalten)."""
     quelle = inspect.getsource(main._require_api_key)
-    assert 'erwartet = os.getenv(_API_KEY_ENV)' in quelle
     assert 'if not erwartet:' in quelle
-    # Und er reicht dann durch, statt abzuweisen.
-    kopf = quelle.split('if not erwartet:')[1].split('\n')[1]
-    assert 'return await call_next(request)' in kopf
+    zweig = quelle.split('if not erwartet:')[1]
+    kern = zweig.split('auth_konfig.VORGABE:')[1].split('\n')[1]
+    assert 'return await call_next(request)' in kern
+    assert 'api_key_not_configured' in zweig
 
 
 def test_fehlende_konfiguration_ist_laut():
@@ -62,7 +65,10 @@ def test_abweisung_nennt_den_grund_ohne_den_schluessel_zu_verraten():
     assert 'status_code=401' in quelle
     assert 'api_key_required' in quelle
     # Der erwartete Wert darf NIE in der Antwort oder im Protokoll stehen.
-    assert 'erwartet' not in quelle.split('JSONResponse')[1]
+    antworten = [t.split('})')[0] for t in quelle.split('JSONResponse(')[1:]]
+    assert len(antworten) >= 2
+    for a in antworten:
+        assert 'erwartet' not in a
 
 
 def test_nur_bezahlpfade_sind_betroffen():
