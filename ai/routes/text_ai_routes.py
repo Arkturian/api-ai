@@ -2897,6 +2897,11 @@ async def gemini_endpoint(
     weiter = await _gemini_weiterreichen(prompt, model, request)
     if weiter is not None:
         return weiter
+    # #3656: Instanz ohne eigenes agy (P3) -> Text ueber den Kern.
+    from ..services import gemini_kern
+    if gemini_kern.ziel():
+        return AIResponse(**{k: v for k, v in (await gemini_kern.aufrufen(prompt, model, request)).items()
+                             if k in AIResponse.model_fields})
 
     _weise_response_format_ab(prompt, endpoint="gemini")
     _weise_tools_aus_ab(prompt, endpoint="gemini")
@@ -3109,7 +3114,8 @@ async def gemini_endpoint(
         logger.info(f"Gemini CLI returncode: {result.returncode}")
         logger.info(f"Gemini CLI stdout length: {len(result.stdout) if result.stdout else 0}")
         if result.stderr:
-            logger.info(f"Gemini CLI stderr: {result.stderr[:200]}")
+            if not gemini_kern.IM_KERN.get():   # #3656: von P3 keine Inhalte ins Journal
+                logger.info(f"Gemini CLI stderr: {result.stderr[:200]}")
 
         raw_output = result.stdout.strip() if result.stdout else ""
 

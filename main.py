@@ -370,7 +370,8 @@ async def _extern_tor(request, call_next):
     if request.method != "OPTIONS" and (pfad == "/ai/extern" or pfad.startswith("/ai/extern/")):
         from ai.services import extern_zugang
         try:
-            request.state.extern = extern_zugang.pruefen(request.headers.get(_KEY_HEADER))
+            request.state.extern = extern_zugang.pruefen(request.headers.get(_KEY_HEADER),
+                                                         request.headers.get("X-Extern-Aufrufer"))
         except HTTPException as e:
             return JSONResponse(status_code=e.status_code, content={"detail": e.detail})
     return await call_next(request)

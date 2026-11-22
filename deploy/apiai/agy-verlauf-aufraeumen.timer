@@ -1,0 +1,10 @@
+[Unit]
+Description=api-ai: agy-Verlauf alle 5 Minuten loeschen (#3656)
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target
