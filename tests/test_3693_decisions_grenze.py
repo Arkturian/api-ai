@@ -150,3 +150,64 @@ def test_status_zeigt_reservierungen(monkeypatch):
     assert st["limits"]["max_chars_per_request"] == 400_000
     s.abrechnen("test", 0.1, 1, {"input_tokens": 10}, 0.000001)
     assert stand()["reserved_usd"] == 0
+
+
+# --- Punkt 6 (Steward, 11572): beschaedigter oder unlesbarer Zaehler ---------
+
+def _tagesdatei():
+    return s._datei()
+
+
+@pytest.mark.parametrize("inhalt", ["{kaputt", "[]", '{"requests": 1}', '{"requests": "x", "cost_usd": 0.4, "by_caller": {}}'])
+def test_beschaedigter_zaehler_lehnt_ab_und_bleibt_liegen(monkeypatch, inhalt):
+    gerufen = []
+    monkeypatch.setattr(s, "aufrufen", lambda *a, **k: gerufen.append(1) or asyncio.sleep(0, antwort_fuer(a[0])))
+    p = _tagesdatei()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(inhalt)
+    for _ in range(3):
+        with pytest.raises(HTTPException) as e:
+            asyncio.run(d.ausfuehren(rumpf(1000), "test", versuche=1))
+        assert (e.value.status_code, e.value.detail["error"]) == (503, "decisions_zaehler_unlesbar")
+    assert gerufen == [] and p.read_text() == inhalt
+    kopien = list(p.parent.glob(p.name + ".unlesbar-*"))
+    assert len(kopien) == 1 and kopien[0].read_text() == inhalt
+    st = s.status()
+    assert st["error"] == "decisions_zaehler_unlesbar" and st["budget_exhausted"] is True
+
+
+def test_unlesbarer_zaehler_lehnt_ab(monkeypatch):
+    import os
+    if os.geteuid() == 0:
+        pytest.skip("root liest jede Datei")
+    gerufen = []
+    monkeypatch.setattr(s, "aufrufen", lambda *a, **k: gerufen.append(1) or asyncio.sleep(0, antwort_fuer(a[0])))
+    s.buchen("test", 1, {"input_tokens": 0}, 0.40)
+    p = _tagesdatei()
+    p.chmod(0)
+    try:
+        with pytest.raises(HTTPException) as e:
+            asyncio.run(d.ausfuehren(rumpf(1000), "test", versuche=1))
+        assert (e.value.status_code, e.value.detail["grund"]) == (503, "nicht_lesbar") and gerufen == []
+    finally:
+        p.chmod(0o600)
+    assert s.status()["cost_usd"] == pytest.approx(0.40)
+
+
+def test_fehlende_datei_ist_ein_neuer_tag(monkeypatch):
+    monkeypatch.setattr(s, "aufrufen", lambda *a, **k: asyncio.sleep(0, antwort_fuer(a[0])))
+    assert not _tagesdatei().exists()
+    assert "cost_usd" in asyncio.run(d.ausfuehren(rumpf(1000), "test", versuche=1))
+
+
+def test_zaehler_wird_waehrend_des_aufrufs_unlesbar(monkeypatch):
+    """Bezahlter Aufruf, danach Zaehler kaputt: nichts ueberschreiben, Folgeaufrufe zu."""
+    async def aufruf_und_kaputt(body, timeout_s=15.0, versuche=3):
+        _tagesdatei().write_text("{kaputt")
+        return antwort_fuer(body)
+    monkeypatch.setattr(s, "aufrufen", aufruf_und_kaputt)
+    asyncio.run(d.ausfuehren(rumpf(1000), "test", versuche=1))
+    assert _tagesdatei().read_text() == "{kaputt"
+    with pytest.raises(HTTPException) as e:
+        asyncio.run(d.ausfuehren(rumpf(1000), "test", versuche=1))
+    assert e.value.status_code == 503
