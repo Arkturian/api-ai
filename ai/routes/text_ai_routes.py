@@ -1307,6 +1307,13 @@ def _claude_konto_vorab() -> None:
     pfad = Path(os.getenv("CLAUDE_CONFIG_DIR") or Path.home() / ".claude") / ".credentials.json"
     try:
         d = _j.loads(pfad.read_text())
+    except PermissionError:
+        # #3658: Der Dienst (apiai, #2937) kann die Anmeldung nicht lesen. Dann laeuft
+        # die CLI sicher nicht: klar als „kein Konto“ melden statt sie zu starten.
+        raise HTTPException(status_code=503, headers={"Retry-After": "600"}, detail={
+            "error": "claude_account_unavailable", "grund": "anmeldung_nicht_lesbar",
+            "message": "Der Dienst kann die Claude-Anmeldung nicht lesen.",
+            "reason": None, "resets": None, "fallback": None})
     except Exception:
         return
     if isinstance(d, dict) and d.get("agentosNoAccount"):
@@ -1573,7 +1580,11 @@ async def _claude_mit_rechten(
             if result.returncode != 0:
                 error_msg = result.stderr or "Unknown error from claude CLI (empty response)"
                 logger.error(f"Claude CLI error (empty stdout): {error_msg}")
-                raise HTTPException(status_code=500, detail=f"Claude CLI error: {error_msg}")
+                # #3658: dauerhafte Zustaende mit festem Code, damit die Kette sie
+                # nicht als kurzen Aussetzer liest.
+                if re.search(r"Permission denied|cannot execute|command not found|No such file", error_msg):
+                    raise _cli_nicht_installiert("claude", f"Claude CLI nicht ausfuehrbar: {error_msg[:300]}")
+                raise _cli_fehler("claude", 500, f"Claude CLI error: {error_msg}")
 
             raise HTTPException(status_code=500, detail="Claude CLI returned empty response")
 
