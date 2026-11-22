@@ -1,0 +1,12 @@
+[Unit]
+Description=api-ai: agy-Verlauf auf dem Kern loeschen (#3656, keine Prompt-Inhalte)
+
+[Service]
+Type=oneshot
+User=apiai-agy
+Group=apiai-agy
+ExecStart=/usr/local/lib/api-ai/agy-verlauf-aufraeumen.sh
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/apiai-agy/.gemini/antigravity-cli
+PrivateTmp=yes

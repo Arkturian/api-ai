@@ -91,14 +91,16 @@ def test_erfolg_mit_vorgabemodell(client, agy):
     assert (p.prompt, p.system, p.tools, p.image_paths, p.persona_variant) == ("sag pong", "kurz", None, None, None)
 
 
-@pytest.mark.parametrize("modell", ["gemini-4-hydrogen", "gemini-4-hydrogen-medium", "gemini-4-hydrogen-xhigh"])
+@pytest.mark.parametrize("modell", ["gemini-4-hydrogen", "gemini-4-hydrogen-medium", "gemini-4-hydrogen-xhigh",
+                                    "gemini-4-carbon", "gemini-4-carbon-medium", "gemini-4-carbon-high"])
 def test_hydrogen_modelle(client, agy, modell):
     zugang()
     assert client.post(PFAD, json={"prompt": "x", "model": modell}, headers=K).json()["model"] == modell
 
 
 @pytest.mark.parametrize("rumpf", [
-    {"prompt": "x", "model": "gemini-4-carbon-medium"},
+    {"prompt": "x", "model": "gemini-4-carbon-xhigh"},
+    {"prompt": "x", "model": "gemini-4-neon-low"},
     {"prompt": "x", "model": "gemini-4-hydrogen-ultra"},
     {"prompt": "x", "model": "gpt-6-luna"},
     {"prompt": "x", "image_paths": ["/etc/passwd"]},

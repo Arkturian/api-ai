@@ -171,3 +171,17 @@ und über den Aussteller ist damit nichts bewiesen.
   `/ai/grok`) laufen über Anmeldungen im Home des Dienstnutzers, nicht über
   Umgebungsvariablen. Ohne eigene Logins existieren diese Endpunkte auf der
   Instanz faktisch nicht.
+
+## Gemini über den Kern (#3656, nur P3)
+
+Eine Instanz ohne eigenes agy (P3) nutzt Gemini Hydrogen und Carbon über den Kern. Ohne `GEMINI_KERN_URL` ändert sich nichts.
+
+| Variable | Bedeutung |
+|---|---|
+| `GEMINI_KERN_URL` | z. B. `https://api-ai.arkturian.com`. `/ai/gemini` reicht dann reine Textaufrufe an `<URL>/ai/extern/hydrogen` weiter. |
+| `GEMINI_KERN_SCHLUESSEL_DATEI` | Datei mit dem Zugangsschlüssel, Vorgabe `/etc/agentos/kern-hydrogen.key` (0600). |
+| `GEMINI_KERN_AUFRUFER` | Kommaliste freigegebener Aufrufer (geprüftes JWT, sonst `X-Agent-Name`). Leer heißt: niemand. P3: zuerst nur `Cloud` (Sprechstile). Weitere erst nach Jaschas Zustimmung. |
+
+Nicht über den Kern: Bilder, `conversation_history`, `persona_variant`, Werkzeuge und andere Modelle als `gemini-4-hydrogen[-low|-medium|-high|-xhigh]` und `gemini-4-carbon[-low|-medium|-high]` (422 `gemini_kern_nicht_moeglich`). Nicht freigegebene Aufrufer bekommen 403 `gemini_kern_aufrufer_gesperrt`, bevor etwas die Instanz verlässt.
+
+Auf dem Kern: Zugang je Instanz in `/etc/api-ai/extern_zugang.json` (nur Hash, `tag_max`, optional `aufrufer`), Protokoll nur mit Metadaten, agy-Verlauf wird alle 5 Minuten gelöscht (`agy-verlauf-aufraeumen.timer`).
