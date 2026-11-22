@@ -233,3 +233,41 @@ def test_kaputte_grenzen_tabelle_gilt_als_nicht_gesetzt(umgebung, monkeypatch):
     monkeypatch.setenv("JEV_CALLER_LIMITS", "{kaputt")
     monkeypatch.setattr(j, "_jwt_sub_geprueft", lambda a: "service:storage-api")
     asyncio.run(j.jev_endpoint(_req(), authorization="Bearer st"))
+
+
+# --- #3712 (wie #3693 Punkt 6): beschaedigter oder unlesbarer Zaehler ------
+
+@pytest.mark.parametrize("inhalt", ["{kaputt", "[]", '{"requests": 1}',
+                                    '{"requests": 1, "cost_usd": 1, "by_caller": {}}'])
+def test_beschaedigter_zaehler_lehnt_ab_und_bleibt_liegen(umgebung, inhalt):
+    calls, _, _ = umgebung
+    p = s._datei()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(inhalt)
+    with pytest.raises(HTTPException) as e:
+        asyncio.run(j.jev_endpoint(_req(), x_agent_name="Jev"))
+    assert (e.value.status_code, e.value.detail["error"]) == (503, "jev_zaehler_unlesbar")
+    assert calls == [] and p.read_text() == inhalt
+    assert [k.read_text() for k in p.parent.glob(p.name + ".unlesbar-*")] == [inhalt]
+    assert s.status()["budget_exhausted"] is True
+
+
+def test_unlesbarer_zaehler_lehnt_ab(umgebung):
+    import os
+    if os.geteuid() == 0:
+        pytest.skip("root liest jede Datei")
+    calls, _, _ = umgebung
+    asyncio.run(j.jev_endpoint(_req(), x_agent_name="Jev"))
+    p = s._datei()
+    p.chmod(0)
+    try:
+        with pytest.raises(HTTPException) as e:
+            asyncio.run(j.jev_endpoint(_req(), x_agent_name="Jev"))
+        assert (e.value.status_code, e.value.detail["grund"]) == (503, "nicht_lesbar") and len(calls) == 1
+    finally:
+        p.chmod(0o600)
+
+
+def test_fehlende_datei_ist_ein_neuer_tag(umgebung):
+    assert not s._datei().exists()
+    assert "answers" in asyncio.run(j.jev_endpoint(_req(), x_agent_name="Jev"))

@@ -80,14 +80,25 @@ def _sperre():
 
 
 def _lesen() -> dict:
+    """#3712 wie #3693: Nur eine fehlende Datei beginnt den Tag bei null. Beschaedigt
+    oder nicht lesbar -> ZaehlerUnlesbar (503), Original bleibt, Kopie daneben."""
+    from ai.services.decisions_service import ZaehlerUnlesbar, _beiseitelegen
     p = _datei()
-    if p.exists():
-        try:
-            return json.loads(p.read_text())
-        except (OSError, ValueError):
-            pass
-    return {"day": datetime.now().strftime("%Y-%m-%d"), "requests": 0, "input_tokens": 0,
-            "output_tokens": 0, "cost_usd": 0.0, "errors": 0, "by_caller": {}, "models_seen": {}}
+    if not p.exists():
+        return {"day": datetime.now().strftime("%Y-%m-%d"), "requests": 0, "input_tokens": 0,
+                "output_tokens": 0, "cost_usd": 0.0, "errors": 0, "by_caller": {}, "models_seen": {}}
+    try:
+        d = json.loads(p.read_text())
+        if not isinstance(d, dict) or not isinstance(d.get("by_caller"), dict) \
+                or not isinstance(d.get("models_seen"), dict):
+            raise ValueError("keine Zaehlerform")
+        float(d["cost_usd"]), int(d["requests"])
+    except (OSError, ValueError, KeyError, TypeError) as e:
+        grund = "nicht_lesbar" if isinstance(e, OSError) else "beschaedigt"
+        logger.critical("jev: Tageszaehler %s ist %s (%s), Jev bleibt zu", p.name, grund, type(e).__name__)
+        _beiseitelegen(p)
+        raise ZaehlerUnlesbar(p, grund, dienst="jev")
+    return d
 
 
 def _schreiben(d: dict) -> None:
@@ -115,8 +126,14 @@ def budget_pruefen(caller: Optional[str] = None) -> None:
 
 def buchen(caller: str, model: Optional[str], input_tokens: int, output_tokens: int,
            cost_usd: float, fehler: bool = False) -> None:
+    from ai.services.decisions_service import ZaehlerUnlesbar
     with _sperre():
-        d = _lesen()
+        try:
+            d = _lesen()
+        except ZaehlerUnlesbar:
+            # Nie ueberschreiben; Folgeaufrufe lehnt budget_pruefen ab.
+            logger.critical("jev: Aufruf nicht gebucht, Zaehler unlesbar")
+            return
         d["requests"] += 1
         d["input_tokens"] += int(input_tokens or 0)
         d["output_tokens"] += int(output_tokens or 0)
@@ -146,9 +163,14 @@ def rueckstellung() -> str:
 
 
 def status() -> dict:
+    from ai.services.decisions_service import ZaehlerUnlesbar
     max_req, max_usd = _grenzen()
-    with _sperre():
-        d = _lesen()
+    try:
+        with _sperre():
+            d = _lesen()
+    except ZaehlerUnlesbar as e:
+        return {**e.detail, "budget_exhausted": True, "resets_at": rueckstellung(),
+                "limits": {"max_requests_per_day": max_req, "max_usd_per_day": max_usd}, "scope": "per_host"}
     erschoepft = (max_req > 0 and d["requests"] >= max_req) or (max_usd > 0 and d["cost_usd"] >= max_usd)
     d["budget_exhausted"] = bool(erschoepft)
     d["resets_at"] = rueckstellung()
