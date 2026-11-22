@@ -362,6 +362,20 @@ async def _openai_tor(request, call_next):
     return await call_next(request)
 
 
+@app.middleware("http")
+async def _extern_tor(request, call_next):
+    """#3656: Der Schluessel einer anderen Instanz wird VOR dem Lesen des Rumpfs
+    geprueft. Ohne Zugangsdatei ist der Weg aus (503), so auf allen Instanzen."""
+    pfad = request.url.path
+    if request.method != "OPTIONS" and (pfad == "/ai/extern" or pfad.startswith("/ai/extern/")):
+        from ai.services import extern_zugang
+        try:
+            request.state.extern = extern_zugang.pruefen(request.headers.get(_KEY_HEADER))
+        except HTTPException as e:
+            return JSONResponse(status_code=e.status_code, content={"detail": e.detail})
+    return await call_next(request)
+
+
 # #1184: Nur Beobachtung. Misst, wen ein Tor auf dem Kern sperren wuerde, und
 # sperrt selbst niemanden. Die Stimme hat ihren eigenen Grant-Weg.
 _KERN_TOR_PFADE = _MODELLPFADE + _BEZAHLPFADE
@@ -439,6 +453,8 @@ from ai.routes import verbrauch_routes  # noqa: E402
 app.include_router(verbrauch_routes.router, prefix="/ai", tags=["Verbrauch"])
 from ai.routes import codex_konten_routes  # noqa: E402
 app.include_router(codex_konten_routes.router, prefix="/ai", tags=["Codex-Konten"])
+from ai.routes import extern_routes  # noqa: E402
+app.include_router(extern_routes.router, prefix="/ai", tags=["Extern (#3656)"])
 from ai.routes import audio_mix_routes  # noqa: E402
 app.include_router(audio_mix_routes.router, prefix="/ai", tags=["Audio Mix"])
 app.include_router(music_ai_routes.router, prefix="/ai", tags=["Music AI"])

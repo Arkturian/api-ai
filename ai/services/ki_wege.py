@@ -253,28 +253,36 @@ def hydrogen_tag_max() -> int:
 def hydrogen_tag_buchen() -> None:
     """Zaehlt einen Aufruf. Am Deckel 429 `kontingent` bis Mitternacht. Ist der Zaehler
     nicht schreibbar, geht nichts hinaus: Eine Sperre von 130 h traefe alle Wege."""
+    tag_buchen("claude_hydrogen", hydrogen_tag_max())
+
+
+def tag_buchen(name: str, tag_max: int) -> None:
+    """Tageszaehler `<name>_<tag>.json` unter VERBRAUCH_DIR, gemeinsam fuer
+    /ai/claude (#3652) und /ai/extern/hydrogen (#3656, je Aufrufer)."""
+    if not re.fullmatch(r"[a-z0-9_-]{1,64}", name or ""):
+        raise HTTPException(status_code=503, detail={"error": "hydrogen_zaehler_fehlt"})
     jetzt = datetime.now().astimezone().replace(microsecond=0)
     tag = jetzt.date().isoformat()
     verzeichnis = Path(os.getenv("VERBRAUCH_DIR") or "/var/lib/api-ai/verbrauch")
     tmp = None
     try:
         verzeichnis.mkdir(parents=True, exist_ok=True)
-        fd = os.open(verzeichnis / ".claude_hydrogen.lock", os.O_RDWR | os.O_CREAT, 0o600)
+        fd = os.open(verzeichnis / f".{name}.lock", os.O_RDWR | os.O_CREAT, 0o600)
         with os.fdopen(fd, "r+") as sperre:
             fcntl.flock(sperre, fcntl.LOCK_EX)
-            pfad = verzeichnis / f"claude_hydrogen_{tag}.json"
+            pfad = verzeichnis / f"{name}_{tag}.json"
             try:
                 n = int(json.loads(pfad.read_text()).get("anfragen") or 0)
             except FileNotFoundError:
                 n = 0
-            if n >= hydrogen_tag_max():
+            if n >= tag_max:
                 naechster = (jetzt.replace(tzinfo=None) + timedelta(days=1)).replace(hour=0, minute=0, second=0)
                 bis = naechster.astimezone().isoformat()
                 sek = max(1, int((naechster.astimezone() - jetzt).total_seconds()))
                 raise HTTPException(status_code=429, headers={"Retry-After": str(sek)}, detail={
                     "error": "kontingent", "weg": "agy", "grund": "tagesdeckel", "resets_at": bis,
                     "hint": "daily quota reached, try again at 00:00"})
-            wfd, tmp = tempfile.mkstemp(dir=verzeichnis, prefix=".claude_hydrogen.")   # 0600
+            wfd, tmp = tempfile.mkstemp(dir=verzeichnis, prefix=f".{name}.")   # 0600
             with os.fdopen(wfd, "w") as f:
                 json.dump({"anfragen": n + 1}, f)
             os.replace(tmp, pfad)

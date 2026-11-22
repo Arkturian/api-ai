@@ -119,3 +119,10 @@ def _agentos_jwt_in_tmp(monkeypatch, tmp_path):
     jp._zuruecksetzen()
     yield
     jp._zuruecksetzen()
+
+
+@pytest.fixture(autouse=True)
+def _extern_zugang_in_tmp(monkeypatch, tmp_path):
+    """#3656: Die echte Zugangsdatei des Kerns liest kein Test. Ohne Datei ist
+    /ai/extern/hydrogen aus, wie auf jeder Instanz."""
+    monkeypatch.setenv("EXTERN_ZUGANG_DATEI", str(tmp_path / "extern_zugang.json"))
