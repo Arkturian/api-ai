@@ -764,6 +764,9 @@ async def _transcribe_with_whisper(
     base, _ = os.path.splitext(file.filename or "audio")
     data, ext = _normalize_audio_for_openai(data, base)
     duration_seconds = _audio_duration_seconds(data)
+    # #3958: Tagesgrenze eines Dienst-JWT, vor dem Anbieteraufruf.
+    from ai.services import dienst_jwt as _dj
+    _dj.transcribe_buchen(duration_seconds)
     audio_buffer = io.BytesIO(data)
     audio_buffer.name = (base or "audio") + ext
 
@@ -985,6 +988,8 @@ async def _transcribe_with_gemini(
             "hint": "Die Dauer der Aufnahme liess sich nicht lesen; ohne sie "
                     "kann der Betrag nicht vorab geprueft werden.",
         })
+    from ai.services import dienst_jwt as _dj   # #3958
+    _dj.transcribe_buchen(dauer)
     minuten = dauer / 60.0
     res = gu.reservieren("transcribe", model, minuten, aufrufer=aufrufer)
 

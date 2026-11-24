@@ -65,6 +65,13 @@ def betreiber_oder_lokal(request: Request,
         return "betreiber"
     if von_diesem_host(request):
         return "lokal"
+    # #3958: geprueftes Dienst-JWT mit dem Recht genau dieser Route (Middleware
+    # _dienst_jwt setzt den Zustand nur fuer freigegebene Routen).
+    try:
+        if request is not None and getattr(request.state, "dienst", None):
+            return "dienst"
+    except Exception:
+        pass
     raise HTTPException(status_code=401, detail={
         "error": "operator_or_local_required",
         "hint": "Nur fuer Dienste auf diesem Host oder mit X-API-KEY des Hosts."})

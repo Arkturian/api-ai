@@ -290,6 +290,9 @@ async def _require_api_key(request, call_next):
     pfad = request.url.path
     if not _ist_bezahlpfad(pfad) or pfad in _OFFENE_PFADE:
         return await call_next(request)
+    # #3958: Ein geprueftes Dienst-JWT mit dem Recht dieser Route ersetzt den Schluessel.
+    if getattr(request.state, "dienst", None):
+        return await call_next(request)
     # #3640: Diese Routen pruefen selbst (betreiber_oder_instanz), auch ohne
     # gesetzten API_ACCESS_KEY. Hier wuerde nur der Betreiberschluessel scheitern.
     if pfad == "/ai/openai" or pfad.startswith("/ai/openai/"):
@@ -345,6 +348,8 @@ def _modelltor_gilt(pfad: str) -> bool:
 async def _modelltor(request, call_next):
     pfad = request.url.path
     if not _modelltor_gilt(pfad):
+        return await call_next(request)
+    if getattr(request.state, "dienst", None):   # #3958
         return await call_next(request)
     soll = (os.getenv(_API_KEY_ENV) or "").strip()
     if not soll:
@@ -455,6 +460,32 @@ async def _log_auth_presence(request, call_next):
         # Eine Messung darf den Dienst nie stoeren.
         pass
     return await call_next(request)
+
+
+@app.middleware("http")
+async def _dienst_jwt(request, call_next):
+    """#3958: Dienst-JWT (auth-api, type=service) mit woertlichem Recht je Route.
+    Als letzte Middleware angelegt, laeuft also zuerst: vor Schluesseltor,
+    Modelltor und Jev-Tor. Ein Dienst-JWT mit ai:-Rechten ist auf seine Routen
+    begrenzt (sonst 403). Ohne Dienst-JWT: unveraendert."""
+    import asyncio as _asyncio
+    from ai.services import dienst_jwt as _dj
+    try:
+        erg = await _asyncio.to_thread(_dj.entscheiden, request.method, request.url.path,
+                                       request.headers.get("authorization"))
+        if erg:
+            await _asyncio.to_thread(_dj.vor_aufruf, erg, request.method, request.url.path)
+    except HTTPException as e:
+        return JSONResponse(status_code=e.status_code, content={"detail": e.detail},
+                            headers=getattr(e, "headers", None))
+    if not erg:
+        return await call_next(request)
+    request.state.dienst = erg
+    marke = _dj.AKTUELL.set(erg)
+    try:
+        return await call_next(request)
+    finally:
+        _dj.AKTUELL.reset(marke)
 
 
 # Include routers
