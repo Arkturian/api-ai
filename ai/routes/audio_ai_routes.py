@@ -441,6 +441,54 @@ async def _fetch_audio_from_url(url: str) -> UploadFile:
     return UploadFile(file=buf, filename=path_name)
 
 
+# #3980: OpenAI-Preise je Audiominute (Stand 04.09.2026, Post zum transcribe-Vertrag).
+_OPENAI_STT_USD_JE_MIN = {
+    "whisper-1": 0.006,
+    "gpt-4o-transcribe": 0.006,
+    "gpt-4o-transcribe-diarize": 0.006,
+    "gpt-4o-mini-transcribe": 0.003,
+}
+_STT_TOR_ENV = "TRANSCRIBE_BILLING_TOR"
+
+
+def _bestaetigt(wert) -> bool:
+    return str(wert).strip().lower() in ("true", "1", "yes", "y")
+
+
+def _openai_stt_tor(confirm_api_billing, model: str, authorization=None, x_agent_name=None) -> Optional[dict]:
+    """#3980: `confirm_api_billing` fuer die bezahlten OpenAI-Modelle.
+
+    TRANSCRIBE_BILLING_TOR:
+    - `beobachten` (Vorgabe, auch leer): nichts gesperrt; Warnung im Journal und
+      `billing_hinweis` in der Antwort. So sehen comm-api und das MCP-Werkzeug,
+      die das Flag heute nicht schicken, den Hinweis, bevor das Tor zugeht.
+    - jeder andere Wert (`an`): ohne Flag 403 mit Preis, vor Abruf und Anbieter.
+    """
+    if _bestaetigt(confirm_api_billing):
+        return None
+    preis = _OPENAI_STT_USD_JE_MIN.get(model)
+    detail = {
+        "error": "api_billing_confirmation_required",
+        "endpoint": "transcribe-openai",
+        "model": model,
+        "usd_per_minute": preis,
+        "hint": ("Dieser Weg wird je Audiominute ueber das OpenAI-Konto abgerechnet, "
+                 "kein Abo. Mit `confirm_api_billing=true` (Formularfeld) bestaetigen."),
+    }
+    modus = (os.getenv(_STT_TOR_ENV) or "beobachten").strip().lower()
+    if modus != "beobachten":
+        raise HTTPException(status_code=403, detail=detail)
+    try:
+        from ai.services.bild_verbrauch import aufrufer as _aufrufer
+        wer, _q = _aufrufer(authorization, x_agent_name)
+    except Exception:
+        wer = "?"
+    logger.warning("TRANSCRIBE OHNE confirm_api_billing caller=%s model=%s (#3980, Tor beobachtet)",
+                   str(wer)[:64], model)
+    return {**detail, "error": None, "status": "beobachtet",
+            "hinweis": "Bald Pflicht (#3980): confirm_api_billing=true mitschicken, sonst 403."}
+
+
 @router.post("/transcribe")
 async def transcribe_audio(
     file: Optional[UploadFile] = File(None),
@@ -463,7 +511,8 @@ async def transcribe_audio(
     # GCP-cost-incident hardening (2026-05-30): when `model` starts with
     # `gemini`, the request hits the Gemini API (GCP-billed) and must
     # carry this opt-in form-field set to "true" / "1" / "yes". Whisper
-    # and gpt-4o models route to OpenAI and are unaffected by this flag.
+    # and gpt-4o models are billed by OpenAI per minute: same flag, gate
+    # per TRANSCRIBE_BILLING_TOR (#3980, `beobachten` until callers send it).
     confirm_api_billing: Optional[str] = Form(None),
     authorization: Optional[str] = Header(None),
     x_agent_name: Optional[str] = Header(None, alias="X-Agent-Name"),
@@ -472,7 +521,8 @@ async def transcribe_audio(
     """
     Transcribe an uploaded audio file using OpenAI Whisper / GPT-4o / Gemini.
 
-    Models (OpenAI):
+    Models (OpenAI, je Audiominute bezahlt; confirm_api_billing=true, ohne
+    Flag 403 sobald TRANSCRIBE_BILLING_TOR=an, vorher Hinweis in der Antwort):
     - whisper-1: OpenAI Whisper (default, classic)
     - gpt-4o-transcribe / gpt-4o-mini-transcribe: newer gpt-4o transcription
     - gpt-4o-transcribe-diarize: transcription WITH speaker separation —
@@ -504,6 +554,10 @@ async def transcribe_audio(
       signature: 403 private_media.
     """
     try:
+        # #3980: OpenAI-STT ist bezahlt. Vor jedem Abruf und Anbieteraufruf.
+        stt_hinweis = None
+        if not model.startswith("gemini"):
+            stt_hinweis = _openai_stt_tor(confirm_api_billing, model, authorization, x_agent_name)
         if file is None:
             url = file_url or file_url_q
             if not url:
@@ -525,13 +579,16 @@ async def transcribe_audio(
             wer, _q = _aufrufer(authorization, x_agent_name)
             return await _transcribe_with_gemini(file, model, prompt, aufrufer=wer)
         else:
-            return await _transcribe_with_whisper(
+            antwort = await _transcribe_with_whisper(
                 file, model, prompt,
                 language=language,
                 response_format=response_format,
                 timestamp_granularities=timestamp_granularities,
                 speaker_references=speaker_references,
             )
+            if stt_hinweis and isinstance(antwort, dict):
+                antwort["billing_hinweis"] = stt_hinweis
+            return antwort
 
     except HTTPException:
         raise
