@@ -32,7 +32,7 @@ class KetteRumpf(BaseModel):
     prompt: str = Field(min_length=1, max_length=200000)
     system: Optional[str] = Field(default=None, max_length=20000)
     wege: Optional[List[WegWahl]] = None
-    budget_s: float = Field(default=k.BUDGET_VORGABE_S, ge=5, le=k.BUDGET_HOECHSTENS_S)
+    budget_s: float = Field(default=k.BUDGET_VORGABE_S, ge=5)   # Obergrenze: k.budget_hoechstens()
     nur_erster_weg: bool = False
     # Angenommen, wirken auf den Abo-Wegen aber nicht (11330): Antwort sagt es.
     max_tokens: Optional[int] = Field(default=None, ge=1, le=100000)
@@ -40,6 +40,9 @@ class KetteRumpf(BaseModel):
 
     @model_validator(mode="after")
     def _wege_pruefen(self):
+        hoechstens = k.budget_hoechstens()
+        if not self.budget_s <= hoechstens:
+            raise ValueError(f"budget_s hoechstens {hoechstens:g} s ({k.BUDGET_HOECHSTENS_ENV})")
         namen = [w.weg for w in (self.wege or [])]
         if len(namen) != len(set(namen)):
             raise ValueError("jeder Weg hoechstens einmal")

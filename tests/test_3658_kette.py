@@ -31,7 +31,7 @@ def umgebung(monkeypatch):
     monkeypatch.setattr(asyncio, "create_subprocess_exec", verboten_async)
     for n in ("REALTIME_AUTH_ISSUER", "REALTIME_AUTH_JWKS_URL", "REALTIME_AUTH_GRANT_URL", "API_ACCESS_KEY",
               "GEMINI_FORWARD_URL", "GEMINI_KERN_URL", "KETTE_AGY_TAG_MAX", "KETTE_CODEX_TAG_MAX",
-              "KETTE_CLAUDE_TAG_MAX"):
+              "KETTE_CLAUDE_TAG_MAX", "KETTE_BUDGET_HOECHSTENS_S"):
         monkeypatch.delenv(n, raising=False)
     monkeypatch.setenv(k.KETTE_ENV, "agy,codex,claude")
 
@@ -270,3 +270,25 @@ def test_leeres_claude_wird_vermerkt(client, wege):
     wege.plan = {"agy": [KONT()], "codex": [KONT()], "claude": ["nie"]}
     r = client.post("/ai/kette", json={"prompt": "x"})
     assert r.status_code == 429 and "claude" not in [a[0] for a in wege.aufrufe]
+
+
+def test_budget_obergrenze_vorgabe_120(client, wege):
+    """Ohne Einstellung bleibt die Obergrenze bei 120 s."""
+    assert client.post("/ai/kette", json={"prompt": "x", "budget_s": 120}).status_code == 200
+    r = client.post("/ai/kette", json={"prompt": "x", "budget_s": 121})
+    assert r.status_code == 422 and len(wege.aufrufe) == 1
+
+
+def test_budget_obergrenze_einstellbar(client, wege, monkeypatch):
+    """Project Manager 25.11.: der Planer braucht fuer grosse Befunde bis 300 s."""
+    monkeypatch.setenv("KETTE_BUDGET_HOECHSTENS_S", "300")
+    assert client.post("/ai/kette", json={"prompt": "x", "budget_s": 300}).status_code == 200
+    assert wege.fristen[0] is not None and wege.fristen[0] - k._uhr() > 250
+    assert client.post("/ai/kette", json={"prompt": "x", "budget_s": 301}).status_code == 422
+
+
+@pytest.mark.parametrize("wert,erwartet", [("300", 300.0), ("abc", 120.0), ("", 120.0), ("nan", 120.0),
+                                           ("5", 30.0), ("5000", 600.0)])
+def test_budget_obergrenze_werte(monkeypatch, wert, erwartet):
+    monkeypatch.setenv("KETTE_BUDGET_HOECHSTENS_S", wert)
+    assert k.budget_hoechstens() == erwartet

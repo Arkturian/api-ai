@@ -34,8 +34,25 @@ DECKEL = {
     "claude": ("kette_claude", "KETTE_CLAUDE_TAG_MAX", 100),
 }
 BUDGET_VORGABE_S = 30.0
-BUDGET_HOECHSTENS_S = 120.0
+BUDGET_HOECHSTENS_S = 120.0          # Vorgabe der Obergrenze, wenn nichts gesetzt ist
+BUDGET_HOECHSTENS_ENV = "KETTE_BUDGET_HOECHSTENS_S"
+_BUDGET_GRENZEN_S = (30.0, 600.0)   # CLIs enden nach 300 s, nginx nach 600 s
 _MINDESTREST_S = 2.0
+
+
+def budget_hoechstens() -> float:
+    """Obergrenze fuer budget_s je Host (Project Manager 25.11.2026: der Planer der
+    project-api braucht fuer grosse Befunde mehr als 120 s). Ungueltig: Vorgabe;
+    ausserhalb von 30..600 s: an den Rand gezogen."""
+    roh = (os.getenv(BUDGET_HOECHSTENS_ENV) or "").strip()
+    try:
+        wert = float(roh) if roh else BUDGET_HOECHSTENS_S
+    except ValueError:
+        logger.error("%s=%r ist keine Zahl, Vorgabe %ss gilt", BUDGET_HOECHSTENS_ENV, roh, BUDGET_HOECHSTENS_S)
+        wert = BUDGET_HOECHSTENS_S
+    if wert != wert:   # NaN
+        wert = BUDGET_HOECHSTENS_S
+    return min(max(wert, _BUDGET_GRENZEN_S[0]), _BUDGET_GRENZEN_S[1])
 
 
 def _uhr() -> float:
