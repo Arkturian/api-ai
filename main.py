@@ -527,6 +527,8 @@ from ai.routes import decisions_routes  # noqa: E402
 app.include_router(decisions_routes.router, prefix="/ai", tags=["Decisions (OpenAI)"])
 from ai.routes import verbrauch_routes  # noqa: E402
 app.include_router(verbrauch_routes.router, prefix="/ai", tags=["Verbrauch"])
+from ai.routes import mandanten_routes  # noqa: E402  #4135
+app.include_router(mandanten_routes.router, prefix="/ai", tags=["Mandanten"])
 from ai.routes import codex_konten_routes  # noqa: E402
 app.include_router(codex_konten_routes.router, prefix="/ai", tags=["Codex-Konten"])
 from ai.routes import kette_routes  # noqa: E402

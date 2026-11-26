@@ -162,3 +162,103 @@ def test_kostenbuch_traegt_den_mandanten(client, wege, umgebung):
     kb.buchen(anbieter="x", art="geld", usd=0.1)
     zeilen = [json.loads(z) for p in (umgebung / "kb").glob("*.jsonl") for z in p.read_text().splitlines()]
     assert zeilen[-1]["tenant"] == "lesser"
+
+
+# --- A1.1/A1.5: Zuweisung setzen und lesen ------------------------------------
+
+ADMIN_LESSER = {"sub": "17", "type": "user", "mandant_rechte": {"lesser": ["ai:zuweisung:verwalten"]}}
+TOKENS = {
+    "Bearer admin-lesser": ADMIN_LESSER,
+    "Bearer admin-ele": {"sub": "18", "type": "user", "mandant_rechte": {"ele": ["ai:zuweisung:verwalten"]}},
+    "Bearer nur-tenant": {"sub": "19", "type": "user", "tenant": "lesser"},
+    "Bearer dienst-mit-map": {"sub": "service:x", "type": "service",
+                              "mandant_rechte": {"lesser": ["ai:zuweisung:verwalten"]}},
+    "Bearer kosten": {"sub": "agent:AiApi", "type": "agent", "permissions": ["ai:kosten:lesen"]},
+}
+ZUWEISUNG = {"verarbeitung": {"anbieter": "openai", "verweis": "lesser-openai-2026", "modell": "gpt-5.4-mini"},
+             "urteil": "openai", "deckel": {"tag_usd": 1.0, "monat_usd": 20.0}}
+
+
+@pytest.fixture
+def rechte(monkeypatch):
+    from ai.routes import verbrauch_routes as vr
+    monkeypatch.setattr(jwt_pruefung, "pruefen", lambda a: TOKENS.get(a))
+
+    async def kein_profil(a):
+        return None
+    monkeypatch.setattr(vr, "_profil", kein_profil)
+
+
+def _put(client, token, tenant="lesser", body=None):
+    return client.put(f"/ai/mandanten/{tenant}/ki", json=body if body is not None else ZUWEISUNG,
+                      headers={"Authorization": token} if token else {})
+
+
+def test_admin_des_mandanten_setzt_und_verarbeitung_liest_es(client, rechte, wege, umgebung):
+    r = _put(client, "Bearer admin-lesser")
+    assert r.status_code == 200, r.text
+    d = r.json()
+    assert d["zugewiesen"] and d["verarbeitung"]["anbieter"] == "openai" and d["deckel"]["tag_usd"] == 1.0
+    assert d["verarbeitung"]["verweis"] == "lesser-opena…"          # nur gekuerzt
+    # Die Zuweisung wirkt: Conversation von lesser bekommt den Schluesselweg, nicht die Kern-Abos
+    v2 = _post(client, "Bearer lesser")
+    assert v2.status_code == 503 and v2.json()["detail"]["error"] == "konto_nicht_verfuegbar" and wege == []
+    assert (umgebung / "mandanten" / "protokoll.jsonl").read_text().count('"mandant": "lesser"') == 1
+
+
+@pytest.mark.parametrize("token,status", [
+    (None, 401),
+    ("Bearer admin-ele", 403),            # Admin eines anderen Mandanten
+    ("Bearer nur-tenant", 403),           # tenant-Claim ist kein Recht (Schluessel der Map zaehlt)
+    ("Bearer dienst-mit-map", 403),       # nur Menschen-Tokens
+    ("Bearer kosten", 403),               # Lesen ja, Setzen nein
+])
+def test_setzen_nur_mit_recht_fuer_genau_diesen_mandanten(client, rechte, umgebung, token, status):
+    assert _put(client, token).status_code == status
+    assert not (umgebung / "mandanten" / "lesser.json").exists()
+
+
+def test_lesen_mit_kostenrecht_und_fremder_admin_nicht(client, rechte):
+    assert client.get("/ai/mandanten/lesser/ki", headers={"Authorization": "Bearer kosten"}).status_code == 200
+    assert client.get("/ai/mandanten/lesser/ki", headers={"Authorization": "Bearer admin-ele"}).status_code == 403
+
+
+def test_betreiber_ist_nicht_zuweisbar(client, rechte, monkeypatch):
+    TOKENS["Bearer admin-ark"] = {"sub": "1", "type": "user", "mandant_rechte": {"arkturian": ["ai:zuweisung:verwalten"]}}
+    r = _put(client, "Bearer admin-ark", tenant="arkturian")
+    assert r.status_code == 422 and r.json()["detail"]["error"] == "betreiber_nicht_zuweisbar"
+
+
+@pytest.mark.parametrize("body,fehler", [
+    ({"verarbeitung": {"anbieter": "openai", "verweis": "x"}}, "deckel_pflicht"),
+    ({"verarbeitung": "keine", "urteil": "openai"}, "urteil_ohne_konto"),
+])
+def test_regeln_der_zuweisung(client, rechte, body, fehler):
+    r = _put(client, "Bearer admin-lesser", body=body)
+    assert r.status_code == 422 and r.json()["detail"]["error"] == fehler
+
+
+@pytest.mark.parametrize("body", [
+    {"verarbeitung": {"anbieter": "hydrogen", "verweis": "x"}, "deckel": {"tag_usd": 1, "monat_usd": 2}},
+    {"verarbeitung": {"anbieter": "openai", "verweis": "x", "schluessel": "sk-…"},
+     "deckel": {"tag_usd": 1, "monat_usd": 2}},
+    {"verarbeitung": "keine", "api_key": "sk-…"},
+])
+def test_kein_abo_weg_und_kein_geheimnis_im_rumpf(client, rechte, umgebung, body):
+    assert _put(client, "Bearer admin-lesser", body=body).status_code == 422
+    assert not (umgebung / "mandanten" / "lesser.json").exists()
+
+
+def test_keine_ki_setzen(client, rechte, wege):
+    assert _put(client, "Bearer admin-lesser", body={"verarbeitung": "keine"}).status_code == 200
+    assert _post(client, "Bearer lesser").json()["detail"]["error"] == "verarbeitung_keine_ki" and wege == []
+
+
+def test_verbrauch_nur_des_eigenen_mandanten(client, rechte, umgebung):
+    from ai.services import kostenbuch as kb
+    for tenant, usd in (("lesser", 0.25), ("arkturian", 9.0), ("lesser", 0.5)):
+        m = kb.KONTEXT.set({"pfad": "/ai/verarbeitung", "aufrufer": "x", "quelle": "jwt", "tenant": tenant})
+        kb.buchen(anbieter="openai_text", art="geld", usd=usd)
+        kb.KONTEXT.reset(m)
+    d = client.get("/ai/mandanten/lesser/ki", headers={"Authorization": "Bearer kosten"}).json()
+    assert d["verbrauch"]["heute"] == {"usd": 0.75, "buchungen": 2} and d["verbrauch"]["waehrung"] == "USD"
