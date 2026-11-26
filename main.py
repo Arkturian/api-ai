@@ -219,16 +219,22 @@ async def _aufrufer_protokoll(request, call_next):
         import asyncio as _asyncio
         from ai.services import kostenbuch as _kb
         k = request.headers
+        # Ein vorgelegtes JWT wird immer geprueft: sein `tenant` ist die Herkunft
+        # von Storage-Uploads in seinem Auftrag (#4132), auch neben X-Agent-Name.
+        claims = None
+        if k.get("authorization"):
+            from ai.services import jwt_pruefung as _jp
+            claims = await _asyncio.to_thread(_jp.claims_oder_none, k.get("authorization"))
         caller, quelle = (k.get("x-agent-name") or "").strip()[:64], "header"
-        if not caller and k.get("authorization"):
-            from ai.routes import jev_routes as _jev
-            caller = await _asyncio.to_thread(_jev._jwt_sub_geprueft, k.get("authorization")) or ""
+        if not caller and claims:
+            caller = str(claims.get("sub") or "").strip()[:64]
             quelle = "jwt"
         if not caller:
             caller = (k.get("x-real-ip") or (k.get("x-forwarded-for") or "").split(",")[0].strip()
                       or (request.client.host if request.client else "?"))
             quelle = "ip"
-        marke = _kb.KONTEXT.set({"pfad": pfad, "aufrufer": caller, "quelle": quelle})
+        tenant = str((claims or {}).get("tenant") or "").strip() or None
+        marke = _kb.KONTEXT.set({"pfad": pfad, "aufrufer": caller, "quelle": quelle, "tenant": tenant})
     except Exception as e:
         logging.getLogger("api-ai.aufrufer").warning("Aufrufer vorab: %s", type(e).__name__)
     try:

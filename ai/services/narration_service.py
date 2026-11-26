@@ -30,6 +30,7 @@ from pydantic import BaseModel, Field
 
 import google.generativeai as genai
 from ai.clients.storage_client import storage_api_key
+from ai.services import aufruf as _aufruf  # noqa: E402  #4132
 
 logger = logging.getLogger(__name__)
 
@@ -563,6 +564,7 @@ class NarrationService:
                 headers={
                     "Content-Type": f"multipart/form-data; boundary={boundary}",
                     "X-API-KEY": storage_key,
+                    **_aufruf.herkunft_kopf(),  # #4132
                 }
             )
             resp.raise_for_status()

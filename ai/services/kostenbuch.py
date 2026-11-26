@@ -22,7 +22,6 @@ Ein Fehler beim Buchen darf nie den Aufruf treffen (die Leistung ist erbracht).
 """
 from __future__ import annotations
 
-import contextvars
 import fcntl
 import json
 import logging
@@ -43,7 +42,7 @@ GRUPPEN = ("weg", "aufrufer", "anbieter", "tag")
 MAX_TAGE = 400
 
 # Pfad und Aufrufer des laufenden Aufrufs; gesetzt von main._aufrufer_protokoll.
-KONTEXT: contextvars.ContextVar[Optional[dict]] = contextvars.ContextVar("kostenbuch_kontext", default=None)
+from ai.services.aufruf import KONTEXT  # noqa: E402  (gemeinsam mit #4132)
 
 
 def verzeichnis() -> Path:

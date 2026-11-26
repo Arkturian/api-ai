@@ -276,8 +276,13 @@ async def _video_sichern(url: str, collection_id: Optional[str], link_id: Option
 
 async def _datei_sichern(url: Optional[str], inhalt: Optional[bytes], mime: str,
                          collection_id: Optional[str], link_id: Optional[str], name: str,
-                         privat: bool = False, grant_scope: Optional[str] = None) -> Dict[str, Any]:
-    """Ergebnis von Google (Link oder Bytes) in den Storage legen."""
+                         privat: bool = False, grant_scope: Optional[str] = None,
+                         mandant: Optional[str] = None) -> Dict[str, Any]:
+    """Ergebnis von Google (Link oder Bytes) in den Storage legen.
+
+    `mandant`: Herkunft fuer storage-api (#4132). Spaet gesicherte Videos nehmen
+    ihn aus der Akte des Auftrags, sonst gilt der gepruefte Mandant des Aufrufs."""
+    from ai.services import aufruf
     from ai.clients.storage_client import storage_api_key
     storage_url = os.getenv("STORAGE_API_URL", "https://api-storage.arkturian.com")
     grenze = int(os.getenv("FLOW_MAX_VIDEO_MB", "500")) * 1024 * 1024
@@ -306,7 +311,8 @@ async def _datei_sichern(url: Optional[str], inhalt: Optional[bytes], mime: str,
                 daten["link_id"] = link_id
             up = await c.post(f"{storage_url}/storage/upload",
                               files={"file": (name, bytes(buf), mime)},
-                              data=daten, headers={"X-API-KEY": storage_api_key()})
+                              data=daten, headers={"X-API-KEY": storage_api_key(),
+                                                   **aufruf.herkunft_kopf(mandant)})
             up.raise_for_status()
             antwort = up.json()
             sid = antwort.get("id")
@@ -348,7 +354,8 @@ async def _abschliessen(job_id: str, job: Dict[str, Any], *, sichern: bool,
             gesichert[mid] = await _video_sichern(m["videoUrl"], akte.get("collection_id", collection_id),
                                                   akte.get("link_id", link_id), f"flow_{i}_{int(time.time())}.mp4",
                                                   **privat_ablage(bool(akte.get("private")),
-                                                                  akte.get("agent") or "", akte.get("quelle") or ""))
+                                                                  akte.get("agent") or "", akte.get("quelle") or ""),
+                                                  **({"mandant": akte["mandant"]} if akte.get("mandant") else {}))
         akte["gesichert"] = gesichert
         if not akte.get("gebucht") and _clips(job):
             from ai.services import bild_verbrauch as bv
@@ -466,7 +473,8 @@ async def flow_video(request: FlowVideoRequest,
     if not job_id:
         raise HTTPException(status_code=502, detail={"error": "flow_without_job_id"})
     async with _gesperrt(job_id):
-        _schreiben(job_id, {"agent": agent, "quelle": quelle, "model": modell,
+        from ai.services import aufruf
+        _schreiben(job_id, {"agent": agent, "quelle": quelle, "model": modell, "mandant": aufruf.mandant(),
                             "collection_id": request.collection_id, "link_id": request.link_id,
                             "private": bool(request.private),
                             "angelegt": time.time(), "estimated_credits": schaetzung})

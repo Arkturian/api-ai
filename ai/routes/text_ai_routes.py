@@ -27,6 +27,7 @@ from pathlib import Path
 from ai.clients.storage_client import storage_api_key
 from ai.provider_config import provider_missing
 
+from ai.services import aufruf as _aufruf  # noqa: E402  #4132
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
@@ -3376,7 +3377,7 @@ async def gemini_vision_endpoint(
                         files={"file": (f"vision_{uuid.uuid4().hex[:8]}_{i}.{ext}", img_bytes, mime_type)},
                         data={"is_public": "true", "analyze": "false", "ai_mode": "none",
                               "ttl_hours": "1", "reuse_existing": "false"},
-                        headers={"X-API-KEY": storage_key},
+                        headers={"X-API-KEY": storage_key, **_aufruf.herkunft_kopf()},  # #4132
                     )
                     resp.raise_for_status()
                     sid = resp.json().get("id")

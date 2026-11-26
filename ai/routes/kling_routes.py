@@ -31,6 +31,7 @@ import uuid
 
 from ai.clients.storage_client import storage_api_key
 from ai import auth_guard as _ag
+from ai.services import aufruf as _aufruf  # noqa: E402  #4132
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -215,7 +216,7 @@ async def _save_video_to_storage(url: str, collection_id: Optional[str],
                 f"{storage_url}/storage/upload",
                 files={"file": (f"kling_{uuid.uuid4().hex[:8]}.mp4", bytes(buf), "video/mp4")},
                 data=data,
-                headers={"X-API-KEY": storage_api_key()},
+                headers={"X-API-KEY": storage_api_key(), **_aufruf.herkunft_kopf()},  # #4132
             )
             up.raise_for_status()
             sid = up.json().get("id")

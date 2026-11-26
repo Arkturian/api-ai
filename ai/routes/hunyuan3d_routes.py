@@ -29,6 +29,7 @@ from pathlib import Path
 import uuid
 from ai.clients.storage_client import storage_api_key
 from ai.provider_config import provider_missing
+from ai.services import aufruf as _aufruf  # noqa: E402  #4132
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -215,7 +216,7 @@ async def _save_files_to_storage(files: List[Dict[str, Any]], collection_id: Opt
                     f"{storage_url}/storage/upload",
                     files={"file": (f"hunyuan3d_{uuid.uuid4().hex[:8]}.{ext}", bytes(buf), mime)},
                     data=data,
-                    headers={"X-API-KEY": storage_key},
+                    headers={"X-API-KEY": storage_key, **_aufruf.herkunft_kopf()},  # #4132
                 )
                 up.raise_for_status()
                 sid = up.json().get("id")

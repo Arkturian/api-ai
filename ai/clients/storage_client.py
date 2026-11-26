@@ -11,6 +11,7 @@ import logging
 import os
 from typing import Optional, Dict, Any
 from pydantic import BaseModel
+from ai.services import aufruf as _aufruf  # noqa: E402  #4132
 
 
 class StorageObject(BaseModel):
@@ -170,7 +171,7 @@ async def save_file_and_record(
             f"{STORAGE_API_URL}/storage/upload",
             files=files,
             data=form_data,
-            headers={"X-API-KEY": STORAGE_API_KEY}
+            headers={"X-API-KEY": STORAGE_API_KEY, **_aufruf.herkunft_kopf()}  # #4132
         )
         response.raise_for_status()
 
