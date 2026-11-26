@@ -221,3 +221,27 @@ def mandant_konfig(mandant: str) -> MandantKonfig:
         raise _mandant_fehler(503, "verarbeitung_zuweisung_ungueltig", mandant, grund="deckel_fehlt")
     return MandantKonfig(mandant=mandant, anbieter=anbieter, modell=(modell or "").strip() or None,
                          verweis=verweis, tag_usd=tag, monat_usd=monat)
+
+
+def urteil_pruefen() -> None:
+    """#4135 (A1.4, erster Teil): Urteile (/ai/jev, /ai/decisions) eines Kunden-Mandanten
+    laufen nie ueber die Schluessel des Betreibers (TypeSafe, OpenAI). Ohne Zuweisung oder
+    mit `urteil: keine` -> 503; `urteil: openai` (Decisions mit dem Schluessel des Kunden)
+    folgt, bis dahin ebenfalls 503. Betreiber und Aufrufe ohne geprueftes JWT: unveraendert."""
+    from ai.services import aufruf
+    mandant = aufruf.mandant()
+    if mandant is None or mandant == betreiber():
+        return
+    p = _mandanten_dir() / f"{mandant}.json"
+    try:
+        d = json.loads(p.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        raise _mandant_fehler(503, "urteil_nicht_zugewiesen", mandant,
+                              hint="Fuer diesen Mandanten ist kein Urteils-Konto zugewiesen.") from None
+    except (OSError, ValueError):
+        raise _mandant_fehler(503, "urteil_zuweisung_unlesbar", mandant) from None
+    if not isinstance(d, dict) or d.get("urteil") != "openai":
+        raise _mandant_fehler(503, "urteil_keine", mandant, hint="Der Mandant hat fuer Urteile 'keine' gewaehlt.")
+    raise _mandant_fehler(503, "urteil_konto_folgt", mandant,
+                          hint="Urteile mit dem Schluessel des Mandanten kommen mit #4135 A1.4. "
+                               "Es laeuft kein Schluessel des Betreibers.")

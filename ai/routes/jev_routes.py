@@ -74,6 +74,8 @@ async def jev_endpoint(req: JevRequest, x_agent_name: Optional[str] = Header(def
     Antwort unveraendert, ergaenzt um cost_usd und latency_ms. X-Agent-Name
     (vom MCP-Gateway aus dem geprueften JWT) dient nur der Zuordnung im
     Nutzungslog, nie als Berechtigung."""
+    from ai.services import verarbeitung as _v
+    _v.urteil_pruefen()          # #4135: Kunden-Mandant nie ueber den Schluessel des Betreibers
     _pruefen(req)
     # Ohne Angabe entscheidet der Betreiber je Host: so laesst sich der
     # Motor fuer ALLE Aufrufer umschalten, ohne MCP-Werkzeug oder Clients

@@ -138,6 +138,8 @@ async def decisions_endpoint(req: DecisionsRequest,
                              authorization: Optional[str] = Header(default=None),
                              max_attempts: int = Query(default=3, ge=1, le=3)):
     """Typisierte Urteile ueber die OpenAI Decisions API (gpt-6-luna)."""
+    from ai.services import verarbeitung as _v
+    _v.urteil_pruefen()          # #4135: Kunden-Mandant nie ueber den Schluessel des Betreibers
     fragen_pruefen(req.questions)
     body: dict = {"model": req.model or s.default_model(), "input": req.input, "questions": req.questions}
     if req.prompt_cache_key:

@@ -163,8 +163,11 @@ def test_betreiber_ist_einstellbar(client, wege, monkeypatch):
 def test_kostenbuch_traegt_den_mandanten(client, wege, umgebung):
     _post(client, "Bearer ark")
     from ai.services import kostenbuch as kb
-    kb.KONTEXT.set({"pfad": "/ai/x", "aufrufer": "a", "quelle": "jwt", "tenant": "lesser"})
-    kb.buchen(anbieter="x", art="geld", usd=0.1)
+    m = kb.KONTEXT.set({"pfad": "/ai/x", "aufrufer": "a", "quelle": "jwt", "tenant": "lesser"})
+    try:
+        kb.buchen(anbieter="x", art="geld", usd=0.1)
+    finally:
+        kb.KONTEXT.reset(m)
     zeilen = [json.loads(z) for p in (umgebung / "kb").glob("*.jsonl") for z in p.read_text().splitlines()]
     assert zeilen[-1]["tenant"] == "lesser"
 
@@ -405,3 +408,49 @@ def test_tresor_client_vertrag(monkeypatch):
     assert aufrufe[1] == ("get", "https://auth.example/api/v1/tresor/lesser%2Fopenai%201",
                           {"mandant": "lesser", "zweck": "verarbeitung", "aufrufer": "service:conversation-api-lesser"},
                           "Bearer dienst-jwt")
+
+
+# --- A1.4 (erster Teil): Urteile eines Kunden nie ueber die Schluessel des Betreibers --------
+
+@pytest.fixture
+def urteil_wege(monkeypatch):
+    from ai.services import decisions_service as ds
+    from ai.services import jev_service as js
+
+    async def nie(*a, **kw):
+        raise AssertionError("Schluessel des Betreibers benutzt")
+    monkeypatch.setattr(ds, "aufrufen", nie)
+    monkeypatch.setattr(js, "aufrufen", nie)
+
+
+JEV_RUMPF = {"state": "x", "questions": {"q": {"type": "noul", "instructions": "Ist das ein Test?"}}}
+DEC_RUMPF = {"input": "x", "questions": [{"name": "q", "type": "predicate", "instructions": "Ist das ein Test?"}]}
+
+
+@pytest.mark.parametrize("pfad,rumpf", [("/ai/jev", JEV_RUMPF), ("/ai/jev?engine=openai", JEV_RUMPF),
+                                        ("/ai/decisions", DEC_RUMPF)])
+@pytest.mark.parametrize("zuweisung,fehler", [
+    (None, "urteil_nicht_zugewiesen"),
+    ({"verarbeitung": "keine", "urteil": "keine"}, "urteil_keine"),
+    ({"verarbeitung": {"anbieter": "openai", "verweis": "v"}, "urteil": "openai",
+      "deckel": {"tag_usd": 1, "monat_usd": 2}}, "urteil_konto_folgt"),
+])
+def test_urteil_eines_kunden_nie_ueber_betreiberschluessel(client, urteil_wege, umgebung, pfad, rumpf,
+                                                           zuweisung, fehler):
+    if zuweisung:
+        _zuweisen(umgebung, "lesser", zuweisung)
+    r = client.post(pfad, json=rumpf, headers={"Authorization": "Bearer lesser"})
+    assert r.status_code == 503, r.text
+    assert r.json()["detail"]["error"] == fehler
+
+
+def test_urteil_des_betreibers_unveraendert(client, monkeypatch):
+    from ai.services import verarbeitung as vv
+    monkeypatch.setattr(jwt_pruefung, "claims_oder_none", lambda a: {"sub": "agent:Cloud", "tenant": "arkturian"})
+    vv.urteil_pruefen()                     # ohne Kontext: nichts
+    from ai.services import aufruf
+    m = aufruf.KONTEXT.set({"tenant": "arkturian"})
+    try:
+        vv.urteil_pruefen()                 # Betreiber: nichts
+    finally:
+        aufruf.KONTEXT.reset(m)
