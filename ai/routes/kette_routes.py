@@ -52,6 +52,20 @@ class KetteRumpf(BaseModel):
         return self
 
 
+def rufer(prompt: str, system: Optional[str]):
+    """Ruft einen Abo-Weg mit diesem Prompt. Auch fuer /ai/verarbeitung (#4095)."""
+    async def rufen(weg: str, modell: str, effort: Optional[str]):
+        if weg == "agy":
+            p = t.Prompt(prompt=prompt, system=system, effort=effort)
+            return await t.gemini_endpoint(p, model=modell, api_key="placeholder")
+        if weg == "codex":
+            p = t.Prompt(prompt=prompt, system=system, effort=effort, tools=False)
+            return await t.chatgpt_endpoint(p, model=modell, api_key="placeholder", request=None, x_api_key=None)
+        p = t.Prompt(prompt=prompt, system=system, effort=effort)
+        return await t._claude_mit_rechten(p, modell, direkt=True)
+    return rufen
+
+
 def _aufrufer(authorization: Optional[str], x_agent_name: Optional[str]) -> str:
     """Wer ruft? Nur Etikett fuers Journal, nie Recht (Codepilot 26.11.2026:
     Dienste wie service:codepilot-api und service:project-api sollen im Journal
@@ -80,16 +94,7 @@ async def kette_endpoint(body: KetteRumpf,
     aufrufer = _aufrufer(authorization, x_agent_name)
     wahl = {w.weg: w.model_dump() for w in (body.wege or [])}
 
-    async def rufen(weg: str, modell: str, effort: Optional[str]):
-        if weg == "agy":
-            p = t.Prompt(prompt=body.prompt, system=body.system, effort=effort)
-            return await t.gemini_endpoint(p, model=modell, api_key="placeholder")
-        if weg == "codex":
-            p = t.Prompt(prompt=body.prompt, system=body.system, effort=effort, tools=False)
-            return await t.chatgpt_endpoint(p, model=modell, api_key="placeholder", request=None, x_api_key=None)
-        p = t.Prompt(prompt=body.prompt, system=body.system, effort=effort)
-        return await t._claude_mit_rechten(p, modell, direkt=True)
-
+    rufen = rufer(body.prompt, body.system)
     try:
         erg = await k.laufen(rufen, wahl, body.budget_s, body.nur_erster_weg,
                              t.CLI_FRIST.set, t.CLI_FRIST.reset)

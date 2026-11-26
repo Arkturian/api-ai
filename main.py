@@ -174,6 +174,7 @@ _BEZAHLPFADE = (
     "/ai/realtime/token",
     "/ai/realtime/live",
     "/ai/openai",        # #3640: Platform-Schluessel der Instanz
+    "/ai/verarbeitung",  # #4095: je nach Instanz Schluesselweg (openai)
 )
 
 
@@ -506,6 +507,8 @@ from ai.routes import codex_konten_routes  # noqa: E402
 app.include_router(codex_konten_routes.router, prefix="/ai", tags=["Codex-Konten"])
 from ai.routes import kette_routes  # noqa: E402
 app.include_router(kette_routes.router, prefix="/ai", tags=["Kette (#3658)"])
+from ai.routes import verarbeitung_routes  # noqa: E402
+app.include_router(verarbeitung_routes.router, prefix="/ai", tags=["Verarbeitung (#4095)"])
 from ai.routes import extern_routes  # noqa: E402
 app.include_router(extern_routes.router, prefix="/ai", tags=["Extern (#3656)"])
 from ai.routes import audio_mix_routes  # noqa: E402

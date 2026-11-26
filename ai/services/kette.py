@@ -120,11 +120,15 @@ Rufer = Callable[[str, str, Optional[str]], Awaitable[object]]
 
 async def laufen(rufen: Rufer, wahl: Dict[str, dict], budget_s: float, nur_erster_weg: bool,
                  frist_setzen: Callable[[Optional[float]], object],
-                 frist_zuruecksetzen: Callable[[object], None]) -> dict:
+                 frist_zuruecksetzen: Callable[[object], None],
+                 reihe: Optional[List[str]] = None) -> dict:
     """Geht die Kette durch. Gibt {"out", "weg", "model", "versucht"} zurueck oder wirft
     die feste Endantwort (429 kontingent, 503 wege_fehler/cli_fehlt, 504 budget) bzw.
-    den Fehler der Anfrage (4xx) unveraendert."""
-    reihe = kette()
+    den Fehler der Anfrage (4xx) unveraendert.
+
+    `reihe` setzt nur der Server selbst (#4095: /ai/verarbeitung nach der
+    Konfiguration der Instanz), nie ein Aufrufer. Ohne sie gilt KI_KETTE."""
+    reihe = [w for w in reihe if w in WEGE] if reihe is not None else kette()
     if nur_erster_weg:
         reihe = reihe[:1]
     ende = _uhr() + budget_s
