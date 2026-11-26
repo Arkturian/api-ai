@@ -78,6 +78,7 @@ def buchen(*, anbieter: str, art: str, modell: Optional[str] = None, anzahl: int
             "pfad": pfad or k.get("pfad"),
             "aufrufer": normalisieren(aufrufer or k.get("aufrufer")),
             "quelle": k.get("quelle") if not aufrufer else (k.get("quelle") or "angabe"),
+            "tenant": k.get("tenant"),           # #4135: nur aus geprueftem JWT
             "anbieter": str(anbieter)[:40],
             "art": art if art in ARTEN else "geld",
             "modell": (str(modell)[:80] if modell else None),

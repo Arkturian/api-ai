@@ -57,10 +57,29 @@ async def verarbeitung_endpoint(body: VerarbeitungRumpf,
                                 authorization: Optional[str] = Header(default=None),
                                 x_agent_name: Optional[str] = Header(default=None, alias="X-Agent-Name")):
     aufrufer = kr._aufrufer(authorization, x_agent_name)
+    # #4135 (Plan 6567 A1): Mandant NUR aus dem geprueften JWT (Middleware).
+    from ai.services import aufruf
+    mandant = aufruf.mandant()
     try:
-        kf = v.konfig()
+        if mandant is None:
+            if v.jwt_pflicht() == "an":
+                raise HTTPException(status_code=401, detail={
+                    "error": "jwt_required",
+                    "hint": "/ai/verarbeitung verlangt ein geprueftes JWT (Dienst oder Agent)."})
+            logger.warning("verarbeitung OHNE JWT caller=%s (JWT-Pflicht: beobachten, Kern-Einstellung)", aufrufer)
+            kf = v.konfig()
+        elif mandant != v.betreiber():
+            mk = v.mandant_konfig(mandant)          # 503 ohne/ungueltige Zuweisung, "keine"
+            # Schluesselweg aus dem Tresor kommt mit A1.3; bis dahin fail-closed.
+            raise HTTPException(status_code=503, detail={
+                "error": "konto_nicht_verfuegbar", "mandant": mandant, "anbieter": mk.anbieter,
+                "hint": "Der Schluesselweg des Mandanten (Tresor) ist noch nicht freigeschaltet (#4135 A1.3). "
+                        "Es laeuft kein anderer Anbieter."})
+        else:
+            kf = v.konfig()
     except HTTPException as e:
-        logger.warning("verarbeitung: caller=%s %s", aufrufer, (e.detail or {}).get("error"))
+        d = e.detail if isinstance(e.detail, dict) else {}
+        logger.warning("verarbeitung: caller=%s mandant=%s %s", aufrufer, mandant or "-", d.get("error"))
         raise
     system = body.system
     if body.json_schema is not None:
@@ -98,5 +117,6 @@ async def verarbeitung_endpoint(body: VerarbeitungRumpf,
             raise HTTPException(status_code=502, detail={
                 "error": "antwort_kein_json", "grund": str(e), "anbieter": kf.anbieter,
                 "weg": weg, "modell": modell, "text": text[:2000]}) from None
-    logger.info("verarbeitung: caller=%s anbieter=%s weg=%s model=%s", aufrufer, kf.anbieter, weg, modell)
+    logger.info("verarbeitung: caller=%s mandant=%s anbieter=%s weg=%s model=%s", aufrufer, mandant or "-",
+                kf.anbieter, weg, modell)
     return antwort

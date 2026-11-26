@@ -132,3 +132,82 @@ def stand() -> dict:
         from ai.services import kette as k
         out["reihe"] = k.kette()
     return out
+
+
+# --- #4135 (Plan 6567 A1): Zuweisung je Mandant ------------------------------
+#
+# Auf dem Kern gilt KI_VERARBEITUNG nur fuer den Betreiber. Ein anderer Mandant
+# (aus dem GEPRUEFTEN JWT) bekommt ausschliesslich seine eigene Zuweisung:
+# einen Schluesselweg (OpenAI mit Schluessel aus dem Tresor der auth-api) oder
+# "keine". Abo-Wege (agy, codex, Claude) gehoeren dem Betreiber und laufen fuer
+# Kunden nur auf deren eigenen Rechnern. Es gibt keinen Rueckfall.
+
+BETREIBER_ENV = "BETREIBER_MANDANT"
+MANDANTEN_DIR_ENV = "KI_MANDANTEN_DIR"
+JWT_PFLICHT_ENV = "VERARBEITUNG_JWT_PFLICHT"
+#: Anbieter, die ein Kunden-Mandant auf dem Kern haben darf.
+KUNDEN_ANBIETER = ("openai",)
+_VERWEIS = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+
+
+def betreiber() -> str:
+    return (os.getenv(BETREIBER_ENV) or "arkturian").strip() or "arkturian"
+
+
+def jwt_pflicht() -> str:
+    """beobachten (Vorgabe): ohne JWT weiter mit der Kern-Einstellung, aber im
+    Journal; an: ohne gepruftes JWT 401. Scharf erst, wenn alle Aufrufer ein
+    Dienst-JWT schicken (erst messen, dann verlangen)."""
+    return "an" if (os.getenv(JWT_PFLICHT_ENV) or "").strip().lower() == "an" else "beobachten"
+
+
+def _mandanten_dir():
+    from pathlib import Path
+    return Path(os.getenv(MANDANTEN_DIR_ENV) or "/var/lib/api-ai/mandanten")
+
+
+@dataclass(frozen=True)
+class MandantKonfig:
+    mandant: str
+    anbieter: str
+    modell: Optional[str]
+    verweis: Optional[str]
+
+
+def _mandant_fehler(status: int, fehler: str, mandant: str, **extra) -> HTTPException:
+    return HTTPException(status_code=status, detail={"error": fehler, "mandant": mandant, **extra})
+
+
+def mandant_konfig(mandant: str) -> MandantKonfig:
+    """Zuweisung eines Kunden-Mandanten. Wirft 503 ohne oder mit ungueltiger
+    Zuweisung und bei `keine`. Nie ein Rueckgriff auf KI_VERARBEITUNG."""
+    p = _mandanten_dir() / f"{mandant}.json"
+    try:
+        roh = p.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        raise _mandant_fehler(503, "verarbeitung_nicht_zugewiesen", mandant,
+                              hint="Fuer diesen Mandanten ist kein KI-Konto zugewiesen. Es laeuft kein "
+                                   "Anbieter, auch nicht der des Betreibers.") from None
+    except OSError:
+        raise _mandant_fehler(503, "verarbeitung_zuweisung_unlesbar", mandant) from None
+    try:
+        d = json.loads(roh)
+    except ValueError:
+        raise _mandant_fehler(503, "verarbeitung_zuweisung_ungueltig", mandant, grund="kein_json") from None
+    v = d.get("verarbeitung") if isinstance(d, dict) else None
+    if v == "keine":
+        raise _mandant_fehler(503, "verarbeitung_keine_ki", mandant,
+                              hint="Der Mandant hat 'keine KI' gewaehlt.")
+    if not isinstance(v, dict):
+        raise _mandant_fehler(503, "verarbeitung_zuweisung_ungueltig", mandant, grund="verarbeitung_fehlt")
+    anbieter = str(v.get("anbieter") or "").strip().lower()
+    if anbieter not in KUNDEN_ANBIETER:
+        raise _mandant_fehler(503, "verarbeitung_zuweisung_ungueltig", mandant, grund="anbieter_nicht_erlaubt",
+                              erlaubt=list(KUNDEN_ANBIETER))
+    modell = v.get("modell")
+    if modell is not None and (not isinstance(modell, str) or not _MODELL.match(modell.strip())):
+        raise _mandant_fehler(503, "verarbeitung_zuweisung_ungueltig", mandant, grund="modell_ungueltig")
+    verweis = v.get("verweis")
+    if not isinstance(verweis, str) or not _VERWEIS.match(verweis):
+        raise _mandant_fehler(503, "verarbeitung_zuweisung_ungueltig", mandant, grund="verweis_fehlt")
+    return MandantKonfig(mandant=mandant, anbieter=anbieter, modell=(modell or "").strip() or None, verweis=verweis)
