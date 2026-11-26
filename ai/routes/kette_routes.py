@@ -9,7 +9,7 @@ from __future__ import annotations
 import logging
 from typing import List, Literal, Optional
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from ai.routes import text_ai_routes as t
@@ -52,8 +52,32 @@ class KetteRumpf(BaseModel):
         return self
 
 
+def _aufrufer(authorization: Optional[str], x_agent_name: Optional[str]) -> str:
+    """Wer ruft? Nur Etikett fuers Journal, nie Recht (Codepilot 26.11.2026:
+    Dienste wie service:codepilot-api und service:project-api sollen im Journal
+    zuordenbar sein). Wie /ai/jev: geprueftes JWT vor dem Kopf des Gateways;
+    ein vorgelegtes, aber ungueltiges JWT faellt nicht auf den Kopf zurueck."""
+    if not isinstance(authorization, str):
+        authorization = None
+    if not isinstance(x_agent_name, str):
+        x_agent_name = None
+    wer = ""
+    if authorization and authorization.lower().startswith("bearer "):
+        from ai.services import jwt_pruefung as jp
+        claims = jp.claims_oder_none(authorization)
+        wer = str((claims or {}).get("sub") or "").strip()[:64] or "(jwt-ungueltig)"
+    if not wer:
+        wer = (x_agent_name or "").strip()[:64]
+    if wer.startswith("agent:"):
+        wer = wer[len("agent:"):]
+    return wer or "(unbekannt)"
+
+
 @router.post("/kette")
-async def kette_endpoint(body: KetteRumpf):
+async def kette_endpoint(body: KetteRumpf,
+                         authorization: Optional[str] = Header(default=None),
+                         x_agent_name: Optional[str] = Header(default=None, alias="X-Agent-Name")):
+    aufrufer = _aufrufer(authorization, x_agent_name)
     wahl = {w.weg: w.model_dump() for w in (body.wege or [])}
 
     async def rufen(weg: str, modell: str, effort: Optional[str]):
@@ -66,14 +90,18 @@ async def kette_endpoint(body: KetteRumpf):
         p = t.Prompt(prompt=body.prompt, system=body.system, effort=effort)
         return await t._claude_mit_rechten(p, modell, direkt=True)
 
-    erg = await k.laufen(rufen, wahl, body.budget_s, body.nur_erster_weg,
-                         t.CLI_FRIST.set, t.CLI_FRIST.reset)
+    try:
+        erg = await k.laufen(rufen, wahl, body.budget_s, body.nur_erster_weg,
+                             t.CLI_FRIST.set, t.CLI_FRIST.reset)
+    except HTTPException as e:
+        logger.info("kette: caller=%s status=%s", aufrufer, e.status_code)
+        raise
     out = erg["out"]
     antwort = out.model_dump() if hasattr(out, "model_dump") else dict(out)
     antwort.update(routed_to=erg["weg"], model=erg["model"], versucht=erg["versucht"])
     nicht = [n for n in ("max_tokens", "temperature") if getattr(body, n) is not None]
     if nicht:
         antwort["nicht_angewendet"] = nicht
-    logger.info("kette: routed_to=%s model=%s versucht=%s", erg["weg"], erg["model"],
+    logger.info("kette: caller=%s routed_to=%s model=%s versucht=%s", aufrufer, erg["weg"], erg["model"],
                 ",".join(f"{v['weg']}:{v['code']}" for v in erg["versucht"]))
     return antwort

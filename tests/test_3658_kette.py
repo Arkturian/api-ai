@@ -292,3 +292,47 @@ def test_budget_obergrenze_einstellbar(client, wege, monkeypatch):
 def test_budget_obergrenze_werte(monkeypatch, wert, erwartet):
     monkeypatch.setenv("KETTE_BUDGET_HOECHSTENS_S", wert)
     assert k.budget_hoechstens() == erwartet
+
+
+# --- Aufrufer im Journal (Codepilot 26.11.2026) ------------------------------
+
+def _kette_log(caplog):
+    return [r.getMessage() for r in caplog.records if r.name == "api-ai.kette"]
+
+
+def test_aufrufer_aus_geprueftem_jwt(client, wege, monkeypatch, caplog):
+    from ai.services import jwt_pruefung as jp
+    monkeypatch.setattr(jp, "claims_oder_none",
+                        lambda a: {"sub": "service:codepilot-api"} if a == "Bearer gut" else None)
+    caplog.set_level("INFO", logger="api-ai.kette")
+    r = client.post("/ai/kette", json={"prompt": "x"},
+                    headers={"Authorization": "Bearer gut", "X-Agent-Name": "Fremd"})
+    assert r.status_code == 200
+    assert any("caller=service:codepilot-api routed_to=agy" in m for m in _kette_log(caplog))
+
+
+def test_aufrufer_ungueltiges_jwt_nimmt_nicht_den_kopf(client, wege, monkeypatch, caplog):
+    from ai.services import jwt_pruefung as jp
+    monkeypatch.setattr(jp, "claims_oder_none", lambda a: None)
+    caplog.set_level("INFO", logger="api-ai.kette")
+    client.post("/ai/kette", json={"prompt": "x"},
+                headers={"Authorization": "Bearer schlecht", "X-Agent-Name": "Fremd"})
+    assert any("caller=(jwt-ungueltig)" in m for m in _kette_log(caplog))
+
+
+def test_aufrufer_kopf_vom_gateway_und_unbekannt(client, wege, caplog):
+    caplog.set_level("INFO", logger="api-ai.kette")
+    client.post("/ai/kette", json={"prompt": "x"}, headers={"X-Agent-Name": "agent:Codepilot"})
+    client.post("/ai/kette", json={"prompt": "x"})
+    log = _kette_log(caplog)
+    assert any("caller=Codepilot routed_to" in m for m in log)
+    assert any("caller=(unbekannt) routed_to" in m for m in log)
+
+
+def test_aufrufer_auch_bei_fehler(client, wege, caplog):
+    wege.plan = {"agy": [HTTPException(503, "voll")], "codex": [], "claude": []}
+    caplog.set_level("INFO", logger="api-ai.kette")
+    r = client.post("/ai/kette", json={"prompt": "x", "nur_erster_weg": True},
+                    headers={"X-Agent-Name": "Codepilot"})
+    assert r.status_code >= 400
+    assert any(m.startswith("kette: caller=Codepilot status=") for m in _kette_log(caplog))
