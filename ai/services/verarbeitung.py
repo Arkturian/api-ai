@@ -172,6 +172,8 @@ class MandantKonfig:
     anbieter: str
     modell: Optional[str]
     verweis: Optional[str]
+    tag_usd: float = 0.0
+    monat_usd: float = 0.0
 
 
 def _mandant_fehler(status: int, fehler: str, mandant: str, **extra) -> HTTPException:
@@ -210,4 +212,12 @@ def mandant_konfig(mandant: str) -> MandantKonfig:
     verweis = v.get("verweis")
     if not isinstance(verweis, str) or not _VERWEIS.match(verweis):
         raise _mandant_fehler(503, "verarbeitung_zuweisung_ungueltig", mandant, grund="verweis_fehlt")
-    return MandantKonfig(mandant=mandant, anbieter=anbieter, modell=(modell or "").strip() or None, verweis=verweis)
+    dk = d.get("deckel") if isinstance(d.get("deckel"), dict) else {}
+    try:
+        tag, monat = float(dk.get("tag_usd")), float(dk.get("monat_usd"))
+    except (TypeError, ValueError):
+        raise _mandant_fehler(503, "verarbeitung_zuweisung_ungueltig", mandant, grund="deckel_fehlt") from None
+    if not (0 < tag <= 1000 and 0 < monat <= 10000):
+        raise _mandant_fehler(503, "verarbeitung_zuweisung_ungueltig", mandant, grund="deckel_fehlt")
+    return MandantKonfig(mandant=mandant, anbieter=anbieter, modell=(modell or "").strip() or None,
+                         verweis=verweis, tag_usd=tag, monat_usd=monat)

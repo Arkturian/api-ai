@@ -25,6 +25,7 @@ developers.openai.com/api/docs/pricing (Standard, bis 272K Kontext).
 """
 from __future__ import annotations
 
+import contextvars
 import fcntl
 import hashlib
 import json
@@ -66,7 +67,25 @@ _ABRECHNUNGS_CODES = frozenset({
 })
 
 
+# #4135 (Plan 6567 A1.3): Konto eines Kunden-Mandanten fuer genau einen Aufruf.
+# Gesetzt, gelten Schluessel, Tages- und Monatsdeckel des Mandanten und eigene
+# Zaehler unter VERBRAUCH_DIR/mandanten/<mandant>. Der Schluessel und die Zaehler
+# des Betreibers werden dabei nie beruehrt.
+@dataclass(frozen=True)
+class Konto:
+    mandant: str
+    schluessel: str
+    tag_usd: float
+    monat_usd: float
+
+
+KONTO: "contextvars.ContextVar[Optional[Konto]]" = contextvars.ContextVar("openai_text_konto", default=None)
+
+
 def schluessel() -> Optional[str]:
+    k = KONTO.get()
+    if k is not None:
+        return k.schluessel
     return (os.getenv("OPENAI_API_KEY") or "").strip() or None
 
 
@@ -78,6 +97,9 @@ def fingerabdruck() -> Optional[str]:
 
 def grenze_usd() -> Optional[float]:
     """Gueltige Tagesgrenze oder None. Unlesbar heisst aus, nicht offen."""
+    k = KONTO.get()
+    if k is not None:
+        return k.tag_usd if math.isfinite(k.tag_usd) and k.tag_usd > 0 else None
     try:
         wert = float((os.getenv(GRENZE_ENV) or "").strip())
     except ValueError:
@@ -103,7 +125,9 @@ def _naechster_tag(jetzt: Optional[datetime] = None) -> str:
 
 
 def _dir() -> Path:
-    return Path(os.getenv("VERBRAUCH_DIR") or "/var/lib/api-ai/verbrauch")
+    basis = Path(os.getenv("VERBRAUCH_DIR") or "/var/lib/api-ai/verbrauch")
+    k = KONTO.get()
+    return basis / "mandanten" / k.mandant if k is not None else basis
 
 
 def _tagesdatei(tag: str) -> Path:
@@ -262,6 +286,12 @@ def eingaben_pruefen(modell: Optional[str], effort: Optional[str], max_tokens: O
 
 
 def _monatsdeckel_greift() -> bool:
+    k = KONTO.get()
+    if k is not None:
+        # Kunde: Summe seiner Tagesdateien im laufenden Monat gegen seinen Deckel.
+        monat = _jetzt().strftime("%Y-%m")
+        summe = sum(float(_lesen(p).get("usd") or 0) for p in _dir().glob(f"openai_text_{monat}-*.json"))
+        return summe >= k.monat_usd
     from ai.services.openai_cost_tracker import openai_cost_tracker
     return bool(openai_cost_tracker.should_block_request())
 
@@ -330,10 +360,13 @@ async def aufrufen(text: str, system: Optional[str], modell: Optional[str],
         # Unlesbar heisst nicht unberechnet: Der Betrag bleibt gebucht.
         await asyncio.to_thread(behalten, r)
         from ai.services import kostenbuch as _kb   # #4127: Hoechstbetrag bleibt gebucht
-        _kb.buchen(anbieter="openai_text", art="geld", modell=m, usd=r.usd, genauigkeit="geschaetzt")
+        _kb.buchen(anbieter="openai_kunde" if KONTO.get() else "openai_text",
+                   art="kunde_geld" if KONTO.get() else "geld", modell=m, usd=r.usd, genauigkeit="geschaetzt")
         raise HTTPException(status_code=502, detail={"error": "openai_text_antwort_unlesbar"})
     from ai.services import kostenbuch as _kb   # #4127
-    _kb.buchen(anbieter="openai_text", art="geld", modell=daten.get("model") or m, usd=ist,
+    _konto = KONTO.get()
+    _kb.buchen(anbieter="openai_kunde" if _konto else "openai_text", art="kunde_geld" if _konto else "geld",
+               modell=daten.get("model") or m, usd=ist,
                tokens_ein=int(usage.get("input_tokens") or 0), tokens_aus=int(usage.get("output_tokens") or 0),
                genauigkeit="gezaehlt" if usage else "geschaetzt")
     if not inhalt:

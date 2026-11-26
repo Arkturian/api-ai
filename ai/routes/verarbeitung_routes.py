@@ -45,6 +45,37 @@ async def _openai(body: VerarbeitungRumpf, system: Optional[str], modell: Option
     return await t._openai_einmal(p, modell)
 
 
+async def _kunde(body: "VerarbeitungRumpf", mk: "v.MandantKonfig", aufrufer: str) -> dict:
+    """#4135 A1.3: Schluesselweg eines Kunden-Mandanten. Schluessel je Aufruf aus dem
+    Tresor (Zweck verarbeitung), Tages- und Monatsdeckel des Mandanten, eigene Zaehler.
+    Jeder Fehler endet hier (503/429/502) -- kein anderer Anbieter, kein Kern-Schluessel."""
+    from ai.services import openai_text as ot
+    from ai.services import tresor
+    system = body.system
+    if body.json_schema is not None:
+        system = (system + "\n\n" if system else "") + v.schema_anweisung(body.json_schema)
+    wert = await tresor.lesen(mk.verweis, mk.mandant, zweck="verarbeitung", aufrufer=aufrufer, anbieter="openai")
+    marke = ot.KONTO.set(ot.Konto(mandant=mk.mandant, schluessel=wert, tag_usd=mk.tag_usd, monat_usd=mk.monat_usd))
+    try:
+        out = await _openai(body, system, mk.modell)
+    finally:
+        ot.KONTO.reset(marke)
+        del wert
+    text = getattr(out, "response", None) or ""
+    modell = getattr(out, "model", None) or mk.modell
+    antwort = {"text": text, "anbieter": "openai", "weg": "openai", "modell": modell,
+               "konto": {"mandant": mk.mandant, "art": "schluessel_des_mandanten"}}
+    if body.json_schema is not None:
+        try:
+            antwort["daten"] = v.json_lesen(text, body.json_schema)
+        except ValueError as e:
+            raise HTTPException(status_code=502, detail={
+                "error": "antwort_kein_json", "grund": str(e), "anbieter": "openai", "weg": "openai",
+                "modell": modell, "text": text[:2000]}) from None
+    logger.info("verarbeitung: caller=%s mandant=%s anbieter=openai(kunde) model=%s", aufrufer, mk.mandant, modell)
+    return antwort
+
+
 @router.get("/verarbeitung/stand", dependencies=[Depends(_ag.betreiber_oder_instanz)])
 async def verarbeitung_stand():
     """Welche KI_VERARBEITUNG wirkt (fuer Rollout und Messung, #4095). Nicht in
@@ -70,11 +101,7 @@ async def verarbeitung_endpoint(body: VerarbeitungRumpf,
             kf = v.konfig()
         elif mandant != v.betreiber():
             mk = v.mandant_konfig(mandant)          # 503 ohne/ungueltige Zuweisung, "keine"
-            # Schluesselweg aus dem Tresor kommt mit A1.3; bis dahin fail-closed.
-            raise HTTPException(status_code=503, detail={
-                "error": "konto_nicht_verfuegbar", "mandant": mandant, "anbieter": mk.anbieter,
-                "hint": "Der Schluesselweg des Mandanten (Tresor) ist noch nicht freigeschaltet (#4135 A1.3). "
-                        "Es laeuft kein anderer Anbieter."})
+            return await _kunde(body, mk, aufrufer)
         else:
             kf = v.konfig()
     except HTTPException as e:

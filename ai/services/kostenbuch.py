@@ -36,7 +36,7 @@ logger = logging.getLogger("api-ai.kostenbuch")
 
 WIEN = ZoneInfo("Europe/Vienna")
 EUR_USD = 1.05          # wie die Zaehler (EUR_USD_RATE)
-ARTEN = ("geld", "abo", "guthaben")
+ARTEN = ("geld", "abo", "guthaben", "kunde_geld")   # kunde_geld: Schluessel des Kunden (#4135), nie in der Summe
 GENAUIGKEITEN = ("gezaehlt", "geschaetzt")
 GRUPPEN = ("weg", "aufrufer", "anbieter", "tag")
 MAX_TAGE = 400
@@ -296,6 +296,7 @@ def bericht(von: date, bis: date, gruppe: str = "weg", takt: Optional[str] = Non
         for d in _jsonl(verzeichnis() / f"{tag}.jsonl"):
             a = "ANONYM" if d.get("quelle") == "ip" else normalisieren(d.get("aufrufer"))
             art = d.get("art") if d.get("art") in ARTEN else "geld"
+            mit_betrag = art in ("geld", "kunde_geld")
             anb = str(d.get("anbieter") or "?")
             k = schluessel(tag, d.get("pfad"), a, anb)
             z = zeilen.setdefault((k, anb, art), {**_null(), "_geschaetzt": False, "_reihe": {}})
@@ -304,7 +305,7 @@ def bericht(von: date, bis: date, gruppe: str = "weg", takt: Optional[str] = Non
                  "tokens_aus": _zahl(d.get("tokens_aus"), ganz=True),
                  "zeichen": _zahl(d.get("zeichen"), ganz=True), "minuten": _zahl(d.get("minuten")),
                  "credits": _zahl(d.get("credits")),
-                 "betrag": _zahl(d.get("usd")) if art == "geld" else 0.0,
+                 "betrag": _zahl(d.get("usd")) if mit_betrag else 0.0,
                  "gegenwert_usd": _zahl(d.get("gegenwert_usd"))}
             for f, v in m.items():
                 z[f] += v
@@ -329,13 +330,16 @@ def bericht(von: date, bis: date, gruppe: str = "weg", takt: Optional[str] = Non
                  "genauigkeit": "geschaetzt" if z["_geschaetzt"] else "gezaehlt"}
         if feld == "anbieter_gruppe":
             zeile.pop("anbieter_gruppe")
-        if art == "geld":
+        if art in ("geld", "kunde_geld"):
             zeile.update(betrag=round(z["betrag"], 6), waehrung=WAEHRUNG)
+            if art == "kunde_geld":
+                zeile["zahlt"] = "kunde"      # nie in summe/toepfe des Betreibers
         else:
             # API-Gegenwert eines Abo-Wegs: nie bezahlt, nie mit Geld summieren.
             zeile["gegenwert_usd"] = round(z["gegenwert_usd"], 4)
         if mit_reihe:
-            zeile["reihe"] = [{"tag": tg, **_runden(v if art == "geld" else {f: x for f, x in v.items() if f != "betrag"})}
+            zeile["reihe"] = [{"tag": tg, **_runden(v if art in ("geld", "kunde_geld")
+                                                    else {f: x for f, x in v.items() if f != "betrag"})}
                               for tg, v in sorted(z["_reihe"].items())]
         aus.append(zeile)
 

@@ -110,7 +110,7 @@ def _verbrauch(tenant: str) -> dict:
         for z in kb._jsonl(kb.verzeichnis() / f"{tag.isoformat()}.jsonl"):
             if z.get("tenant") != tenant:
                 continue
-            usd = kb._zahl(z.get("usd")) if z.get("art") == "geld" else 0.0
+            usd = kb._zahl(z.get("usd")) if z.get("art") in ("geld", "kunde_geld") else 0.0
             for k in (["monat", "heute"] if tag == heute else ["monat"]):
                 out[k]["usd"] += usd
                 out[k]["buchungen"] += 1
