@@ -224,6 +224,12 @@ class ElevenLabsCostTracker:
             bc["audio_seconds"] = round(float(bc.get("audio_seconds", 0)) + float(units.get("audio_seconds", 0)), 3)
             self._save_data()
             self._check_thresholds()
+        if modality != "seconds":
+            from ai.services import kostenbuch as _kb   # #4127: Plan mit Zeichen-Deckel = Abo
+            _usd = (self.price_per_1k_chars_usd or 0) * int(units.get("chars", 0)) / 1000.0
+            _kb.buchen(anbieter="elevenlabs", art="geld" if _usd else "abo", modell=modality,
+                       zeichen=units.get("chars", 0), usd=_usd,
+                       minuten=float(units.get("audio_seconds") or units.get("seconds_requested") or 0) / 60.0)
         logger.info("ElevenLabs gezaehlt: %s/%s %s (Monat: %d Zeichen)", modality, caller, units, self._usage_data.get("chars_total", 0))
 
     # ── Sperren ──────────────────────────────────────────────────────

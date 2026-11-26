@@ -865,6 +865,16 @@ async def _transcribe_with_whisper(
         }
 
     result = await client.audio.transcriptions.create(**kwargs)
+    # #4127: STT-Minuten ins Kostenbuch (bis hierher zaehlte sie niemand).
+    try:
+        from ai.services import kostenbuch as _kb
+        _sek = duration_seconds if duration_seconds is not None else getattr(result, "duration", None)
+        _min = float(_sek) / 60.0 if _sek is not None else 0.0
+        _kb.buchen(anbieter="openai_stt", art="geld", modell=model, minuten=_min,
+                   usd=_min * _OPENAI_STT_USD_JE_MIN.get(model, 0.006),
+                   genauigkeit="gezaehlt" if _sek is not None else "geschaetzt")
+    except Exception:
+        pass
 
     # diarized_json → return raw payload (segments[] with speaker labels)
     if response_format == "diarized_json":

@@ -152,6 +152,9 @@ def buchen(caller: str, model: Optional[str], input_tokens: int, output_tokens: 
             d["models_seen"][model] = d["models_seen"].get(model, 0) + 1
         d["last_updated"] = datetime.now().isoformat()
         _schreiben(d)
+    from ai.services import kostenbuch as _kb   # #4127
+    _kb.buchen(anbieter="typesafe_jev", art="geld", modell=model, usd=float(cost_usd or 0.0),
+               tokens_ein=input_tokens, tokens_aus=output_tokens)
 
 
 def rueckstellung() -> str:

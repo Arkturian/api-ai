@@ -580,6 +580,11 @@ class OpenAIRealtimeCostTracker:
             stats["cost_eur"] += cost_eur
             self._save_data()
             self._check_thresholds()
+        from ai.services import kostenbuch as _kb   # #4127
+        _kb.buchen(anbieter="openai_realtime", art="geld", modell=model, usd=cost_usd,
+                   tokens_ein=int(audio_input_tokens or 0) + int(text_input_tokens or 0) + int(image_input_tokens or 0),
+                   tokens_aus=int(audio_output_tokens or 0) + int(text_output_tokens or 0),
+                   minuten=float(duration_sec or 0) / 60.0)
         logger.info(
             f"OpenAI Realtime tracked: {model} audio_in={audio_input_tokens} "
             f"audio_out={audio_output_tokens} text_in={text_input_tokens} "
@@ -932,6 +937,9 @@ class OpenAIRealtimeCostTracker:
             self._usage_data["last_updated"] = datetime.now().isoformat()
             self._check_thresholds()
             self._save_data()
+        from ai.services import kostenbuch as _kb   # #4127
+        _kb.buchen(anbieter="openai_realtime", art="geld", modell=model, usd=cost_usd,
+                   minuten=float(live_seconds or 0) / 60.0)
 
     def _fetch_master_status(self) -> dict:
         now = time.time()

@@ -173,6 +173,9 @@ class GeminiCliCostTracker:
 
                 # Save to disk
                 self._save_data()
+                from ai.services import kostenbuch as _kb   # #4127
+                _kb.buchen(anbieter="agy", art="abo", modell=model, tokens_ein=input_tokens,
+                           tokens_aus=output_tokens, gegenwert_usd=cost_usd)
 
                 logger.info(
                     f"Tracked Gemini CLI: {input_tokens}in/{output_tokens}out = "

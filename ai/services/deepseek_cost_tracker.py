@@ -220,6 +220,9 @@ class DeepSeekCostTracker:
             stats["cost_eur"] += cost_eur
             self._save_data()
             self._check_thresholds()
+        from ai.services import kostenbuch as _kb   # #4127
+        _kb.buchen(anbieter="deepseek", art="geld", modell=model, tokens_ein=input_tokens,
+                   tokens_aus=output_tokens, usd=cost_usd)
         logger.info(
             f"DeepSeek tracked: text/{model} in={input_tokens} out={output_tokens} "
             f"= {cost_eur:.6f}EUR (total: {self._usage_data['total_cost_eur']:.4f}EUR)"

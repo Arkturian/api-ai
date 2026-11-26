@@ -209,31 +209,49 @@ async def _aufrufer_protokoll(request, call_next):
     darf nie den Aufruf treffen."""
     import time as _time
     t0 = _time.monotonic()
-    antwort = await call_next(request)
+    pfad = request.url.path
+    if not (request.method == "POST" and pfad.startswith("/ai/")):
+        return await call_next(request)
+    caller, quelle, marke = "?", "ip", None
     try:
-        pfad = request.url.path
-        if request.method == "POST" and pfad.startswith("/ai/"):
-            import asyncio as _asyncio, json as _json
-            from datetime import datetime as _dt
-            from pathlib import Path as _P
-            k = request.headers
-            caller, quelle = (k.get("x-agent-name") or "").strip()[:64], "header"
-            if not caller and k.get("authorization"):
-                from ai.routes import jev_routes as _jev
-                caller = await _asyncio.to_thread(_jev._jwt_sub_geprueft, k.get("authorization")) or ""
-                quelle = "jwt"
-            if not caller:
-                caller = (k.get("x-real-ip") or (k.get("x-forwarded-for") or "").split(",")[0].strip()
-                          or (request.client.host if request.client else "?"))
-                quelle = "ip"
-            zeile = {"ts": _dt.now().astimezone().isoformat(timespec="seconds"), "pfad": pfad,
-                     "caller": caller, "quelle": quelle, "ua": (k.get("user-agent") or "")[:60],
-                     "weitergereicht": bool(k.get("x-api-ai-forwarded")),
-                     "status": antwort.status_code, "ms": int((_time.monotonic() - t0) * 1000)}
-            d = _P(os.getenv("AUFRUFER_LOG_DIR") or "/var/lib/api-ai/aufrufer")
-            d.mkdir(parents=True, exist_ok=True)
-            with open(d / f"{_dt.now():%Y-%m-%d}.jsonl", "a") as f:
-                f.write(_json.dumps(zeile, ensure_ascii=False) + "\n")
+        # #4127: Wer ruft, schon VOR dem Aufruf bestimmen -- das Kostenbuch bucht
+        # jede Leistung mit Pfad und Aufrufer dieses Aufrufs (ai/services/kostenbuch.py).
+        import asyncio as _asyncio
+        from ai.services import kostenbuch as _kb
+        k = request.headers
+        caller, quelle = (k.get("x-agent-name") or "").strip()[:64], "header"
+        if not caller and k.get("authorization"):
+            from ai.routes import jev_routes as _jev
+            caller = await _asyncio.to_thread(_jev._jwt_sub_geprueft, k.get("authorization")) or ""
+            quelle = "jwt"
+        if not caller:
+            caller = (k.get("x-real-ip") or (k.get("x-forwarded-for") or "").split(",")[0].strip()
+                      or (request.client.host if request.client else "?"))
+            quelle = "ip"
+        marke = _kb.KONTEXT.set({"pfad": pfad, "aufrufer": caller, "quelle": quelle})
+    except Exception as e:
+        logging.getLogger("api-ai.aufrufer").warning("Aufrufer vorab: %s", type(e).__name__)
+    try:
+        antwort = await call_next(request)
+    finally:
+        if marke is not None:
+            try:
+                _kb.KONTEXT.reset(marke)
+            except Exception:
+                pass
+    try:
+        import json as _json
+        from datetime import datetime as _dt
+        from pathlib import Path as _P
+        k = request.headers
+        zeile = {"ts": _dt.now().astimezone().isoformat(timespec="seconds"), "pfad": pfad,
+                 "caller": caller, "quelle": quelle, "ua": (k.get("user-agent") or "")[:60],
+                 "weitergereicht": bool(k.get("x-api-ai-forwarded")),
+                 "status": antwort.status_code, "ms": int((_time.monotonic() - t0) * 1000)}
+        d = _P(os.getenv("AUFRUFER_LOG_DIR") or "/var/lib/api-ai/aufrufer")
+        d.mkdir(parents=True, exist_ok=True)
+        with open(d / f"{_dt.now():%Y-%m-%d}.jsonl", "a") as f:
+            f.write(_json.dumps(zeile, ensure_ascii=False) + "\n")
     except Exception as e:
         logging.getLogger("api-ai.aufrufer").warning("Aufrufer-Protokoll: %s", type(e).__name__)
     return antwort
@@ -703,6 +721,8 @@ def health_check():
         "providers": _providers_status(),
         # #3604: vorgabe | eigen | unvollstaendig, ohne Werte.
         "realtime_auth": auth_konfig.zustand(),
+        # #4127: Menuepunkt im Portal nur, wo es den Pfad gibt (CloudV2).
+        "faehigkeiten": ["kosten"],
     }
 
 @app.get("/ai/wege", dependencies=[Depends(_ag.betreiber_oder_instanz)])

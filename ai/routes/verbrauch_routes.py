@@ -102,3 +102,68 @@ async def bilder(agent: Optional[str] = Query(default=None, description="Agenten
     import asyncio
     res = await asyncio.to_thread(bv.bericht, (agent or "").strip() or None, t_von, t_bis)
     return JSONResponse(res, headers={"Cache-Control": "no-store"})
+
+
+# --- #4127: Kostenbericht -------------------------------------------------
+
+RECHT_KOSTEN = "ai:kosten:lesen"
+
+
+def _tag(v: Optional[str], name: str):
+    from datetime import date
+    try:
+        return date.fromisoformat(str(v)[:10])
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=422, detail={"error": "invalid_date", "feld": name, "value": v})
+
+
+async def _darf_kosten_lesen(authorization: Optional[str], x_api_key: Optional[str]) -> str:
+    """Wer darf den Kostenbericht lesen? Betreiber-Schluessel, ein Admin (Mensch,
+    per /me) oder jedes gepruefte JWT mit dem Recht `ai:kosten:lesen` (Agenten,
+    MCP-Werkzeug; vergeben von AuthAPI). Die Instanz zeigt nur ihre eigenen Zahlen:
+    jede api-ai fuehrt ihr eigenes Kostenbuch."""
+    import asyncio
+    from ai import auth_guard as _ag
+    if _ag.ist_betreiber(x_api_key):
+        return "betreiber"
+    if not isinstance(authorization, str) or not authorization.lower().startswith("bearer "):
+        raise HTTPException(status_code=401, detail={"error": "authentication_required"})
+    from ai.services import jwt_pruefung
+    claims = await asyncio.to_thread(jwt_pruefung.pruefen, authorization)   # 401/503
+    rechte = (claims or {}).get("permissions")
+    if isinstance(rechte, list) and RECHT_KOSTEN in rechte:
+        return str((claims or {}).get("sub") or "recht")
+    profil = await _profil(authorization)
+    if profil is not None and ist_admin(profil):
+        return "admin"
+    raise HTTPException(status_code=403, detail={"error": "kosten_nicht_freigegeben",
+                                                 "required": RECHT_KOSTEN})
+
+
+@router.get("/kosten")
+async def kosten(von: Optional[str] = Query(default=None, description="JJJJ-MM-TT, einschliesslich (Wien); Vorgabe: vor 6 Tagen"),
+                 bis: Optional[str] = Query(default=None, description="JJJJ-MM-TT, einschliesslich (Wien); Vorgabe: heute"),
+                 gruppe: str = Query(default="weg", description="weg | aufrufer | anbieter | tag"),
+                 takt: Optional[str] = Query(default=None, description="tag: Tagesreihe je Zeile"),
+                 authorization: Optional[str] = Header(default=None),
+                 x_api_key: Optional[str] = Header(default=None, alias="X-API-KEY")):
+    """#4127: Kosten und Kontingent der KI-Dienste dieser Instanz.
+
+    Vertrag mit CloudV2 an #4127. `zeilen` je Gruppe, Anbieter und Art (geld |
+    abo | guthaben): Geld nur als `betrag` + `waehrung` in Zeilen mit art=geld,
+    Abo-Zeilen nur mit Mengen (`gegenwert_usd` ist nie bezahlt). `aufrufe` aus
+    dem Aufruferprotokoll, `toepfe` je Geld-Anbieter mit `deckel`, `ANONYM`
+    nie verteilt, `luecken` und `erfasst_bis`."""
+    import asyncio
+    from datetime import timedelta
+    from ai.services import kostenbuch as kb
+    wer = await _darf_kosten_lesen(authorization, x_api_key)
+    heute = datetime.now(kb.WIEN).date()
+    t_bis = _tag(bis, "bis") if bis else heute
+    t_von = _tag(von, "von") if von else t_bis - timedelta(days=6)
+    try:
+        res = await asyncio.to_thread(kb.bericht, t_von, t_bis, gruppe, takt)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail={"error": "ungueltig", "grund": str(e)})
+    logger.info("kosten: gelesen von=%s bis=%s gruppe=%s durch=%s", t_von, t_bis, gruppe, wer[:64])
+    return JSONResponse(res, headers={"Cache-Control": "no-store"})

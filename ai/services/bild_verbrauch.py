@@ -114,6 +114,33 @@ def buchen(*, agent: str, quelle: str, art: str = "bild", anzahl: int = 1,
                 fcntl.flock(f, fcntl.LOCK_UN)
     except Exception as e:
         logger.warning("Bildverbrauch nicht gebucht: %s", type(e).__name__)
+    _kostenbuch(agent=agent, art=art, anzahl=anzahl, model=model, routed_via=routed_via,
+                kosten_usd=kosten_usd)
+
+
+#: Flow-Credits je Erzeugung (Stand 14.11.2026, Baustein Bild/Video); Bilder kosten keine.
+_FLOW_CREDITS = {"veo-3.1-fast": 10, "veo-3.1-quality": 100, "veo-3.1-lite": 5}
+#: CapSolver je Flow-Erzeugung, ungefaehr (Baustein Bild/Video: rund 0,3 Cent).
+CAPSOLVER_USD_JE_ERZEUGUNG = 0.003
+
+
+def _kostenbuch(*, agent, art, anzahl, model, routed_via, kosten_usd) -> None:
+    """#4127: dieselbe Erzeugung ins Kostenbuch, nach Topf getrennt."""
+    from ai.services import kostenbuch as _kb
+    wer = agent if agent and agent != UNBEKANNT else None
+    n = int(anzahl or 1)
+    if routed_via == "subscription":
+        _kb.buchen(anbieter="codex", art="abo", modell=model, anzahl=n, aufrufer=wer)
+    elif routed_via == "google-flow":
+        _kb.buchen(anbieter="google_flow", art="abo", modell=model, anzahl=n, aufrufer=wer,
+                   credits=_FLOW_CREDITS.get(str(model), 0) * n)
+        _kb.buchen(anbieter="capsolver", art="geld", modell="captcha", anzahl=n, aufrufer=wer,
+                   usd=CAPSOLVER_USD_JE_ERZEUGUNG * n, genauigkeit="geschaetzt")
+    elif str(model or "").startswith("gpt-image"):
+        # Nur OpenAI hier: MiniMax bucht sein Zaehler selbst (sonst doppelt).
+        _kb.buchen(anbieter="openai_bild", art="geld", modell=model, anzahl=n, aufrufer=wer,
+                   usd=float(kosten_usd or 0.0),
+                   genauigkeit="gezaehlt" if kosten_usd is not None else "geschaetzt")
 
 
 # --- Lesen ----------------------------------------------------------------

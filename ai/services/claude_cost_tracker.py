@@ -173,6 +173,10 @@ class ClaudeCostTracker:
 
                 # Save to disk
                 self._save_data()
+                from ai.services import kostenbuch as _kb   # #4127
+                _kb.buchen(anbieter="claude_cli", art="abo", modell=next(iter(model_usage), None),
+                           tokens_ein=input_tokens + cache_read + cache_creation,
+                           tokens_aus=output_tokens, gegenwert_usd=cost_usd)
 
                 logger.info(
                     f"Tracked Claude: {input_tokens}in/{output_tokens}out = "

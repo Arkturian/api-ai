@@ -276,6 +276,10 @@ class MinimaxCostTracker:
             stats["cost_eur"] += cost_eur
             self._save_data()
             self._check_thresholds()
+        from ai.services import kostenbuch as _kb   # #4127
+        _kb.buchen(anbieter="minimax", art="geld", modell=model, usd=cost_usd,
+                   tokens_ein=units.get("input_tokens", 0), tokens_aus=units.get("output_tokens", 0),
+                   zeichen=units.get("chars", 0), anzahl=units.get("num_images") or units.get("num_tracks") or 1)
         logger.info(
             f"MiniMax tracked: {modality}/{model} = {cost_eur:.6f}EUR "
             f"(total: {self._usage_data['total_cost_eur']:.4f}EUR)"

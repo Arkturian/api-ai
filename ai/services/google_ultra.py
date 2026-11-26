@@ -207,6 +207,11 @@ def abrechnen(r: Reservierung, minuten_ist: float, **extra) -> float:
     _anhaengen({"ts": time.time(), "tag": _jetzt().date().isoformat(), "id": r.id,
                 "art": r.art, "modell": r.modell, "minuten": round(minuten_ist, 3),
                 "usd": round(ist - r.usd, 6), "status": "berichtigt", **extra})
+    from ai.services import kostenbuch as _kb   # #4127: Ultra-Guthaben, kein Geld vom Konto
+    _kb.buchen(anbieter="google_ultra", art="guthaben", modell=r.modell, usd=0.0, gegenwert_usd=ist,
+               minuten=minuten_ist if r.art == "transcribe" or r.art == "tts" else 0.0,
+               zeichen=int(extra.get("zeichen") or 0), tokens_ein=int(extra.get("tokens_in") or 0),
+               tokens_aus=int(extra.get("tokens_out") or 0))
     return ist
 
 

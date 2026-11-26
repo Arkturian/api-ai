@@ -329,7 +329,13 @@ async def aufrufen(text: str, system: Optional[str], modell: Optional[str],
     except (ValueError, TypeError, AttributeError):
         # Unlesbar heisst nicht unberechnet: Der Betrag bleibt gebucht.
         await asyncio.to_thread(behalten, r)
+        from ai.services import kostenbuch as _kb   # #4127: Hoechstbetrag bleibt gebucht
+        _kb.buchen(anbieter="openai_text", art="geld", modell=m, usd=r.usd, genauigkeit="geschaetzt")
         raise HTTPException(status_code=502, detail={"error": "openai_text_antwort_unlesbar"})
+    from ai.services import kostenbuch as _kb   # #4127
+    _kb.buchen(anbieter="openai_text", art="geld", modell=daten.get("model") or m, usd=ist,
+               tokens_ein=int(usage.get("input_tokens") or 0), tokens_aus=int(usage.get("output_tokens") or 0),
+               genauigkeit="gezaehlt" if usage else "geschaetzt")
     if not inhalt:
         # Berechnet wurde trotzdem.
         await asyncio.to_thread(_leer_buchen, r, ist)

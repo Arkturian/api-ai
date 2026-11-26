@@ -270,6 +270,9 @@ def buchen(caller: str, fragen: int, usage: Optional[dict], cost_usd: float,
                 ziel["errors"] += 1
         d["last_updated"] = datetime.now().isoformat()
         _schreiben(d)
+    from ai.services import kostenbuch as _kb   # #4127
+    _kb.buchen(anbieter="openai_decisions", art="geld", modell="decisions", usd=float(cost_usd or 0.0),
+               tokens_ein=eingabe, anzahl=1)
 
 
 def status() -> dict:
