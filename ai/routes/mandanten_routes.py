@@ -1,6 +1,7 @@
 """#4135 (Plan 6567 A1.1/A1.5): KI-Zuweisung je Mandant lesen und setzen.
 
-GET /ai/mandanten/{tenant}/ki  -- Zuweisung, Konto ohne Wert, Deckel, Verbrauch heute/Monat
+GET /ai/mandanten/{tenant}/ki  -- Zuweisung, Konto ohne Wert, Deckel, Verbrauch heute/Monat;
+                                  `betreiber: true` beim Betreiber-Mandanten (KI der Instanz)
 PUT /ai/mandanten/{tenant}/ki  -- Zuweisung setzen (kein Geheimnis: der Schluessel liegt im
                                   Tresor der auth-api, hier steht nur sein Verweis)
 
@@ -101,14 +102,22 @@ def _lesen(tenant: str) -> Optional[dict]:
         raise HTTPException(status_code=503, detail={"error": "verarbeitung_zuweisung_unlesbar", "mandant": tenant})
 
 
-def _verbrauch(tenant: str) -> dict:
-    """Geld und Mengen des Mandanten aus dem Kostenbuch: heute und laufender Monat."""
+def _verbrauch(tenant: str, instanz: bool = False) -> dict:
+    """Geld und Mengen des Mandanten aus dem Kostenbuch: heute und laufender Monat.
+
+    `instanz=True` (Betreiber): alles, was die Instanz selbst traegt, also jede Buchung
+    ausser `kunde_geld`, ueber alle Mandanten und auch ohne Mandant. Am Kern laufen viele
+    Aufrufe ohne JWT (Dienstschluessel) und Agenten anderer Mandanten auf Betreiber-Geld;
+    nur nach `tenant == betreiber` zu filtern, zeigte zu wenig."""
     from ai.services import kostenbuch as kb
     heute = datetime.now(kb.WIEN).date()
     out = {"heute": {"usd": 0.0, "buchungen": 0}, "monat": {"usd": 0.0, "buchungen": 0}}
     for tag in kb._tage(heute.replace(day=1), heute):
         for z in kb._jsonl(kb.verzeichnis() / f"{tag.isoformat()}.jsonl"):
-            if z.get("tenant") != tenant:
+            if instanz:
+                if z.get("art") == "kunde_geld":
+                    continue
+            elif z.get("tenant") != tenant:
                 continue
             usd = kb._zahl(z.get("usd")) if z.get("art") in ("geld", "kunde_geld") else 0.0
             for k in (["monat", "heute"] if tag == heute else ["monat"]):
@@ -116,13 +125,28 @@ def _verbrauch(tenant: str) -> dict:
                 out[k]["buchungen"] += 1
     for k in out:
         out[k]["usd"] = round(out[k]["usd"], 6)
-    return {**out, "waehrung": kb.WAEHRUNG}
+    return {**out, "waehrung": kb.WAEHRUNG, "umfang": "instanz" if instanz else "mandant"}
+
+
+def _betreiber_ansicht(tenant: str) -> dict:
+    """Der Betreiber hat keine Zuweisung: fuer ihn gilt KI_VERARBEITUNG der Instanz,
+    Urteile laufen ueber die Schluessel der Instanz (#4138, CloudV2)."""
+    st = v.stand()
+    verarbeitung = ({"anbieter": st["anbieter"], "modell": st.get("modell"), "quelle": "instanz"}
+                    if st.get("gueltig") else
+                    {"anbieter": None, "modell": None, "quelle": "instanz",
+                     "fehler": st.get("fehler"), "grund": st.get("grund")})
+    return {"mandant": tenant, "betreiber": True, "zugewiesen": False,
+            "verarbeitung": verarbeitung, "urteil": "instanz", "deckel": None,
+            "verbrauch": _verbrauch(tenant, instanz=True)}
 
 
 def _ansicht(tenant: str, d: Optional[dict]) -> dict:
+    if tenant == v.betreiber():
+        return _betreiber_ansicht(tenant)
     if d is None:
-        return {"mandant": tenant, "zugewiesen": False, "verarbeitung": None, "urteil": "keine",
-                "deckel": None, "verbrauch": _verbrauch(tenant)}
+        return {"mandant": tenant, "betreiber": False, "zugewiesen": False, "verarbeitung": None,
+                "urteil": "keine", "deckel": None, "verbrauch": _verbrauch(tenant)}
     vb = d.get("verarbeitung")
     konto = None
     if isinstance(vb, dict):
@@ -130,7 +154,7 @@ def _ansicht(tenant: str, d: Optional[dict]) -> dict:
         # Nur der Verweis (kein Geheimnis), gekuerzt; der Wert liegt im Tresor.
         konto = {"anbieter": vb.get("anbieter"), "modell": vb.get("modell"),
                  "verweis": verweis[:12] + ("…" if len(verweis) > 12 else "")}
-    return {"mandant": tenant, "zugewiesen": True,
+    return {"mandant": tenant, "betreiber": False, "zugewiesen": True,
             "verarbeitung": "keine" if vb == "keine" else konto,
             "urteil": d.get("urteil") or "keine", "deckel": d.get("deckel"),
             "geaendert_am": d.get("geaendert_am"), "geaendert_von": d.get("geaendert_von"),

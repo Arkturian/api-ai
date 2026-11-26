@@ -454,3 +454,33 @@ def test_urteil_des_betreibers_unveraendert(client, monkeypatch):
         vv.urteil_pruefen()                 # Betreiber: nichts
     finally:
         aufruf.KONTEXT.reset(m)
+
+
+# --- #4138 (CloudV2): Betreiber in der Ansicht erkennbar ---------------------------
+
+def test_ansicht_betreiber_zeigt_ki_der_instanz_und_ihren_ganzen_verbrauch(client, rechte, umgebung, monkeypatch):
+    from ai.services import kostenbuch as kb
+    monkeypatch.setenv("KI_VERARBEITUNG", "hydrogen")
+    for tenant, art, usd in ((None, "geld", 1.0), ("arkturian", "geld", 2.0), ("edera", "geld", 0.5),
+                             ("lesser", "kunde_geld", 7.0), ("arkturian", "abo", 0.0)):
+        m = kb.KONTEXT.set({"pfad": "/ai/x", "aufrufer": "x", "quelle": "jwt", "tenant": tenant})
+        kb.buchen(anbieter="openai_text", art=art, usd=usd)
+        kb.KONTEXT.reset(m)
+    d = client.get("/ai/mandanten/arkturian/ki", headers={"Authorization": "Bearer kosten"}).json()
+    assert d["betreiber"] is True and d["urteil"] == "instanz"
+    assert d["verarbeitung"] == {"anbieter": "hydrogen", "modell": "gemini-4-hydrogen-low", "quelle": "instanz"}
+    assert d["verbrauch"]["heute"] == {"usd": 3.5, "buchungen": 4} and d["verbrauch"]["umfang"] == "instanz"
+    k = client.get("/ai/mandanten/lesser/ki", headers={"Authorization": "Bearer kosten"}).json()
+    assert k["betreiber"] is False and k["verbrauch"]["heute"] == {"usd": 7.0, "buchungen": 1}
+    assert k["verbrauch"]["umfang"] == "mandant"
+
+
+def test_ansicht_betreiber_mit_kaputter_instanz_konfig(client, rechte, monkeypatch):
+    monkeypatch.delenv("KI_VERARBEITUNG", raising=False)
+    d = client.get("/ai/mandanten/arkturian/ki", headers={"Authorization": "Bearer kosten"}).json()
+    assert d["betreiber"] is True and d["verarbeitung"]["anbieter"] is None
+    assert d["verarbeitung"]["fehler"] == "verarbeitung_nicht_konfiguriert"
+
+
+def test_ansicht_kunde_mit_zuweisung_traegt_betreiber_false(client, rechte):
+    assert _put(client, "Bearer admin-lesser", body={"verarbeitung": "keine"}).json()["betreiber"] is False
