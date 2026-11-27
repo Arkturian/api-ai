@@ -136,6 +136,7 @@ def kern(monkeypatch, tmp_path):
     monkeypatch.setenv("AUFRUFER_LOG_DIR", str(tmp_path / "auf"))
     tokens = {"Bearer edera": {"sub": "SaulGoodman", "type": "agent", "tenant": "edera"},
               "Bearer ark": {"sub": "Cloud", "type": "agent", "tenant": "arkturian"},
+              "Bearer pool": {"sub": "SaulGoodman", "type": "agent", "tenant": "pooltest"},
               "Bearer lesser-dienst": {"sub": "service:conversation-api-lesser", "type": "service",
                                        "tenant": "lesser"}}
     monkeypatch.setattr(jwt_pruefung, "claims_oder_none", lambda a: tokens.get(a))
@@ -146,6 +147,9 @@ def kern(monkeypatch, tmp_path):
         if mandant == "lesser":
             return dienstweg.Weg(weg="abo", anbieter="gemini", modell=None, zugang=None, tresor_verweis=None,
                                  quelle="mandant")
+        if mandant == "pooltest":
+            return dienstweg.Weg(weg="pool", anbieter=None, modell=None, zugang=None, tresor_verweis=None,
+                                 quelle="mandant", pool="alle")
         raise dienstweg.nicht_nutzbar("kein_dienstweg", mandant, dienst)
     monkeypatch.setattr(dienstweg, "aufloesen", aufloesen)
     return gerufen
@@ -224,3 +228,33 @@ def test_an_pruefungsfehler_weist_ab(kern, monkeypatch):
 def test_aus_prueft_nicht(kern, monkeypatch):
     monkeypatch.setenv("MANDANT_WEGE", "aus")
     assert _flow(TestClient(main.app), "Bearer edera").status_code == 404 and kern["register"] == []
+
+
+def test_pool_weg_laeuft_mit_tagesdeckel(kern, monkeypatch, tmp_path):
+    """Cloud 27.11.: edera gehoert zum Pool `alle` und darf Flow nutzen, aber hoechstens
+    MANDANT_POOL_TAG Aufrufe am Tag je Dienst."""
+    monkeypatch.setenv("MANDANT_WEGE", "an")
+    monkeypatch.setenv("MANDANT_POOL_TAG", json.dumps({"bild": 2}))
+    c = TestClient(main.app)
+    assert [_flow(c, "Bearer pool").status_code for _ in range(2)] == [404, 404]     # durch bis zum Routing
+    r = _flow(c, "Bearer pool")
+    d = r.json()["detail"]
+    assert r.status_code == 429 and d["grund"] == "pool_tagesdeckel" and d["grenze"] == 2 and d["pool"] == "alle"
+    v = _vermerke(tmp_path)
+    assert [x["status"] for x in v] == [200, 200, 429] and v[0]["weg"] == "pool"
+
+
+def test_pool_deckel_vorgabe_und_konfig(monkeypatch):
+    monkeypatch.delenv("MANDANT_POOL_TAG", raising=False)
+    assert (mandant_wege.pool_deckel("bild"), mandant_wege.pool_deckel("video"),
+            mandant_wege.pool_deckel("tts")) == (50, 10, 200)
+    monkeypatch.setenv("MANDANT_POOL_TAG", '{"tts": 5, "sonst": 7}')
+    assert (mandant_wege.pool_deckel("tts"), mandant_wege.pool_deckel("stt"), mandant_wege.pool_deckel("bild")) == (5, 7, 50)
+    monkeypatch.setenv("MANDANT_POOL_TAG", "kaputt")
+    assert mandant_wege.pool_deckel("bild") == 50
+
+
+def test_pool_feld_aus_der_antwort(cloud):
+    cloud["antwort"] = _Antwort(200, {"weg": "pool", "pool": "alle", "quelle": "mandant", "version": 1})
+    w = _aufloesen("edera", "bild")
+    assert w.weg == "pool" and w.pool == "alle" and w.tresor_verweis is None

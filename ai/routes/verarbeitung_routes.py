@@ -124,7 +124,10 @@ async def verarbeitung_endpoint(body: VerarbeitungRumpf,
         elif mandant != v.betreiber():
             # 6586/I5: Weg aus dem Dienstweg (Mensch, sonst Mandant), Deckel des Mandanten.
             mk = await v.mandant_weg(mandant, dienst, mensch)      # 403/503 mit Grund
-            return await _kunde(body, mk, aufrufer, dienst=dienst, mensch=mensch is not None)
+            if mk is not None:
+                return await _kunde(body, mk, aufrufer, dienst=dienst, mensch=mensch is not None)
+            logger.info("verarbeitung: mandant=%s dienst=%s ueber den Pool -> KI_VERARBEITUNG", mandant, dienst)
+            kf = v.konfig()
         else:
             if x_dienst or mensch:
                 # Betreiber: ein Abo-Konto je Mensch kann der Kern noch nicht ausfuehren;

@@ -3,7 +3,11 @@
 Vertrag (cloud-api 09a2f55c, backend/app/zugaenge_routes.py):
 
     GET /api/dienstwege/aufloesen?mandant=…&dienst=…&mensch=…
-    -> {weg, anbieter, modell, zugang, version, tresor_verweis, quelle}
+    -> {weg, anbieter, modell, zugang, version, tresor_verweis, quelle[, pool]}
+
+`weg: pool` (Cloud 27.11., I1-Erweiterung): Der Mandant gehoert zu einem Pool des
+Kontoregisters (Alex 09.11.: "wir alle sind ein Pool") und darf die Abos des
+Betreibers nutzen; ob er dazugehoert, entscheidet die cloud-api, nicht wir.
 
 Nur mit dem Dienst-JWT `service:api-ai-arkserver` und dem Recht
 `zugaenge:dienstweg:aufloesen` (AuthAPI 27.11.). Erst gilt der Weg des Menschen,
@@ -50,6 +54,8 @@ class Weg:
     tresor_verweis: Optional[str]
     quelle: str
     version: Optional[int] = None
+    #: bei `weg: pool` der Pool des Kontoregisters (z. B. `alle`), Cloud 6586/I5 27.11.
+    pool: Optional[str] = None
 
 
 def basis() -> str:
@@ -131,7 +137,8 @@ async def aufloesen(mandant: str, dienst: str, mensch: Optional[str] = None) -> 
         w = Weg(weg=weg, anbieter=(str(d.get("anbieter")).lower() if d.get("anbieter") else None),
                 modell=d.get("modell") or None, zugang=d.get("zugang") or None,
                 tresor_verweis=d.get("tresor_verweis") or None,
-                quelle=str(d.get("quelle") or "mandant"), version=d.get("version"))
+                quelle=str(d.get("quelle") or "mandant"), version=d.get("version"),
+                pool=(str(d.get("pool")) if d.get("pool") else None))
         _CACHE[schluessel] = (jetzt + _ttl(), w)
         logger.info("dienstweg: mandant=%s dienst=%s mensch=%s weg=%s anbieter=%s quelle=%s", mandant, dienst,
                     "ja" if mensch else "nein", w.weg, w.anbieter, w.quelle)

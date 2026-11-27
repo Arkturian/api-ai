@@ -144,6 +144,16 @@ def test_abo_und_lokale_wege_des_kunden_laufen_nie_auf_dem_kern(client, wege, um
     assert r.status_code == 503 and d["error"] == fehler and d["weg"] == weg and wege == []
 
 
+def test_pool_mandant_nimmt_die_einstellung_der_instanz(client, wege, register):
+    """Cloud 27.11.: `weg: pool` (Mandant im Pool des Kontoregisters) -> KI_VERARBEITUNG."""
+    from ai.services import dienstweg
+    register["weg"] = dienstweg.Weg(weg="pool", anbieter=None, modell=None, zugang=None, tresor_verweis=None,
+                                    quelle="mandant", pool="alle")
+    r = _post(client, "Bearer lesser")
+    assert r.status_code == 200, r.text
+    assert r.json()["anbieter"] == "hydrogen" and wege == ["agy"]
+
+
 def test_kunde_ohne_dienstausweis_kein_konto(client, wege, umgebung, register):
     register["weg"] = _weg(modell="gpt-5.4-mini")
     _zuweisen(umgebung, "lesser", {"deckel": {"tag_usd": 1, "monat_usd": 5}})

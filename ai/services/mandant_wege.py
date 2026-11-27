@@ -6,10 +6,13 @@ video, stt, tts, realtime, conversation), der Dienstweg kommt aus dem Zugangsreg
 der cloud-api (ai/services/dienstweg.py).
 
 Auf dem Kern laeuft fuer Kunden heute nur der Schluesselweg von /ai/verarbeitung
-(eigene Pruefung dort, ebenso /ai/jev und /ai/decisions ueber urteil_pruefen).
-Fuer alle anderen Pfade gibt es noch keinen Weg mit dem Schluessel des Kunden:
-Abo- und lokale Wege laufen auf den Rechnern des Kunden (Knotenweg folgt). Die
-Antwort nennt deshalb den Grund, aber es laeuft nie ein Weg des Betreibers.
+(eigene Pruefung dort, ebenso /ai/jev und /ai/decisions ueber urteil_pruefen) und
+der Pool-Weg: `weg: pool` heisst, der Mandant gehoert zum Pool des Kontoregisters
+und darf die Wege des Betreibers nutzen (edera, p3; Cloud 27.11.). Dann gilt ein
+Tagesdeckel je Mandant und Dienst (MANDANT_POOL_TAG, Vorgabe bild 50, video 10,
+sonst 200 Aufrufe). Fuer alle anderen Wege gibt es auf dem Kern noch nichts mit
+dem Schluessel des Kunden: Abo- und lokale Wege laufen auf seinen Rechnern
+(Knotenweg folgt). Die Antwort nennt den Grund, es laeuft nie ein Weg des Betreibers.
 
 MANDANT_WEGE:
 - `beobachten` (Vorgabe): nichts wird abgewiesen, jede Abweisung, die `an` braeuchte,
@@ -86,8 +89,47 @@ def _vermerken(zeile: dict) -> None:
         logger.warning("mandant_wege: Vermerk nicht geschrieben (%s)", type(e).__name__)
 
 
-async def urteil(pfad: str, mandant: str, mensch: Optional[str]) -> HTTPException:
-    """Warum ein Kunden-Mandant diesen Pfad auf dem Kern nicht nutzen kann (immer eine Abweisung)."""
+POOL_DECKEL_VORGABE = {"bild": 50, "video": 10}
+POOL_DECKEL_SONST = 200
+
+
+def pool_deckel(dienst: str) -> int:
+    """Tagesdeckel je Mandant und Dienst auf dem Pool-Weg (MANDANT_POOL_TAG als JSON, z. B. {"bild": 50})."""
+    werte = dict(POOL_DECKEL_VORGABE)
+    roh = (os.getenv("MANDANT_POOL_TAG") or "").strip()
+    if roh:
+        try:
+            d = json.loads(roh)
+            if isinstance(d, dict):
+                werte.update({str(k): int(v) for k, v in d.items() if int(v) >= 0})
+        except (ValueError, TypeError):
+            logger.warning("mandant_wege: MANDANT_POOL_TAG ungueltig, Vorgabe gilt")
+    return int(werte.get(dienst, werte.get("sonst", POOL_DECKEL_SONST)))
+
+
+def _zaehlen(mandant: str, dienst: str) -> int:
+    """Zaehlt einen Aufruf des Tages und gibt den neuen Stand zurueck (nur Zahlen, kein Inhalt)."""
+    import fcntl
+    d = Path(os.getenv("MANDANT_WEGE_DIR") or "/var/lib/api-ai/mandant_wege") / "zaehler"
+    d.mkdir(parents=True, exist_ok=True)
+    p = d / f"{datetime.now():%Y-%m-%d}_{mandant}_{dienst}.txt"
+    with open(p, "a+", encoding="utf-8") as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        f.seek(0)
+        try:
+            n = int((f.read() or "0").strip() or 0)
+        except ValueError:
+            n = 0
+        n += 1
+        f.seek(0)
+        f.truncate()
+        f.write(str(n))
+    return n
+
+
+async def urteil(pfad: str, mandant: str, mensch: Optional[str]) -> Optional[HTTPException]:
+    """None: Der Mandant darf diesen Pfad nutzen (Pool-Weg innerhalb des Deckels).
+    Sonst die Abweisung mit Grund."""
     dienst = dienst_fuer(pfad)
     if dienst is None:
         return HTTPException(status_code=403, detail={
@@ -98,6 +140,15 @@ async def urteil(pfad: str, mandant: str, mensch: Optional[str]) -> HTTPExceptio
         w = await dienstweg.aufloesen(mandant, dienst, mensch)
     except HTTPException as e:
         return e
+    if w.weg == "pool":
+        grenze = pool_deckel(dienst)
+        n = _zaehlen(mandant, dienst)
+        if n > grenze:
+            return HTTPException(status_code=429, detail={
+                "error": "kontingent", "grund": "pool_tagesdeckel", "mandant": mandant, "dienst": dienst,
+                "weg": "pool", "pool": w.pool, "grenze": grenze,
+                "hint": "Der Tagesdeckel dieses Mandanten auf dem gemeinsamen Pool ist erreicht."})
+        return None
     return HTTPException(status_code=503, detail={
         "error": "weg_nicht_auf_dem_kern", "mandant": mandant, "dienst": dienst, "weg": w.weg,
         "anbieter": w.anbieter, "quelle": w.quelle,
@@ -122,6 +173,11 @@ async def pruefen(pfad: str, mandant: Optional[str], jwt_typ: Optional[str],
                        type(fehler).__name__, mandant, pfad)
         e = HTTPException(status_code=503, detail={"error": "dienstweg_nicht_lesbar", "grund": "pruefung_fehler",
                                                    "mandant": mandant})
+    if e is None:
+        _vermerken({"ts": datetime.now().astimezone().isoformat(timespec="seconds"), "modus": m, "mandant": mandant,
+                    "pfad": pfad, "aufrufer": (aufrufer or "?")[:64], "status": 200, "error": None,
+                    "grund": "pool", "dienst": dienst_fuer(pfad), "weg": "pool", "anbieter": None})
+        return None
     d = e.detail if isinstance(e.detail, dict) else {"error": str(e.detail)}
     _vermerken({"ts": datetime.now().astimezone().isoformat(timespec="seconds"), "modus": m, "mandant": mandant,
                 "pfad": pfad, "aufrufer": (aufrufer or "?")[:64], "status": e.status_code,

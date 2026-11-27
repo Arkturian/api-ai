@@ -260,10 +260,10 @@ def deckel(mandant: str, d: Optional[dict] = None) -> tuple:
     return tag, monat
 
 
-async def mandant_weg(mandant: str, dienst: str, mensch: Optional[str]) -> MandantKonfig:
+async def mandant_weg(mandant: str, dienst: str, mensch: Optional[str]) -> Optional[MandantKonfig]:
     """Schluesselweg eines Kunden-Mandanten aus dem Dienstweg. Auf dem Kern nur `weg: api`
-    mit einem Anbieter aus KUNDEN_ANBIETER und Tresor-Verweis; alles andere 503 mit Grund,
-    nie ein Weg des Betreibers."""
+    mit einem Anbieter aus KUNDEN_ANBIETER und Tresor-Verweis; None bei `weg: pool` (dann
+    gilt KI_VERARBEITUNG); alles andere 503 mit Grund, nie ein Weg des Betreibers."""
     from ai.services import dienstweg
     datei = _zuweisung_datei(mandant)
     if isinstance(datei, dict) and datei.get("verarbeitung") == "keine":
@@ -271,6 +271,10 @@ async def mandant_weg(mandant: str, dienst: str, mensch: Optional[str]) -> Manda
         raise _mandant_fehler(503, "verarbeitung_keine_ki", mandant, hint="Der Mandant hat 'keine KI' gewaehlt.")
     w = await dienstweg.aufloesen(mandant, dienst, mensch)     # 403/503 mit Grund
     ort = {"weg": w.weg, "anbieter": w.anbieter, "quelle": w.quelle, "dienst": dienst}
+    if w.weg == "pool":
+        # Mandant im Pool des Kontoregisters (edera, p3; Cloud 27.11.): es gilt die
+        # Einstellung der Instanz (KI_VERARBEITUNG), also die Abos des Betreibers.
+        return None
     if w.weg != "api":
         raise _mandant_fehler(503, "weg_nicht_auf_dem_kern", mandant, **ort,
                               hint="Abo- und lokale Wege laufen auf den Rechnern des Mandanten "
