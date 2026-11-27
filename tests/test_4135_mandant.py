@@ -580,3 +580,53 @@ def test_ansicht_betreiber_mit_kaputter_instanz_konfig(client, rechte, monkeypat
 
 def test_ansicht_kunde_mit_zuweisung_traegt_betreiber_false(client, rechte):
     assert _put(client, "Bearer admin-lesser", body={"verarbeitung": "keine"}).json()["betreiber"] is False
+
+
+# --- P3 27.11.: Auf der Kundeninstanz ist ihr eigener Mandant der Betreiber -----------
+
+def test_eigener_mandant_der_instanz_bekommt_sein_urteil(client, monkeypatch, umgebung):
+    """Regression P3: BETREIBER_MANDANT fehlte, jedes Urteil der Instanz lief in 503."""
+    from ai.services import jev_service as js
+    gesehen = []
+
+    async def jev(*a, **kw):
+        gesehen.append(1)
+        return 200, {"model": "jev-1", "answers": {"q": {"noul": 0.9}}, "usage": {}}, {}
+    monkeypatch.setattr(js, "aufrufen", jev)
+    monkeypatch.setenv("TYPESAFE_API_KEY", "ts-instanz")
+    monkeypatch.setenv("JEV_USAGE_DIR", str(umgebung / "jev"))
+    r = client.post("/ai/jev", json=JEV_RUMPF, headers={"Authorization": "Bearer lesser"})
+    assert r.status_code == 503 and r.json()["detail"]["error"] == "urteil_nicht_zugewiesen"
+    assert r.json()["detail"]["betreiber"] == "arkturian" and gesehen == []
+    monkeypatch.setenv(v.BETREIBER_ENV, "lesser")
+    r = client.post("/ai/jev", json=JEV_RUMPF, headers={"Authorization": "Bearer lesser"})
+    assert r.status_code == 200, r.text
+    assert gesehen == [1]
+
+
+def test_urteil_stand_ohne_modellaufruf(client, urteil_wege, monkeypatch):
+    monkeypatch.setenv("API_ACCESS_KEY", "instanz-schluessel")
+    monkeypatch.setenv("TYPESAFE_API_KEY", "ts-instanz")
+    k = {"X-API-KEY": "instanz-schluessel"}
+    assert client.get("/ai/urteil/stand").status_code == 401
+    d = client.get("/ai/urteil/stand?mandant=lesser", headers=k).json()
+    assert d["zugelassen"] is False and d["fehler"] == "urteil_nicht_zugewiesen"
+    assert d["betreiber"] == {"mandant": "arkturian", "quelle": "vorgabe"}
+    assert d["schluessel"] == {"typesafe": True, "openai": True} and d["engine"] == "jev"
+    monkeypatch.setenv(v.BETREIBER_ENV, "lesser")
+    d = client.get("/ai/urteil/stand?mandant=lesser", headers=k).json()
+    assert d["zugelassen"] is True and "fehler" not in d
+    assert d["betreiber"] == {"mandant": "lesser", "quelle": "BETREIBER_MANDANT"}
+    assert client.get("/ai/urteil/stand", headers=k).json()["mandant"] == "lesser"
+    assert client.get("/ai/urteil/stand?mandant=P3!", headers=k).status_code == 422
+
+
+def test_verarbeitung_stand_nennt_den_eigenen_mandanten(client, monkeypatch):
+    monkeypatch.setenv("API_ACCESS_KEY", "instanz-schluessel")
+    k = {"X-API-KEY": "instanz-schluessel"}
+    assert client.get("/ai/verarbeitung/stand", headers=k).json()["betreiber"] == {
+        "mandant": "arkturian", "quelle": "vorgabe"}
+    monkeypatch.setenv(v.BETREIBER_ENV, "p3")
+    assert client.get("/ai/verarbeitung/stand", headers=k).json()["betreiber"]["mandant"] == "p3"
+    monkeypatch.delenv(v.ENV)
+    assert client.get("/ai/verarbeitung/stand", headers=k).json()["betreiber"]["mandant"] == "p3"

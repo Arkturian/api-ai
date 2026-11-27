@@ -200,23 +200,26 @@ def test_budget_obergrenze(client, auf, monkeypatch):
 
 
 def test_stand_nur_mit_schluessel(client, monkeypatch):
+    monkeypatch.delenv(v.BETREIBER_ENV, raising=False)
     monkeypatch.setenv(v.ENV, '{"anbieter": "openai"}')
     assert client.get("/ai/verarbeitung/stand").status_code == 401
     r = client.get("/ai/verarbeitung/stand", headers={"X-API-KEY": SCHLUESSEL})
     assert r.status_code == 200
     assert r.json() == {"konfiguriert": True, "gueltig": True, "anbieter": "openai", "modell": None,
-                        "modell_aus_konfig": False,
+                        "modell_aus_konfig": False, "betreiber": {"mandant": "arkturian", "quelle": "vorgabe"},
                         "openai": {"schluessel": False, "tagesgrenze_usd": None}}
 
 
 @pytest.mark.parametrize("wert,erwartet", [
-    (None, {"konfiguriert": False, "gueltig": False, "fehler": "verarbeitung_nicht_konfiguriert", "grund": None}),
+    (None, {"konfiguriert": False, "gueltig": False, "fehler": "verarbeitung_nicht_konfiguriert", "grund": None,
+            "betreiber": {"mandant": "arkturian", "quelle": "vorgabe"}}),
     ("hydrogen", {"konfiguriert": True, "gueltig": True, "anbieter": "hydrogen",
-                  "modell": "gemini-4-hydrogen-low", "modell_aus_konfig": False}),
+                  "modell": "gemini-4-hydrogen-low", "modell_aus_konfig": False, "betreiber": {"mandant": "arkturian", "quelle": "vorgabe"}}),
     ("quatsch", {"konfiguriert": True, "gueltig": False, "fehler": "verarbeitung_konfig_ungueltig",
-                 "grund": "anbieter_unbekannt"}),
+                 "grund": "anbieter_unbekannt", "betreiber": {"mandant": "arkturian", "quelle": "vorgabe"}}),
 ])
 def test_stand_werte(monkeypatch, wert, erwartet):
+    monkeypatch.delenv(v.BETREIBER_ENV, raising=False)
     if wert:
         monkeypatch.setenv(v.ENV, wert)
     assert v.stand() == erwartet

@@ -24,12 +24,15 @@ DeepSeek: Ein bezahlter Weg laeuft nur, wenn die Instanz ihn ausdruecklich nennt
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 from dataclasses import dataclass
 from typing import Optional
 
 from fastapi import HTTPException
+
+logger = logging.getLogger("api-ai.verarbeitung")
 
 ENV = "KI_VERARBEITUNG"
 
@@ -122,10 +125,11 @@ def stand() -> dict:
         kf = konfig()
     except HTTPException as e:
         return {"konfiguriert": bool(roh), "gueltig": False,
-                "fehler": e.detail.get("error"), "grund": e.detail.get("grund")}
+                "fehler": e.detail.get("error"), "grund": e.detail.get("grund"), "betreiber": betreiber_stand()}
     weg, vorgabe = ANBIETER[kf.anbieter]
     out = {"konfiguriert": True, "gueltig": True, "anbieter": kf.anbieter,
-           "modell": kf.modell or vorgabe, "modell_aus_konfig": kf.modell is not None}
+           "modell": kf.modell or vorgabe, "modell_aus_konfig": kf.modell is not None,
+           "betreiber": betreiber_stand()}
     if kf.anbieter == "openai":
         out["openai"] = {"schluessel": ot.schluessel() is not None, "tagesgrenze_usd": ot.grenze_usd()}
     elif kf.anbieter == "kette":
@@ -151,7 +155,16 @@ _VERWEIS = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 
 
 def betreiber() -> str:
+    """Mandant, dem die Abos und Schluessel DIESER api-ai gehoeren. Auf dem Kern arkturian
+    (Vorgabe), auf einer Kundeninstanz ihr eigener Mandant: BETREIBER_MANDANT=<TENANT_NAME>
+    setzt der Rollout (P3 27.11.: ohne den Wert lief jedes Urteil der Instanz in 503)."""
     return (os.getenv(BETREIBER_ENV) or "arkturian").strip() or "arkturian"
+
+
+def betreiber_stand() -> dict:
+    """Fuer die Wirkungspruefung am Ziel: welcher Mandant gilt hier als eigener, und woher."""
+    gesetzt = bool((os.getenv(BETREIBER_ENV) or "").strip())
+    return {"mandant": betreiber(), "quelle": BETREIBER_ENV if gesetzt else "vorgabe"}
 
 
 def jwt_pflicht() -> str:
@@ -291,25 +304,33 @@ async def mandant_weg(mandant: str, dienst: str, mensch: Optional[str]) -> Optio
                          tag_usd=tag, monat_usd=monat)
 
 
-def urteil_pruefen() -> None:
+def urteil_sperre(mandant: Optional[str]) -> Optional[HTTPException]:
     """#4135 (A1.4, erster Teil): Urteile (/ai/jev, /ai/decisions) eines Kunden-Mandanten
-    laufen nie ueber die Schluessel des Betreibers (TypeSafe, OpenAI). Ohne Zuweisung oder
-    mit `urteil: keine` -> 503; `urteil: openai` (Decisions mit dem Schluessel des Kunden)
-    folgt, bis dahin ebenfalls 503. Betreiber und Aufrufe ohne geprueftes JWT: unveraendert."""
-    from ai.services import aufruf
-    mandant = aufruf.mandant()
+    laufen nie ueber die Schluessel des Betreibers (TypeSafe, OpenAI). None = erlaubt
+    (Betreiber bzw. eigener Mandant der Instanz, oder kein geprueftes JWT). Sonst 503:
+    ohne Zuweisung, mit `urteil: keine`, und `urteil: openai` (Schluessel des Kunden folgt)."""
     if mandant is None or mandant == betreiber():
-        return
+        return None
     p = _mandanten_dir() / f"{mandant}.json"
     try:
         d = json.loads(p.read_text(encoding="utf-8"))
     except FileNotFoundError:
-        raise _mandant_fehler(503, "urteil_nicht_zugewiesen", mandant,
-                              hint="Fuer diesen Mandanten ist kein Urteils-Konto zugewiesen.") from None
+        return _mandant_fehler(503, "urteil_nicht_zugewiesen", mandant, betreiber=betreiber(),
+                               hint="Fuer diesen Mandanten ist kein Urteils-Konto zugewiesen. Ist das der "
+                                    "eigene Mandant dieser Instanz, fehlt BETREIBER_MANDANT in der api-ai.")
     except (OSError, ValueError):
-        raise _mandant_fehler(503, "urteil_zuweisung_unlesbar", mandant) from None
+        return _mandant_fehler(503, "urteil_zuweisung_unlesbar", mandant)
     if not isinstance(d, dict) or d.get("urteil") != "openai":
-        raise _mandant_fehler(503, "urteil_keine", mandant, hint="Der Mandant hat fuer Urteile 'keine' gewaehlt.")
-    raise _mandant_fehler(503, "urteil_konto_folgt", mandant,
-                          hint="Urteile mit dem Schluessel des Mandanten kommen mit #4135 A1.4. "
-                               "Es laeuft kein Schluessel des Betreibers.")
+        return _mandant_fehler(503, "urteil_keine", mandant, hint="Der Mandant hat fuer Urteile 'keine' gewaehlt.")
+    return _mandant_fehler(503, "urteil_konto_folgt", mandant,
+                           hint="Urteile mit dem Schluessel des Mandanten kommen mit #4135 A1.4. "
+                                "Es laeuft kein Schluessel des Betreibers.")
+
+
+def urteil_pruefen() -> None:
+    """Wirft die Sperre aus urteil_sperre() fuer den Mandanten des laufenden Aufrufs."""
+    from ai.services import aufruf
+    e = urteil_sperre(aufruf.mandant())
+    if e is not None:
+        logger.warning("urteil gesperrt: mandant=%s %s", e.detail.get("mandant"), e.detail.get("error"))
+        raise e

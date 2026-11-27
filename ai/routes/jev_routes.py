@@ -7,9 +7,10 @@ import os
 import time
 from typing import Any, Dict, Optional, Union
 
-from fastapi import APIRouter, Header, HTTPException, Query
+from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from pydantic import BaseModel, Field
 
+from ai.auth_guard import betreiber_oder_instanz as _betreiber_oder_instanz
 from ai.services import jev_service as s
 
 logger = logging.getLogger(__name__)
@@ -61,6 +62,25 @@ def _jwt_sub_geprueft(authorization: Optional[str]) -> Optional[str]:
         return None
     sub = str(claims.get("sub") or "").strip()
     return sub[:64] or None
+
+
+@router.get("/urteil/stand", dependencies=[Depends(_betreiber_oder_instanz)])
+async def urteil_stand(mandant: Optional[str] = Query(default=None, pattern="^[a-z0-9][a-z0-9_-]{0,63}$",
+                                                      description="Mandant aus dem JWT der Aufrufer (z. B. p3); "
+                                                                  "ohne Angabe der eigene Mandant der Instanz.")):
+    """Kommt ein Urteil dieses Mandanten durch? Dieselbe Pruefung wie /ai/jev und /ai/decisions
+    (urteil_sperre), ohne Modellaufruf und ohne Kosten. Fuer die Wirkungspruefung im Rollout."""
+    from ai.services import decisions_service as _ds
+    from ai.services import verarbeitung as _v
+    b = _v.betreiber_stand()
+    m = mandant or b["mandant"]
+    e = _v.urteil_sperre(m)
+    engine = (os.getenv("JEV_DEFAULT_ENGINE") or "jev").strip().lower()
+    out = {"mandant": m, "betreiber": b, "zugelassen": e is None, "engine": engine,
+           "schluessel": {"typesafe": bool(s.schluessel()), "openai": bool(_ds.schluessel())}}
+    if e is not None:
+        out["fehler"] = e.detail.get("error")
+    return out
 
 
 @router.post("/jev")
