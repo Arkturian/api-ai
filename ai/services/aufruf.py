@@ -24,6 +24,13 @@ def mandant() -> Optional[str]:
     return t if isinstance(t, str) and _MANDANT_RE.fullmatch(t) else None
 
 
+def jwt_typ() -> Optional[str]:
+    """`type` des geprueften JWT (service, agent, user), sonst None. 6586/I5: Nur ein
+    Dienst-JWT darf einen Menschen (X-Auftrag-Mensch) und einen Dienst (X-Dienst) nennen."""
+    t = (KONTEXT.get() or {}).get("jwt_typ")
+    return t if isinstance(t, str) and t else None
+
+
 def herkunft_kopf(tenant: Optional[str] = None) -> Dict[str, str]:
     """#4132: Kopf fuer Storage-Uploads im Auftrag eines Agenten oder Menschen.
 

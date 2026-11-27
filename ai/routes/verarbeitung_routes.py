@@ -45,7 +45,25 @@ async def _openai(body: VerarbeitungRumpf, system: Optional[str], modell: Option
     return await t._openai_einmal(p, modell)
 
 
-async def _kunde(body: "VerarbeitungRumpf", mk: "v.MandantKonfig", aufrufer: str) -> dict:
+def _dienst_und_mensch(x_dienst: Optional[str], x_mensch: Optional[str], jwt_typ: Optional[str]):
+    """6586/I5 (Vertrag mit Conversation, I6): X-Dienst und X-Auftrag-Mensch nur von einem
+    geprueften Dienst-JWT; sonst koennte sich ein Agent das Abo eines anderen Menschen holen."""
+    from ai.services import dienstweg
+    d_roh = (x_dienst or "").strip().lower()
+    m_roh = (x_mensch or "").strip()
+    if (d_roh or m_roh) and jwt_typ != "service":
+        raise HTTPException(status_code=403, detail={
+            "error": "mensch_nur_fuer_dienste",
+            "hint": "X-Dienst und X-Auftrag-Mensch gelten nur mit einem Dienst-JWT (type=service)."})
+    dienst = d_roh or "prompt_agent"
+    if dienst not in v.VERARBEITUNG_DIENSTE:
+        raise HTTPException(status_code=422, detail={"error": "dienst_ungueltig",
+                                                     "erlaubt": list(v.VERARBEITUNG_DIENSTE)})
+    return dienst, dienstweg.mensch_pruefen(m_roh)
+
+
+async def _kunde(body: "VerarbeitungRumpf", mk: "v.MandantKonfig", aufrufer: str,
+                 dienst: Optional[str] = None, mensch: bool = False) -> dict:
     """#4135 A1.3: Schluesselweg eines Kunden-Mandanten. Schluessel je Aufruf aus dem
     Tresor (Zweck verarbeitung), Tages- und Monatsdeckel des Mandanten, eigene Zaehler.
     Jeder Fehler endet hier (503/429/502) -- kein anderer Anbieter, kein Kern-Schluessel."""
@@ -72,7 +90,8 @@ async def _kunde(body: "VerarbeitungRumpf", mk: "v.MandantKonfig", aufrufer: str
             raise HTTPException(status_code=502, detail={
                 "error": "antwort_kein_json", "grund": str(e), "anbieter": "openai", "weg": "openai",
                 "modell": modell, "text": text[:2000]}) from None
-    logger.info("verarbeitung: caller=%s mandant=%s anbieter=openai(kunde) model=%s", aufrufer, mk.mandant, modell)
+    logger.info("verarbeitung: caller=%s mandant=%s dienst=%s mensch=%s anbieter=openai(kunde) model=%s",
+                aufrufer, mk.mandant, dienst or "-", "ja" if mensch else "nein", modell)
     return antwort
 
 
@@ -86,12 +105,15 @@ async def verarbeitung_stand():
 @router.post("/verarbeitung")
 async def verarbeitung_endpoint(body: VerarbeitungRumpf,
                                 authorization: Optional[str] = Header(default=None),
-                                x_agent_name: Optional[str] = Header(default=None, alias="X-Agent-Name")):
+                                x_agent_name: Optional[str] = Header(default=None, alias="X-Agent-Name"),
+                                x_dienst: Optional[str] = Header(default=None, alias="X-Dienst"),
+                                x_auftrag_mensch: Optional[str] = Header(default=None, alias="X-Auftrag-Mensch")):
     aufrufer = kr._aufrufer(authorization, x_agent_name)
     # #4135 (Plan 6567 A1): Mandant NUR aus dem geprueften JWT (Middleware).
     from ai.services import aufruf
     mandant = aufruf.mandant()
     try:
+        dienst, mensch = _dienst_und_mensch(x_dienst, x_auftrag_mensch, aufruf.jwt_typ())
         if mandant is None:
             if v.jwt_pflicht() == "an":
                 raise HTTPException(status_code=401, detail={
@@ -100,9 +122,15 @@ async def verarbeitung_endpoint(body: VerarbeitungRumpf,
             logger.warning("verarbeitung OHNE JWT caller=%s (JWT-Pflicht: beobachten, Kern-Einstellung)", aufrufer)
             kf = v.konfig()
         elif mandant != v.betreiber():
-            mk = v.mandant_konfig(mandant)          # 503 ohne/ungueltige Zuweisung, "keine"
-            return await _kunde(body, mk, aufrufer)
+            # 6586/I5: Weg aus dem Dienstweg (Mensch, sonst Mandant), Deckel des Mandanten.
+            mk = await v.mandant_weg(mandant, dienst, mensch)      # 403/503 mit Grund
+            return await _kunde(body, mk, aufrufer, dienst=dienst, mensch=mensch is not None)
         else:
+            if x_dienst or mensch:
+                # Betreiber: ein Abo-Konto je Mensch kann der Kern noch nicht ausfuehren;
+                # es gilt KI_VERARBEITUNG. Nur vermerken, die Adresse nie ins Journal.
+                logger.info("verarbeitung: betreiber dienst=%s mensch=%s -> KI_VERARBEITUNG", dienst,
+                            "ja" if mensch else "nein")
             kf = v.konfig()
     except HTTPException as e:
         d = e.detail if isinstance(e.detail, dict) else {}

@@ -234,11 +234,21 @@ async def _aufrufer_protokoll(request, call_next):
                       or (request.client.host if request.client else "?"))
             quelle = "ip"
         tenant = str((claims or {}).get("tenant") or "").strip() or None
-        marke = _kb.KONTEXT.set({"pfad": pfad, "aufrufer": caller, "quelle": quelle, "tenant": tenant})
+        jwt_typ = str((claims or {}).get("type") or "").strip() or None
+        marke = _kb.KONTEXT.set({"pfad": pfad, "aufrufer": caller, "quelle": quelle, "tenant": tenant,
+                                 "jwt_typ": jwt_typ})
     except Exception as e:
         logging.getLogger("api-ai.aufrufer").warning("Aufrufer vorab: %s", type(e).__name__)
     try:
-        antwort = await call_next(request)
+        # 6586/I5: Kunden-Mandanten nie ueber Abos oder Schluessel des Betreibers
+        # (ai/services/mandant_wege.py, MANDANT_WEGE beobachten|an|aus).
+        sperre = None
+        if marke is not None:
+            from ai.services import aufruf as _af
+            from ai.services import mandant_wege as _mw
+            sperre = await _mw.pruefen(pfad, _af.mandant(), _af.jwt_typ(),
+                                       request.headers.get("x-auftrag-mensch"), caller)
+        antwort = sperre if sperre is not None else await call_next(request)
     finally:
         if marke is not None:
             try:

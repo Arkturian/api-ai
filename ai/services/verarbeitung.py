@@ -223,6 +223,70 @@ def mandant_konfig(mandant: str) -> MandantKonfig:
                          verweis=verweis, tag_usd=tag, monat_usd=monat)
 
 
+# --- 6586/I5: Weg je Aufrufer aus dem Zugangsregister -------------------------
+#
+# Den Weg (Konto, Modell, Tresor-Verweis) eines Kunden-Mandanten bestimmt der
+# Dienstweg der cloud-api (`conversation` bzw. `prompt_agent`, erst der Mensch,
+# sonst die Vorgabe des Mandanten). Bei uns bleibt nur der Deckel des Mandanten
+# (Datei aus PUT /ai/mandanten/{t}/ki). Die alte `verarbeitung` dort zaehlt nicht mehr.
+
+#: Dienste, die /ai/verarbeitung bedient (Kopf X-Dienst); ohne Kopf prompt_agent (issue-api).
+VERARBEITUNG_DIENSTE = ("prompt_agent", "conversation")
+
+
+def _zuweisung_datei(mandant: str) -> Optional[dict]:
+    p = _mandanten_dir() / f"{mandant}.json"
+    try:
+        d = json.loads(p.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError):
+        raise _mandant_fehler(503, "deckel_fehlt", mandant, grund="zuweisung_unlesbar") from None
+    return d if isinstance(d, dict) else None
+
+
+def deckel(mandant: str, d: Optional[dict] = None) -> tuple:
+    """(tag_usd, monat_usd) des Mandanten. Ohne gueltigen Deckel laeuft kein Schluessel: 503."""
+    if d is None:
+        d = _zuweisung_datei(mandant)
+    dk = d.get("deckel") if isinstance(d, dict) and isinstance(d.get("deckel"), dict) else None
+    try:
+        tag, monat = float(dk["tag_usd"]), float(dk["monat_usd"])
+    except (TypeError, KeyError, ValueError):
+        raise _mandant_fehler(503, "deckel_fehlt", mandant,
+                              hint="Ohne Tages- und Monatsdeckel des Mandanten laeuft kein Schluessel.") from None
+    if not (0 < tag <= 1000 and 0 < monat <= 10000):
+        raise _mandant_fehler(503, "deckel_fehlt", mandant, grund="deckel_ungueltig")
+    return tag, monat
+
+
+async def mandant_weg(mandant: str, dienst: str, mensch: Optional[str]) -> MandantKonfig:
+    """Schluesselweg eines Kunden-Mandanten aus dem Dienstweg. Auf dem Kern nur `weg: api`
+    mit einem Anbieter aus KUNDEN_ANBIETER und Tresor-Verweis; alles andere 503 mit Grund,
+    nie ein Weg des Betreibers."""
+    from ai.services import dienstweg
+    datei = _zuweisung_datei(mandant)
+    if isinstance(datei, dict) and datei.get("verarbeitung") == "keine":
+        # Die ausdrueckliche Wahl des Mandanten "keine KI" gilt weiter, vor jedem Dienstweg.
+        raise _mandant_fehler(503, "verarbeitung_keine_ki", mandant, hint="Der Mandant hat 'keine KI' gewaehlt.")
+    w = await dienstweg.aufloesen(mandant, dienst, mensch)     # 403/503 mit Grund
+    ort = {"weg": w.weg, "anbieter": w.anbieter, "quelle": w.quelle, "dienst": dienst}
+    if w.weg != "api":
+        raise _mandant_fehler(503, "weg_nicht_auf_dem_kern", mandant, **ort,
+                              hint="Abo- und lokale Wege laufen auf den Rechnern des Mandanten "
+                                   "(Knotenweg folgt). Es laeuft kein Weg des Betreibers.")
+    if w.anbieter not in KUNDEN_ANBIETER:
+        raise _mandant_fehler(503, "anbieter_nicht_unterstuetzt", mandant, **ort, erlaubt=list(KUNDEN_ANBIETER))
+    if not (w.tresor_verweis and _VERWEIS.match(w.tresor_verweis)):
+        raise _mandant_fehler(503, "konto_nicht_verfuegbar", mandant, grund="verweis_fehlt", **ort)
+    modell = (w.modell or "").strip() or None
+    if modell is not None and not _MODELL.match(modell):
+        raise _mandant_fehler(503, "konto_nicht_verfuegbar", mandant, grund="modell_ungueltig", **ort)
+    tag, monat = deckel(mandant, datei)
+    return MandantKonfig(mandant=mandant, anbieter=w.anbieter, modell=modell, verweis=w.tresor_verweis,
+                         tag_usd=tag, monat_usd=monat)
+
+
 def urteil_pruefen() -> None:
     """#4135 (A1.4, erster Teil): Urteile (/ai/jev, /ai/decisions) eines Kunden-Mandanten
     laufen nie ueber die Schluessel des Betreibers (TypeSafe, OpenAI). Ohne Zuweisung oder
