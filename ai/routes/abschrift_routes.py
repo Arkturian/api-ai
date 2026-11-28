@@ -210,6 +210,11 @@ def _referenzen_aus(mp3: bytes, segmente: list) -> tuple[list, list]:
     return namen, refs
 
 
+def _roh_pfad(rid: str) -> Path:
+    from ai.services import narrate_jobs as nj
+    return nj.jobs_dir() / f"{rid}.roh.json"
+
+
 def _peaks_pfad(rid: str) -> Path:
     from ai.services import narrate_jobs as nj
     return nj.jobs_dir() / f"{rid}.peaks.bin"
@@ -260,6 +265,13 @@ async def _lauf(rid: str, req: AbschriftAnfrage, url: str) -> None:
                 teile_d.append({"von_ms": von, "bis_ms": bis, "segments": segs})
                 nj.stufe(rid, "anbieter")          # hält updated_at frisch
             nj.stufe(rid, "speichern")
+            # Rohantworten behalten: ohne sie ließ sich die Sprecherzuordnung
+            # des Langtests (28.11.) nicht mehr nachvollziehen.
+            try:
+                _roh_pfad(rid).write_text(json.dumps({"woerter": teile_w, "sprecher": teile_d},
+                                                     ensure_ascii=False), encoding="utf-8")
+            except Exception:
+                logger.warning("abschrift rohdaten rid=%s nicht geschrieben", rid)
 
             woerter = al.woerter_zusammenfuehren(teile_w)
             segmente = al.segmente_aus_diarize(teile_d)

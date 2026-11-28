@@ -115,18 +115,46 @@ def segmente_aus_diarize(teile: list[dict]) -> list[dict]:
     """teile: [{"von_ms", "bis_ms", "segments": [{"speaker", "start", "end"} …]}]
     → absolute Segmente [{"sprecher", "von_ms", "bis_ms"}], an den Nähten wie
     bei den Wörtern begrenzt."""
+    # Etiketten gelten nur innerhalb eines Stücks: dasselbe „A" kann im
+    # nächsten Stück ein anderer Mensch sein, und ein Sprecher bekommt dort
+    # oft ein neues Etikett (Langtest 28.11.: ein Erzähler, drei Sprecher).
+    # Deshalb je Stück eigene Etiketten und Abgleich über die Überlappung.
+    roh: list[list[dict]] = []
+    for k, t in enumerate(teile):
+        roh.append([{"sprecher": f"{k}:{s.get('speaker') or '?'}",
+                     "von_ms": t["von_ms"] + _ms(s["start"]), "bis_ms": t["von_ms"] + _ms(s["end"])}
+                    for s in t.get("segments") or []])
+    zuordnung: dict[str, str] = {}
+    for k in range(len(teile)):
+        if k == 0:
+            for s in roh[0]:
+                zuordnung.setdefault(s["sprecher"], s["sprecher"])
+            continue
+        lo, hi = teile[k]["von_ms"], teile[k - 1]["bis_ms"]
+        deckung: dict[tuple, int] = {}
+        for neu in roh[k]:
+            for alt in roh[k - 1]:
+                von, bis = max(lo, neu["von_ms"], alt["von_ms"]), min(hi, neu["bis_ms"], alt["bis_ms"])
+                if bis > von:
+                    schl = (neu["sprecher"], zuordnung.get(alt["sprecher"], alt["sprecher"]))
+                    deckung[schl] = deckung.get(schl, 0) + (bis - von)
+        vergeben: set = set()
+        for (neu, alt), _d in sorted(deckung.items(), key=lambda x: -x[1]):
+            if neu not in zuordnung and alt not in vergeben:
+                zuordnung[neu] = alt
+                vergeben.add(alt)
+        for s in roh[k]:
+            zuordnung.setdefault(s["sprecher"], s["sprecher"])
     out = []
     for k, t in enumerate(teile):
         links = 0 if k == 0 else (teile[k - 1]["bis_ms"] + t["von_ms"]) // 2
         rechts = None if k == len(teile) - 1 else (t["bis_ms"] + teile[k + 1]["von_ms"]) // 2
-        for s in t.get("segments") or []:
-            a = t["von_ms"] + _ms(s["start"])
-            b = t["von_ms"] + _ms(s["end"])
-            a = max(a, links)
+        for s in roh[k]:
+            a, b = max(s["von_ms"], links), s["bis_ms"]
             if rechts is not None:
                 b = min(b, rechts)
             if b > a:
-                out.append({"sprecher": str(s.get("speaker") or "?"), "von_ms": a, "bis_ms": b})
+                out.append({"sprecher": zuordnung[s["sprecher"]], "von_ms": a, "bis_ms": b})
     out.sort(key=lambda s: (s["von_ms"], s["bis_ms"]))
     return out
 
@@ -188,7 +216,7 @@ def sprecher_zuordnen(woerter: list[dict], segmente: list[dict],
         if w["ende_ms"] == w["start_ms"]:
             unsicher.append({"von_ms": w["start_ms"], "bis_ms": w["ende_ms"], "grund": "zeit_unsicher"})
     unsicher.sort(key=lambda u: (u["von_ms"], u["bis_ms"]))
-    sprecher = [{"id": sid, "name": namen.get(etikett)} for etikett, sid in ids.items()]
+    sprecher = [{"id": sid, "name": namen.get(etikett.split(":", 1)[-1])} for etikett, sid in ids.items()]
     return woerter, sprecher, unsicher
 
 

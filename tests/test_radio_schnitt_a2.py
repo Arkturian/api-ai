@@ -223,3 +223,32 @@ def test_lauf_ende_zu_ende(tmp_path, monkeypatch):
     assert e["abschrift_fp"] == "sha256:4e812defa248a72b18f00643f23082127e595d1e28bf4e73add6d6fc5369136a"
     assert [w["sprecher"] for w in e["woerter"]] == ["S1", "S1"]
     assert ar._peaks_pfad(rid).stat().st_size == 300
+
+
+def test_sprecher_ueber_stuecke_abgeglichen():
+    # Langtest 28.11.: ein Erzähler bekam pro Stück ein neues Etikett (S1, dann S3).
+    # Stück 0: A erzählt bis 80 s, B (Gast) bis 100 s. Stück 1 (ab 70 s) nennt
+    # dieselben Menschen „X" (Erzähler) und „Y" (Gast); beide kommen in der Überlappung vor.
+    teile = [
+        {"von_ms": 0, "bis_ms": 100_000, "segments": [
+            {"speaker": "A", "start": 0.0, "end": 80.0},
+            {"speaker": "B", "start": 80.0, "end": 100.0}]},
+        {"von_ms": 70_000, "bis_ms": 170_000, "segments": [
+            {"speaker": "X", "start": 0.0, "end": 10.0},
+            {"speaker": "Y", "start": 10.0, "end": 30.0},
+            {"speaker": "X", "start": 30.0, "end": 100.0}]},
+    ]
+    seg = al.segmente_aus_diarize(teile)
+    w = al.woerter_zusammenfuehren([{"von_ms": 0, "bis_ms": 170_000, "words": [
+        _w("eins", 10.0, 10.5), _w("gast", 90.0, 90.5), _w("weiter", 150.0, 150.5)]}])
+    w, sprecher, _ = al.sprecher_zuordnen(w, seg)
+    assert [s["id"] for s in sprecher] == ["S1", "S2"]          # nur zwei Menschen
+    assert [x["sprecher"] for x in w] == ["S1", "S2", "S1"]
+
+
+def test_sprechername_ueber_praefix():
+    seg = al.segmente_aus_diarize([{"von_ms": 0, "bis_ms": 10_000, "segments": [
+        {"speaker": "Sabrina", "start": 0.0, "end": 5.0}]}])
+    w = al.woerter_zusammenfuehren([{"von_ms": 0, "bis_ms": 10_000, "words": [_w("Hallo", 1.0, 1.5)]}])
+    _, sprecher, _ = al.sprecher_zuordnen(w, seg, {"Sabrina": "Sabrina"})
+    assert sprecher == [{"id": "S1", "name": "Sabrina"}]
