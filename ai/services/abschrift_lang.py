@@ -1,7 +1,7 @@
 """Abschrift langer Sendungen mit Wortankern und Wellenform.
 
 Projekt 32 „KI-Schnitt für Radiosendungen", Paket A2. Vertrag
-`radio-schnitt-v1` (Content-Beitrag 6630, bestätigt von Story-Codex am
+`radio-schnitt-v2` (Abschrift unverändert seit v1) (Content-Beitrag 6630, bestätigt von Story-Codex am
 28.11.2026, Stand v35). Was hier steht, folgt dem Vertrag wörtlich:
 
 - Wörter und Zeiten aus `whisper-1` (verbose_json, word), Sprecher aus
@@ -26,7 +26,7 @@ import os
 import unicodedata
 from typing import Iterable, Optional
 
-VERTRAG = "radio-schnitt-v1"
+VERTRAG = "radio-schnitt-v2"
 PEAKS_JE_SEKUNDE = 50
 
 # Sprechertrennung schafft höchstens 1400 s je Aufruf; Abstand zur Grenze.

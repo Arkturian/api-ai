@@ -217,7 +217,7 @@ def test_lauf_ende_zu_ende(tmp_path, monkeypatch):
     d = nj.lesen(rid)
     assert d["state"] == "done", d.get("error")
     e = d["result"]
-    assert e["vertrag"] == "radio-schnitt-v1"
+    assert e["vertrag"] == "radio-schnitt-v2"
     assert e["quelle"]["samples"] == 144000 and e["quelle"]["sample_rate"] == 48000 and e["quelle"]["kanaele"] == 2
     assert e["peaks"]["werte"] == 150
     assert e["abschrift_fp"] == "sha256:4e812defa248a72b18f00643f23082127e595d1e28bf4e73add6d6fc5369136a"

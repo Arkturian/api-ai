@@ -1,6 +1,6 @@
 """POST /ai/audio/abschrift — Abschrift langer Sendungen (Projekt 32, Paket A2).
 
-Vertrag `radio-schnitt-v1`, Content-Beitrag 6630 (bestätigt von Story-Codex,
+Vertrag `radio-schnitt-v2` (Abschrift unverändert seit v1), Content-Beitrag 6630 (bestätigt von Story-Codex,
 Stand v35), Abschnitt 1. Asynchron mit Pflicht-`request_id`:
 
 - gleiche `request_id`, gleicher fachlicher Rumpf → derselbe Job, keine
