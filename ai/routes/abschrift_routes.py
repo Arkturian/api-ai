@@ -412,3 +412,127 @@ async def abschrift_peaks(request_id: str, request: Request,
         raise HTTPException(status_code=404, detail={"error": "keine_peaks", "request_id": request_id})
     return Response(content=p.read_bytes(), media_type="application/octet-stream",
                     headers={"X-Peaks-Werte": str(len(p.read_bytes()) // 2)})
+
+
+# ── Vorschläge (Projekt 32, A3; Vertrag Abschnitt 2) ─────────────────────────
+
+KIND_V = "vorschlaege"
+GEBAUT = ("wiederholung", "pause")          # A4/A5 folgen: aeh, fuellwort, wiederholung_inhalt, abschweifung
+
+
+class VorschlaegeAnfrage(BaseModel):
+    request_id: str
+    abschrift_storage_id: int = Field(..., ge=1)
+    abschrift_fp: str = Field(..., pattern=r"^sha256:[0-9a-f]{64}$")
+    filter: dict = Field(default_factory=lambda: {"wiederholung": True, "pause": {"ab_ms": 800, "ziel_ms": 400}})
+    vorgaben: Optional[str] = Field(None, max_length=4000)
+
+
+def _abschrift_finden(storage_id: int) -> tuple[str, dict]:
+    """Die Abschrift liegt als Job auf diesem Dienst (samt Peaks). Andere Hosts
+    kennen sie nicht: 422 statt eines stillen Neuabschreibens."""
+    from ai.services import narrate_jobs as nj
+    for p in sorted(nj.jobs_dir().glob("*.json")):
+        try:
+            d = json.loads(p.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        r = d.get("result") or {}
+        if d.get("kind") == KIND and d.get("state") == "done" and r.get("abschrift_storage_id") == storage_id:
+            return d["request_id"], r
+    raise HTTPException(status_code=422, detail={"error": "abschrift_unbekannt", "abschrift_storage_id": storage_id,
+                                                 "hinweis": "Abschrift zuerst über POST /ai/audio/abschrift erstellen."})
+
+
+def _vorschlaege_pfad(rid: str) -> Path:
+    from ai.services import narrate_jobs as nj
+    return nj.jobs_dir() / f"{rid}.vorschlaege.json"
+
+
+@router.post("/audio/vorschlaege", status_code=202)
+async def vorschlaege_starten(req: VorschlaegeAnfrage, request: Request,
+                              authorization: Optional[str] = Header(None),
+                              x_api_key: Optional[str] = Header(None, alias="X-API-KEY")):
+    from ai.services import narrate_jobs as nj
+    from ai.services import vorschlaege as vs
+    wer = _aufrufer(request, authorization, x_api_key)
+    rid = req.request_id
+    if not nj.request_id_ok(rid):
+        raise HTTPException(status_code=422, detail={"error": "invalid_request_id"})
+    h = al.anfrage_hash(req.model_dump())
+    alt = nj.lesen(rid)
+    if alt:
+        if alt.get("kind") != KIND_V:
+            raise HTTPException(status_code=409, detail={"error": "request_id_gehoert_anderer_route", "request_id": rid})
+        if alt.get("payload_hash") != h:
+            raise HTTPException(status_code=409, detail={"error": "request_id_konflikt", "job_id": rid})
+        if alt.get("state") != "failed":
+            return JSONResponse(status_code=200, content={**_antwort(alt), "wiederholt": True})
+    a_rid, abschrift = _abschrift_finden(req.abschrift_storage_id)
+    if abschrift.get("abschrift_fp") != req.abschrift_fp:
+        raise HTTPException(status_code=422, detail={"error": "abschrift_veraltet", "erwartet": req.abschrift_fp,
+                                                     "gefunden": abschrift.get("abschrift_fp")})
+    try:
+        gewonnen = nj.reservieren(rid, h, kind=KIND_V, extra={"aufrufer": wer[:64]}) or \
+            nj.uebernehmen(rid, h, KIND_V, lambda a: a.get("state") == "failed" and a.get("payload_hash") == h)
+    except nj.ClaimConflict:
+        gewonnen = None
+    if not gewonnen:
+        d = nj.lesen(rid) or {"request_id": rid, "state": "running"}
+        return JSONResponse(status_code=200, content={**_antwort(d), "wiederholt": True})
+    try:
+        peaks = _peaks_pfad(a_rid).read_bytes()
+        liste = vs.erzeugen(abschrift, peaks, req.abschrift_storage_id, req.filter or {})
+        liste["filter"] = req.filter
+        liste["nicht_gebaut"] = sorted(k for k, v in (req.filter or {}).items() if v and k not in GEBAUT)
+        daten, fp = vs.datei_bytes(liste)
+        _vorschlaege_pfad(rid).write_bytes(daten)
+        sid, fehler = None, None
+        try:
+            from ai.clients.storage_client import save_file_and_record
+            o = await save_file_and_record(data=daten, original_filename=f"vorschlaege_{rid}.json",
+                                           context="radio-schnitt", is_public=False, private=True, analyze=False)
+            sid = o.id
+        except Exception as e:
+            fehler = type(e).__name__
+        ergebnis = {"vertrag": vs.VERTRAG, "vorschlaege_storage_id": sid, "vorschlaege_fp": fp,
+                    "abschrift_storage_id": req.abschrift_storage_id, "abschrift_fp": req.abschrift_fp,
+                    "anzahl": len(liste["eintraege"]), "nicht_gebaut": liste["nicht_gebaut"],
+                    "abruf": f"/ai/audio/vorschlaege/{rid}/datei"}
+        if fehler:
+            ergebnis["storage_fehler"] = fehler
+        nj.abschliessen(rid, ergebnis)
+    except HTTPException as e:
+        nj.scheitern(rid, e.status_code, e.detail)
+        raise
+    except Exception as e:
+        nj.scheitern(rid, 500, {"error": "vorschlaege_fehlgeschlagen", "grund": type(e).__name__})
+        logger.exception("vorschlaege rid=%s", rid)
+        raise HTTPException(status_code=500, detail={"error": "vorschlaege_fehlgeschlagen"})
+    logger.info("vorschlaege rid=%s abschrift=%s eintraege=%d", rid, req.abschrift_storage_id, ergebnis["anzahl"])
+    return {**_antwort(nj.lesen(rid)), "wiederholt": False}
+
+
+@router.get("/audio/vorschlaege/{request_id}")
+async def vorschlaege_status(request_id: str, request: Request,
+                             authorization: Optional[str] = Header(None),
+                             x_api_key: Optional[str] = Header(None, alias="X-API-KEY")):
+    from ai.services import narrate_jobs as nj
+    _aufrufer(request, authorization, x_api_key)
+    d = nj.lesen(request_id) if nj.request_id_ok(request_id) else None
+    if not d or d.get("kind") != KIND_V:
+        raise HTTPException(status_code=404, detail={"error": "unbekannte_request_id", "request_id": request_id})
+    return _antwort(d)
+
+
+@router.get("/audio/vorschlaege/{request_id}/datei")
+async def vorschlaege_datei(request_id: str, request: Request,
+                            authorization: Optional[str] = Header(None),
+                            x_api_key: Optional[str] = Header(None, alias="X-API-KEY")):
+    from ai.services import narrate_jobs as nj
+    _aufrufer(request, authorization, x_api_key)
+    d = nj.lesen(request_id) if nj.request_id_ok(request_id) else None
+    p = _vorschlaege_pfad(request_id)
+    if not d or d.get("kind") != KIND_V or d.get("state") != "done" or not p.exists():
+        raise HTTPException(status_code=404, detail={"error": "keine_vorschlaege", "request_id": request_id})
+    return Response(content=p.read_bytes(), media_type="application/json")

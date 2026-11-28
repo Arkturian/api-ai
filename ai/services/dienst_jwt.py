@@ -69,6 +69,10 @@ def recht_fuer(methode: str, pfad: str) -> Optional[str]:
         return RECHT_TRANSCRIBE
     if methode == "GET" and pfad.startswith("/ai/audio/abschrift/"):
         return RECHT_TRANSCRIBE
+    if methode == "POST" and pfad == "/ai/audio/vorschlaege":
+        return RECHT_TRANSCRIBE
+    if methode == "GET" and pfad.startswith("/ai/audio/vorschlaege/"):
+        return RECHT_TRANSCRIBE
     if methode == "POST" and pfad == "/ai/chatgpt":
         return RECHT_CHATGPT
     if methode == "GET" and pfad.startswith("/ai/chatgpt/"):
