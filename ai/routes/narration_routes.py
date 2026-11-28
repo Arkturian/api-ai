@@ -276,6 +276,14 @@ async def narrate(req: NarrationRequest, api_key: str = Depends(get_api_key)):
                 if not neu:
                     raise HTTPException(status_code=409, detail={"error": "narration_in_progress", "request_id": rid,
                                         "retry_after_s": 5, "claim": "conflict"}, headers={"Retry-After": "5"})
+    # #4257: Tagesgrenze eines Dienst-JWT in Zeichen, vor dem Anbieter.
+    from ai.services import dienst_jwt as _dj
+    try:
+        _dj.narrate_buchen(len(req.text or ""))
+    except HTTPException as e:
+        if rid:
+            narrate_jobs.scheitern(rid, e.status_code, e.detail)
+        raise
     try:
         result = await service.generate(req)
         if rid:

@@ -8,6 +8,8 @@ bekommt fuer genau benannte Routen ein eigenes Recht, statt den geteilten
     POST /ai/chatgpt               -> `ai:chatgpt`
     GET  /ai/chatgpt/{request_id}  -> `ai:chatgpt`
     POST /ai/audio/abschrift       -> `ai:transcribe` (Projekt 32, A2)
+    POST /ai/realtime/token, /usage, /session/heartbeat, /session/end -> `ai:realtime` (#4257)
+    POST /ai/tts/narrate (+/preview), GET /ai/tts/narrate/...        -> `ai:tts:narrate` (#4257)
     GET  /ai/audio/abschrift/...   -> `ai:transcribe`
 
 Regeln (fail-closed):
@@ -48,12 +50,20 @@ logger = logging.getLogger("api-ai.dienst_jwt")
 
 RECHT_TRANSCRIBE = "ai:transcribe"
 RECHT_CHATGPT = "ai:chatgpt"
-DIENST_RECHTE = frozenset({RECHT_TRANSCRIBE, RECHT_CHATGPT})
+RECHT_REALTIME = "ai:realtime"          # #4257 (service:tschepp-voice-token)
+RECHT_NARRATE = "ai:tts:narrate"        # #4257 (service:tschepp-redaktion)
+DIENST_RECHTE = frozenset({RECHT_TRANSCRIBE, RECHT_CHATGPT, RECHT_REALTIME, RECHT_NARRATE})
 
 # Statische Geschwister von /ai/chatgpt/{request_id}, die keine Kennung sind.
 _CHATGPT_KEINE_KENNUNG = frozenset({"cost-status"})
 
-VORGABE_GRENZEN = {"transcribe_minuten": 120, "chatgpt_anfragen": 200}
+VORGABE_GRENZEN = {"transcribe_minuten": 120, "chatgpt_anfragen": 200,
+                   # #4257: Realtime je Dienst eigenes Budget (EUR/Tag, Parallel-Sitzungen),
+                   # Vertonung in ElevenLabs-Zeichen je Tag.
+                   "realtime_eur": 3.0, "realtime_parallel": 2, "narrate_zeichen": 3000}
+
+_REALTIME_ROUTEN = ("/ai/realtime/token", "/ai/realtime/usage",
+                    "/ai/realtime/session/heartbeat", "/ai/realtime/session/end")
 
 #: Geprueftes Ergebnis des laufenden Aufrufs ({"sub", "recht"}), fuer die Routen.
 AKTUELL: contextvars.ContextVar[Optional[dict]] = contextvars.ContextVar("dienst_jwt", default=None)
@@ -73,6 +83,12 @@ def recht_fuer(methode: str, pfad: str) -> Optional[str]:
         return RECHT_TRANSCRIBE
     if methode == "GET" and pfad.startswith("/ai/audio/vorschlaege/"):
         return RECHT_TRANSCRIBE
+    if methode == "POST" and pfad in _REALTIME_ROUTEN:
+        return RECHT_REALTIME
+    if methode == "POST" and pfad in ("/ai/tts/narrate", "/ai/tts/narrate/preview"):
+        return RECHT_NARRATE
+    if methode == "GET" and pfad.startswith("/ai/tts/narrate/"):
+        return RECHT_NARRATE
     if methode == "POST" and pfad == "/ai/chatgpt":
         return RECHT_CHATGPT
     if methode == "GET" and pfad.startswith("/ai/chatgpt/"):
@@ -238,6 +254,14 @@ def vor_aufruf(erg: dict, methode: str, pfad: str) -> None:
     """Grenze fuer chatgpt je Anfrage (POST), vor dem Rumpf. Statusabfragen zaehlen nicht."""
     if erg.get("recht") == RECHT_CHATGPT and (methode or "").upper() == "POST":
         buchen(erg["sub"], "chatgpt_anfragen", 1, grenzen(erg["sub"])["chatgpt_anfragen"])
+
+
+def narrate_buchen(zeichen: int) -> None:
+    """#4257: aus /ai/tts/narrate, VOR dem Anbieter. Kein Dienst-Aufruf: nichts."""
+    erg = AKTUELL.get()
+    if not erg or erg.get("recht") != RECHT_NARRATE:
+        return
+    buchen(erg["sub"], "narrate_zeichen", max(0, int(zeichen)), grenzen(erg["sub"])["narrate_zeichen"])
 
 
 def transcribe_buchen(dauer_sekunden: Optional[float]) -> None:

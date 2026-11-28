@@ -55,7 +55,7 @@ import uuid
 from typing import Annotated, Any, List, Optional
 
 import httpx
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Header, Path, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Header, Path, Request, UploadFile
 from pydantic import BaseModel, Field, WithJsonSchema
 
 from ..services.realtime_grant_verifier import (
@@ -81,6 +81,20 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
+def _dienst_grant(sub: str, scope: str) -> VerifiedGrant:
+    from ai.services import dienst_jwt as _dj
+    g = _dj.grenzen(sub)
+    jetzt = int(time.time())
+    if scope not in ("mint", "usage"):
+        raise HTTPException(status_code=403, detail={"error": "realtime_scope_missing"})
+    return VerifiedGrant(
+        sub=sub, tenant_id="arkturian", profile_id=f"dienst:{sub}", scopes=("mint", "usage"),
+        jti=f"dienst-{jetzt}", grant_id=f"dienst:{sub}", iat=jetzt, exp=jetzt + 300,
+        max_parallel_sessions=int(g["realtime_parallel"]), daily_budget_eur=float(g["realtime_eur"]),
+        monthly_budget_eur=None,
+    )
+
+
 def require_realtime_grant(scope: str):
     """FastAPI dependency factory: turn ``Authorization: Bearer <user-JWT>``
     into a ``VerifiedGrant`` carrying the right scope, or raise the
@@ -92,7 +106,14 @@ def require_realtime_grant(scope: str):
             ...
     """
 
-    async def _dep(authorization: Optional[str] = Header(None)) -> VerifiedGrant:
+    async def _dep(request: Request, authorization: Optional[str] = Header(None)) -> VerifiedGrant:
+        # #4257: Dienst-JWT mit `ai:realtime` (die Middleware hat Signatur,
+        # Recht, Mandant und Route geprueft). Kein Grant-Tausch bei auth-api:
+        # der Dienst bekommt ein eigenes Budget-Profil `dienst:<sub>` mit den
+        # Grenzen aus DIENST_TAGESGRENZEN, gebucht auf ihn selbst.
+        dienst = getattr(request.state, "dienst", None)
+        if dienst and dienst.get("recht") == "ai:realtime":
+            return _dienst_grant(dienst["sub"], scope)
         if not authorization or not authorization.lower().startswith("bearer "):
             raise HTTPException(
                 status_code=401,
