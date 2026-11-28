@@ -68,6 +68,7 @@ from ..services.realtime_grant_verifier import (
 )
 from ai.clients.storage_client import storage_api_key
 from ..services import realtime_budget_guard
+from ..services import dienst_jwt as _dienst_jwt  # #4257
 from ..services.realtime_identity import kurz_id
 from ..services import realtime_session_scope
 from ..services.realtime_budget_guard import (
@@ -82,8 +83,7 @@ router = APIRouter()
 
 
 def _dienst_grant(sub: str, scope: str) -> VerifiedGrant:
-    from ai.services import dienst_jwt as _dj
-    g = _dj.grenzen(sub)
+    g = _dienst_jwt.grenzen(sub)
     jetzt = int(time.time())
     if scope not in ("mint", "usage"):
         raise HTTPException(status_code=403, detail={"error": "realtime_scope_missing"})
