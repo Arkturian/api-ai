@@ -7,6 +7,8 @@ bekommt fuer genau benannte Routen ein eigenes Recht, statt den geteilten
     POST /ai/transcribe            -> `ai:transcribe`
     POST /ai/chatgpt               -> `ai:chatgpt`
     GET  /ai/chatgpt/{request_id}  -> `ai:chatgpt`
+    POST /ai/audio/abschrift       -> `ai:transcribe` (Projekt 32, A2)
+    GET  /ai/audio/abschrift/...   -> `ai:transcribe`
 
 Regeln (fail-closed):
 - Geprueft wird mit agentos_jwt (JWKS der auth-api, RS256, kid, Aussteller,
@@ -61,6 +63,11 @@ def recht_fuer(methode: str, pfad: str) -> Optional[str]:
     """Welches Recht braucht diese Route auf dem Dienst-Weg? None: keine Dienst-Route."""
     methode = (methode or "").upper()
     if methode == "POST" and pfad == "/ai/transcribe":
+        return RECHT_TRANSCRIBE
+    # Projekt 32 (A2): Abschrift langer Sendungen ist dieselbe bezahlte STT.
+    if methode == "POST" and pfad == "/ai/audio/abschrift":
+        return RECHT_TRANSCRIBE
+    if methode == "GET" and pfad.startswith("/ai/audio/abschrift/"):
         return RECHT_TRANSCRIBE
     if methode == "POST" and pfad == "/ai/chatgpt":
         return RECHT_CHATGPT

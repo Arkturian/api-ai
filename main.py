@@ -549,6 +549,8 @@ from ai.routes import extern_routes  # noqa: E402
 app.include_router(extern_routes.router, prefix="/ai", tags=["Extern (#3656)"])
 from ai.routes import audio_mix_routes  # noqa: E402
 app.include_router(audio_mix_routes.router, prefix="/ai", tags=["Audio Mix"])
+from ai.routes import abschrift_routes  # noqa: E402  (Projekt 32, A2)
+app.include_router(abschrift_routes.router, prefix="/ai", tags=["Abschrift Radio-Schnitt"])
 app.include_router(music_ai_routes.router, prefix="/ai", tags=["Music AI"])
 app.include_router(hunyuan3d_routes.router, prefix="/ai", tags=["Hunyuan 3D"])
 app.include_router(kling_routes.router, prefix="/ai", tags=["Kling Video"])
